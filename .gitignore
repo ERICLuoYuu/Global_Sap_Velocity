@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution/packaging
+dist/
+build/
+*.egg-info/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# Data and outputs
+data/raw/*
+data/processed/*
+outputs/models/*
+*.csv
+*.xlsx
+
+# Keep .gitkeep files
+!.gitkeep

@@ -5,6 +5,6 @@ setup(
     packages=find_packages(),
     version='0.1.0',
     description='Global Sap Velocity Analysis',
-    author='Your Name',
+    author='Yu Luo',
     license='MIT',
 )

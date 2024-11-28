@@ -1,35 +1,56 @@
 import cdsapi
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
 import logging
 from pathlib import Path
 
-class ERA5LandHourlyDownloader:
-    def __init__(self, output_dir='era5land_hourly_data'):
+class ERA5LandDownloader:
+    def __init__(self, output_dir='era5land_data'):
         self.c = cdsapi.Client()
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
-        # Set up logging
+        # Configure logging
         logging.basicConfig(
             filename=self.output_dir / 'download_log.txt',
             level=logging.INFO,
             format='%(asctime)s - %(message)s'
         )
         
-    def download_data(self, variables, start_year, end_year):
+        # Define variables mapping
+        self.variables_mapping = {
+            'temperature': '2m_temperature',  # Air temperature
+            'humidity': '2m_dewpoint_temperature',  # To calculate relative humidity
+            'wind': [
+                '10m_u_component_of_wind',  # For wind speed
+                '10m_v_component_of_wind'
+            ],
+            'radiation': [
+                'surface_solar_radiation_downwards',  # Incoming shortwave
+                'surface_net_solar_radiation',  # For net radiation
+                'surface_net_thermal_radiation'
+            ],
+            'precipitation': 'total_precipitation',
+            'soil_moisture': [
+                'volumetric_soil_water_layer_1',  # Shallow soil water (0-7cm)
+                'volumetric_soil_water_layer_4'   # Deep soil water (100-289cm)
+            ]
+        }
+
+    def download_data(self, start_year, end_year):
         """
-        Download hourly ERA5-Land data for specified variables and time period.
-        
-        Args:
-            variables (list): List of variables to download
-            start_year (int): Starting year
-            end_year (int): Ending year
+        Download hourly ERA5-Land data for all specified variables.
         """
-        hours = [f"{h:02d}:00" for h in range(24)]
-        
-        for variable in variables:
+        # Flatten the variables list
+        variables_to_download = []
+        for var_group in self.variables_mapping.values():
+            if isinstance(var_group, list):
+                variables_to_download.extend(var_group)
+            else:
+                variables_to_download.append(var_group)
+
+        for variable in variables_to_download:
             var_dir = self.output_dir / variable
             var_dir.mkdir(exist_ok=True)
             
@@ -49,20 +70,16 @@ class ERA5LandHourlyDownloader:
                             variable=variable,
                             year=year,
                             month=month,
-                            hours=hours,
                             output_file=output_file
                         )
                         logging.info(f"Successfully downloaded: {output_file}")
-                        
-                        # Prevent overwhelming the server
-                        time.sleep(5)
+                        time.sleep(5)  # Prevent overwhelming the server
                         
                     except Exception as e:
                         logging.error(f"Error downloading {variable} for {year}-{month}: {str(e)}")
-                        # Wait longer if there's an error
-                        time.sleep(60)
-                        
-    def _download_month_hourly(self, variable, year, month, hours, output_file):
+                        time.sleep(60)  # Wait longer if there's an error
+
+    def _download_month_hourly(self, variable, year, month, output_file):
         """Download hourly data for a specific month."""
         request_params = {
             'format': 'netcdf',
@@ -70,8 +87,8 @@ class ERA5LandHourlyDownloader:
             'year': str(year),
             'month': f"{month:02d}",
             'day': [f"{d:02d}" for d in range(1, 32)],
-            'time': hours,
-            'area': [90, -180, -90, 180],  # Global coverage: North, West, South, East
+            'time': [f"{h:02d}:00" for h in range(24)],
+            'area': [55.0, 5.9, 47.3, 15.0],  # Germany: North, West, South, East
         }
         
         self.c.retrieve(
@@ -79,3 +96,21 @@ class ERA5LandHourlyDownloader:
             request_params,
             str(output_file)
         )
+
+def main():
+    # Create downloader instance
+    downloader = ERA5LandDownloader(output_dir='./data/raw/grided/era5land_vars_1995_2018')
+    
+    try:
+        # Start the download
+        downloader.download_data(
+            start_year=2001,
+            end_year=2015
+        )
+    except KeyboardInterrupt:
+        logging.info("Download interrupted by user")
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}")
+
+if __name__ == "__main__":
+    main()

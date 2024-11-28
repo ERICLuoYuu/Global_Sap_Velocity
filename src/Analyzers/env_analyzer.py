@@ -250,6 +250,70 @@ class GermanEnvironmentalAnalyzer:
             print(f"Outliers detected: {outliers.sum()} out of {len(series)} points")
         return outliers
 
+    def _standardize_env_data(self, series: pd.Series, variable: str) -> pd.Series:
+        """
+        Standardize environmental data for comparison using min-max scaling.
+        Caches global max/min values for each variable to avoid recalculation.
+        
+        Parameters:
+        -----------
+        series : pd.Series
+            Input series to standardize
+        variable : str
+            Name of the variable to standardize
+            
+        Returns:
+        --------
+        pd.Series
+            Standardized values for the specified variable
+        """
+        try:
+            print(f"\nStandardizing variable: {variable}")
+            
+            # Create cache for min/max values if it doesn't exist
+            if not hasattr(self, '_minmax_cache'):
+                self._minmax_cache = {}
+                
+            # Calculate global max/min only if not already cached
+            if variable not in self._minmax_cache:
+                temp = []
+                for location in self.env_data:
+                    for plant_type in self.env_data[location]:
+                        data = self.env_data[location][plant_type].copy()
+                        if variable in data.columns:
+                            data = data[variable].to_list()
+                            temp.extend(data)
+                        else:
+                            continue
+                
+                if not temp:
+                    raise ValueError(f"No data found for variable {variable}")
+                    
+                self._minmax_cache[variable] = {
+                    'max': np.max(temp),
+                    'min': np.min(temp)
+                }
+                print(f"Calculated and cached global range for {variable}")
+            
+            max_val = self._minmax_cache[variable]['max']
+            min_val = self._minmax_cache[variable]['min']
+            print(f"Global range for {variable}: {min_val} to {max_val}")
+            
+            # Check for zero range
+            if max_val == min_val:
+                print(f"Warning: {variable} has constant value {max_val}")
+                return None
+            
+            # Standardize data
+            standardized_data = (series - min_val) / (max_val - min_val)
+            print(f"Standardized range: {standardized_data.min()} to {standardized_data.max()}")
+            
+            return standardized_data
+            
+        except Exception as e:
+            print(f"Error during standardization: {str(e)}")
+            return None
+
     def plot_environmental_variables(self, location: str, plant_type: str, figsize=(12, 6), 
                                   save_dir: str = None):
         """Create individual plots for each environmental variable"""
@@ -378,3 +442,23 @@ class GermanEnvironmentalAnalyzer:
         except Exception as e:
             print(f"Error finding common columns: {str(e)}")
             return []
+    # get all columns
+    def get_all_columns(self, dataframe: list) -> List:
+        """Get list of all columns in a DataFrame"""
+        try:
+            # Check if list is empty
+            if not dataframe:
+                print("No DataFrame provided")
+                return []
+            colums = []
+            for df in dataframe:
+                colums.extend(df.columns)
+            # remove duplicates
+            colums = list(set(colums))
+            print(f"Found {len(colums)} columns in the DataFrame:")
+            return colums
+        except Exception as e:
+            print(f"Error finding columns: {str(e)}")
+            return []
+            
+            

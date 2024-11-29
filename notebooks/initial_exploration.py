@@ -55,4 +55,3 @@ if __name__ == "__main__":
     
     # Find common columns
     common_cols = env_analyzer.get_common_columns_multiple(all_dfs)
-    print(f"\nCommon columns:{common_cols}")

@@ -4,6 +4,8 @@ from datetime import datetime
 import time
 import logging
 from pathlib import Path
+import calendar
+from datetime import datetime
 
 class ERA5LandDownloader:
     def __init__(self, output_dir='era5land_data'):
@@ -59,7 +61,9 @@ class ERA5LandDownloader:
                 year_dir.mkdir(exist_ok=True)
                 
                 for month in range(1, 13):
-                    output_file = year_dir / f"{variable}_{year}_{month:02d}_hourly.nc"
+                    month_dir = year_dir / str(month)
+                    month_dir.mkdir(exist_ok=True)
+                    output_file = year_dir / str(month) / f"{variable}_{year}_{month:02d}_hourly.grib"
                     
                     if output_file.exists():
                         logging.info(f"File already exists: {output_file}")
@@ -82,7 +86,7 @@ class ERA5LandDownloader:
     def _download_month_hourly(self, variable, year, month, output_file):
         """Download hourly data for a specific month."""
         request_params = {
-            'format': 'netcdf',
+            'format': 'grib',
             'variable': variable,
             'year': str(year),
             'month': f"{month:02d}",

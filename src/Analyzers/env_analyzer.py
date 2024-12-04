@@ -44,7 +44,7 @@ class GermanEnvironmentalAnalyzer:
                 
                 # Process data
                 print(f"\nProcessing {file.name}")
-                df = self._process_environmental_data(df, flags)
+                df = self._process_environmental_data(df, flags, location, plant_type)
                 if location not in self.env_data:
                     self.env_data[location] = {}
                 self.env_data[location][plant_type] = df
@@ -52,9 +52,20 @@ class GermanEnvironmentalAnalyzer:
             except Exception as e:
                 print(f"Error loading {file.name}: {str(e)}")
     
-    def _process_environmental_data(self, df: pd.DataFrame, flags: pd.DataFrame = None) -> pd.DataFrame:
+    def _process_environmental_data(self, df: pd.DataFrame, location: str = None, plant_type: str = None, flags: pd.DataFrame = None) -> pd.DataFrame:
         """
         Process environment data with debugging information
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Input DataFrame with environmental data
+        flags : pd.DataFrame
+            Input DataFrame with flag data
+
+        Returns: pd.DataFrame
+            Processed DataFrame with daily resampled data
+        --------
         """
         print("\nProcessing data shape:", df.shape)
         print("Data types before processing:")
@@ -101,7 +112,7 @@ class GermanEnvironmentalAnalyzer:
             # Export filtered data immediately
             output_dir = Path('./data/processed/env/filtered')
             output_dir.mkdir(parents=True, exist_ok=True)
-            filter_path = output_dir / f"{df.index[0].strftime('%Y%m%d')}_{df.index[-1].strftime('%Y%m%d')}_filtered.csv"
+            filter_path = output_dir / f"{location}_{plant_type}_filtered.csv"
             df.to_csv(filter_path)
             print(f"Saved filtered data to {filter_path}")
 
@@ -141,6 +152,34 @@ class GermanEnvironmentalAnalyzer:
                 df.loc[outliers, col] = np.nan
         except Exception as e:
             print(f"Error processing outliers: {str(e)}")
+
+        try:
+            # Create processed directory for standardized data
+            std_dir = Path('./data/processed/env/standardized')
+            std_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Process each column for standardization
+            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP']
+            # only use common columns
+            for col in data_cols:
+                common_cols = self.get_common_columns_multiple([df])
+                if col not in common_cols:
+                    print(f"Skipping {col} - not in common columns")
+                    continue
+                if df[col].isna().all():
+                    print(f"Skipping {col} - all values are NA")
+                    continue
+                
+                # Standardize data
+                standardized_data = self._standardize_env_data(df[col], col)
+                if standardized_data is not None:
+                    df[col] = standardized_data
+                    print(f"Standardized {col} data")
+                else:
+                    print(f"Skipping {col} due to zero range")
+            df.to_csv(std_dir / f"{location}_{plant_type}_standardized.csv")
+        except Exception as e:
+            print(f"Error processing standardization: {str(e)}")
 
         try:
             # Create processed directory

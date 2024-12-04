@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import calendar
 from datetime import datetime
+import calendar
 
 class ERA5LandDownloader:
     def __init__(self, output_dir='era5land_data'):
@@ -85,18 +86,21 @@ class ERA5LandDownloader:
 
     def _download_month_hourly(self, variable, year, month, output_file):
         """Download hourly data for a specific month."""
+        dataset = 'reanalysis-era5-single-levels'
         request_params = {
+            'product_type': ['reanalysis'],
+            'download_format': 'unarchived',
             'format': 'grib',
             'variable': variable,
             'year': str(year),
             'month': f"{month:02d}",
-            'day': [f"{d:02d}" for d in range(1, 32)],
+            'day': [f"{d:02d}" for d in range(1, calendar.monthrange(year, month)[1] + 1)],
             'time': [f"{h:02d}:00" for h in range(24)],
             'area': [55.0, 5.9, 47.3, 15.0],  # Germany: North, West, South, East
         }
         
         self.c.retrieve(
-            'reanalysis-era5-land',
+            dataset,
             request_params,
             str(output_file)
         )

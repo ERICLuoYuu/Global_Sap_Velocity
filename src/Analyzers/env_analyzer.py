@@ -19,6 +19,8 @@ class GermanEnvironmentalAnalyzer:
         
         self.env_data = {}
         self._load_environmental_data()
+        self._standardize_all_data()
+         
     
     def _load_environmental_data(self):
         """Load all German environmental data files and their corresponding metadata"""
@@ -44,7 +46,7 @@ class GermanEnvironmentalAnalyzer:
                 
                 # Process data
                 print(f"\nProcessing {file.name}")
-                df = self._process_environmental_data(df, flags, location, plant_type)
+                df = self._process_environmental_data(df, location, plant_type, flags)
                 if location not in self.env_data:
                     self.env_data[location] = {}
                 self.env_data[location][plant_type] = df
@@ -85,7 +87,7 @@ class GermanEnvironmentalAnalyzer:
             except Exception as e:
                 print(f"Error converting column {col}: {str(e)}")
 
-        # Set index
+        # Set index to TIMESTAMP and sort
         df = df.set_index('TIMESTAMP')
         df = df.sort_index()
         
@@ -152,34 +154,6 @@ class GermanEnvironmentalAnalyzer:
                 df.loc[outliers, col] = np.nan
         except Exception as e:
             print(f"Error processing outliers: {str(e)}")
-
-        try:
-            # Create processed directory for standardized data
-            std_dir = Path('./data/processed/env/standardized')
-            std_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Process each column for standardization
-            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP']
-            # only use common columns
-            for col in data_cols:
-                common_cols = self.get_common_columns_multiple([df])
-                if col not in common_cols:
-                    print(f"Skipping {col} - not in common columns")
-                    continue
-                if df[col].isna().all():
-                    print(f"Skipping {col} - all values are NA")
-                    continue
-                
-                # Standardize data
-                standardized_data = self._standardize_env_data(df[col], col)
-                if standardized_data is not None:
-                    df[col] = standardized_data
-                    print(f"Standardized {col} data")
-                else:
-                    print(f"Skipping {col} due to zero range")
-            df.to_csv(std_dir / f"{location}_{plant_type}_standardized.csv")
-        except Exception as e:
-            print(f"Error processing standardization: {str(e)}")
 
         try:
             # Create processed directory
@@ -291,52 +265,26 @@ class GermanEnvironmentalAnalyzer:
 
     def _standardize_env_data(self, series: pd.Series, variable: str) -> pd.Series:
         """
-        Standardize environmental data for comparison using min-max scaling.
-        Caches global max/min values for each variable to avoid recalculation.
+        Standardizes a data series using pre-calculated min-max scaling values.
         
         Parameters:
         -----------
         series : pd.Series
             Input series to standardize
         variable : str
-            Name of the variable to standardize
-            
+            Name of the variable being standardized
+                
         Returns:
         --------
         pd.Series
             Standardized values for the specified variable
         """
         try:
-            print(f"\nStandardizing variable: {variable}")
-            
-            # Create cache for min/max values if it doesn't exist
-            if not hasattr(self, '_minmax_cache'):
-                self._minmax_cache = {}
-                
-            # Calculate global max/min only if not already cached
             if variable not in self._minmax_cache:
-                temp = []
-                for location in self.env_data:
-                    for plant_type in self.env_data[location]:
-                        data = self.env_data[location][plant_type].copy()
-                        if variable in data.columns:
-                            data = data[variable].to_list()
-                            temp.extend(data)
-                        else:
-                            continue
+                raise ValueError(f"No pre-calculated range found for {variable}")
                 
-                if not temp:
-                    raise ValueError(f"No data found for variable {variable}")
-                    
-                self._minmax_cache[variable] = {
-                    'max': np.max(temp),
-                    'min': np.min(temp)
-                }
-                print(f"Calculated and cached global range for {variable}")
-            
             max_val = self._minmax_cache[variable]['max']
             min_val = self._minmax_cache[variable]['min']
-            print(f"Global range for {variable}: {min_val} to {max_val}")
             
             # Check for zero range
             if max_val == min_val:
@@ -345,12 +293,12 @@ class GermanEnvironmentalAnalyzer:
             
             # Standardize data
             standardized_data = (series - min_val) / (max_val - min_val)
-            print(f"Standardized range: {standardized_data.min()} to {standardized_data.max()}")
+            print(f"Standardized range for {variable}: {standardized_data.min():.3f} to {standardized_data.max():.3f}")
             
             return standardized_data
             
         except Exception as e:
-            print(f"Error during standardization: {str(e)}")
+            print(f"Error standardizing {variable}: {str(e)}")
             return None
 
     def plot_environmental_variables(self, location: str, plant_type: str, figsize=(12, 6), 
@@ -455,6 +403,155 @@ class GermanEnvironmentalAnalyzer:
         }
         
         return summary
+    def _standardize_all_data(self):
+        """Standardize environmental data using only common columns across all datasets with error handling"""
+        try:
+            print("\nStarting data standardization process...")
+            
+            # Verify data is loaded
+            if not self.env_data:
+                raise ValueError("No environmental data has been loaded")
+            
+            # Create processed directory for standardized data
+            try:
+                std_dir = Path('./data/processed/env/standardized')
+                std_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                raise IOError(f"Failed to create standardization directory: {str(e)}")
+            
+            # Get all datasets with validation
+            try:
+                all_dataframes = []
+                for location in self.env_data:
+                    for plant_type in self.env_data[location]:
+                        df = self.env_data[location][plant_type]
+                        if not isinstance(df, pd.DataFrame):
+                            print(f"Warning: Invalid data type for {location}_{plant_type}")
+                            continue
+                        if df.empty:
+                            print(f"Warning: Empty dataset for {location}_{plant_type}")
+                            continue
+                        all_dataframes.append(df)
+                
+                if not all_dataframes:
+                    raise ValueError("No valid DataFrames found for standardization")
+                    
+            except Exception as e:
+                raise ValueError(f"Error collecting datasets: {str(e)}")
+            
+            # Find common columns
+            try:
+                common_columns = self.get_common_columns_multiple(all_dataframes)
+                common_columns = [col for col in common_columns if col != 'solar_TIMESTAMP']
+                
+                if not common_columns:
+                    raise ValueError("No common columns found across datasets")
+                    
+                print(f"\nFound {len(common_columns)} common columns to standardize: {common_columns}")
+                
+            except Exception as e:
+                raise ValueError(f"Error identifying common columns: {str(e)}")
+            
+            # Calculate global min/max for common columns
+            self._minmax_cache = {}
+            for variable in common_columns:
+                try:
+                    temp_data = []
+                    for location in self.env_data:
+                        for plant_type in self.env_data[location]:
+                            data = self.env_data[location][plant_type]
+                            valid_data = data[variable].dropna().tolist()
+                            if valid_data:  # Only add if there's valid data
+                                temp_data.extend(valid_data)
+                    
+                    if not temp_data:
+                        print(f"Warning: No valid data found for {variable}")
+                        continue
+                        
+                    self._minmax_cache[variable] = {
+                        'max': np.max(temp_data),
+                        'min': np.min(temp_data)
+                    }
+                    print(f"\nGlobal range for {variable}: "
+                          f"{self._minmax_cache[variable]['min']} to "
+                          f"{self._minmax_cache[variable]['max']}")
+                          
+                except Exception as e:
+                    print(f"Error calculating range for {variable}: {str(e)}")
+                    continue
+            
+            # Standardize common columns for each dataset
+            standardization_results = []
+            for location in self.env_data:
+                for plant_type in self.env_data[location]:
+                    try:
+                        print(f"\nStandardizing data for {location}_{plant_type}")
+                        data = self.env_data[location][plant_type].copy()
+                        
+                        # Track successful standardizations
+                        standardized_cols = []
+                        
+                        for variable in common_columns:
+                            try:
+                                if variable not in self._minmax_cache:
+                                    print(f"Skipping {variable} - no global range available")
+                                    continue
+                                    
+                                standardized = self._standardize_env_data(
+                                    data[variable], variable)
+                                if standardized is not None:
+                                    data[variable] = standardized
+                                    standardized_cols.append(variable)
+                                    print(f"Standardized {variable}")
+                                    
+                            except Exception as e:
+                                print(f"Error standardizing {variable}: {str(e)}")
+                                continue
+                        
+                        # Only save if some columns were standardized
+                        if standardized_cols:
+                            output_path = std_dir / f"{location}_{plant_type}_standardized.csv"
+                            data.to_csv(output_path, float_format='%.3f')
+                            print(f"Saved standardized data to {output_path}")
+                            
+                            # Update stored data
+                            self.env_data[location][plant_type] = data
+                            
+                            standardization_results.append({
+                                'location': location,
+                                'plant_type': plant_type,
+                                'standardized_columns': standardized_cols,
+                                'success': True
+                            })
+                        else:
+                            print(f"No columns were standardized for {location}_{plant_type}")
+                            standardization_results.append({
+                                'location': location,
+                                'plant_type': plant_type,
+                                'standardized_columns': [],
+                                'success': False
+                            })
+                            
+                    except Exception as e:
+                        print(f"Error processing {location}_{plant_type}: {str(e)}")
+                        standardization_results.append({
+                            'location': location,
+                            'plant_type': plant_type,
+                            'error': str(e),
+                            'success': False
+                        })
+                        continue
+            
+            # Summary report
+            print("\nStandardization Summary:")
+            successful = sum(1 for result in standardization_results if result['success'])
+            print(f"Successfully standardized {successful} out of {len(standardization_results)} datasets")
+            
+            return standardization_results
+            
+        except Exception as e:
+            print(f"Critical error during standardization process: {str(e)}")
+            return None
 
     def get_common_columns_multiple(self, dataframes: list) -> list:
         """Get list of common columns across multiple DataFrames"""

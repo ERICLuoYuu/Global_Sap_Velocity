@@ -43,7 +43,7 @@ class GermanSapFlowAnalyzer:
                     flags = None
                 
                 # Process data with flags
-                df = self._process_sapflow_data(df, flags)
+                df = self._process_sapflow_data(location, plant_type, df, flags)
                 
                 if location not in self.sapflow_data:
                     self.sapflow_data[location] = {}
@@ -54,7 +54,7 @@ class GermanSapFlowAnalyzer:
         
     
 
-    def _process_sapflow_data(self, df: pd.DataFrame, flags: pd.DataFrame = None) -> pd.DataFrame:
+    def _process_sapflow_data(self, location: str, plant_type: str, df: pd.DataFrame, flags: pd.DataFrame = None) -> pd.DataFrame:
         """
         Process sapflow data with debugging information
         """
@@ -101,7 +101,7 @@ class GermanSapFlowAnalyzer:
                     df.loc[warn_mask, col] = np.nan
             
             # Export filtered data immediately
-            output_dir = Path('./data/processed/filtered')
+            output_dir = Path('./data/processed/sap/filtered')
             output_dir.mkdir(parents=True, exist_ok=True)
             filter_path = output_dir / f"{df.index[0].strftime('%Y%m%d')}_{df.index[-1].strftime('%Y%m%d')}_filtered.csv"
             df.to_csv(filter_path)
@@ -110,7 +110,7 @@ class GermanSapFlowAnalyzer:
 
         try:
             # Create processed directory for outliers
-            outlier_dir = Path('./data/processed/outliers')
+            outlier_dir = Path('./data/processed/sap/outliers')
             outlier_dir.mkdir(parents=True, exist_ok=True)
             
             # Process each column for outliers
@@ -146,7 +146,7 @@ class GermanSapFlowAnalyzer:
 
         try:
             # Create processed directory
-            output_dir = Path('./data/processed/daily')
+            output_dir = Path('./data/processed/sap/daily')
             output_dir.mkdir(parents=True, exist_ok=True)
 
             # Get columns to resample (exclude solar_TIMESTAMP)
@@ -159,9 +159,7 @@ class GermanSapFlowAnalyzer:
             daily_df.columns = [f"{col}_mean" for col in daily_df.columns]
             
             # Save daily data
-            start_date = df.index[0].strftime('%Y%m%d')
-            end_date = df.index[-1].strftime('%Y%m%d')
-            output_path = output_dir / f"daily_{start_date}_{end_date}.csv"
+            output_path = output_dir / f"{location}_{plant_type}_daily.csv"
             daily_df.to_csv(output_path)
             print(f"Saved daily resampled data to {output_path}")
 

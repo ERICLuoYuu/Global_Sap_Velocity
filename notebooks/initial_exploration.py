@@ -15,10 +15,10 @@ from src.Analyzers import env_analyzer
 if __name__ == "__main__":
  
     # Initialize analyzer
-    # analyzer = sap_analyzer.GermanSapFlowAnalyzer()
+    analyzer = sap_analyzer.GermanSapFlowAnalyzer()
     env_analyzer = env_analyzer.GermanEnvironmentalAnalyzer()
     
-    '''
+    
     # Print available sites and their basic info
     print("\nSite summaries:")
     print("-" * 50)
@@ -36,7 +36,7 @@ if __name__ == "__main__":
         figsize=(20, 10),
         save_dir='german_sapflow_plots'
     )
-    '''
+   
     # plot environmental data
     print("\nGenerating environmental data plots...")
     env_analyzer.plot_all(
@@ -55,3 +55,4 @@ if __name__ == "__main__":
     
     # Find common columns
     common_cols = env_analyzer.get_common_columns_multiple(all_dfs)
+    

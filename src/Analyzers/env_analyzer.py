@@ -46,7 +46,17 @@ class GermanEnvironmentalAnalyzer:
                 
                 # Process data
                 print(f"\nProcessing {file.name}")
+                # get cooridnates information from "DEU_*_site_md.csv"
+                site_md_file = file.parent / f"{file.stem.replace('_env_data', '_site_md')}.csv"
+                # load the site_md_file
+                site_md = pd.read_csv(site_md_file)
+                # get the latitude and longitude from columns "si_lat" and "si_long"
+                latitude = site_md['si_lat'].values[0]
+                longitude = site_md['si_long'].values[0]
                 df = self._process_environmental_data(df, location, plant_type, flags)
+                # add coordinates to the metadata
+                df['lat'] = latitude
+                df['long'] = longitude
                 if location not in self.env_data:
                     self.env_data[location] = {}
                 self.env_data[location][plant_type] = df
@@ -79,7 +89,7 @@ class GermanEnvironmentalAnalyzer:
         df = df.replace("NA", np.nan)
         
         # Convert numeric columns to float, with error handling
-        numeric_cols = [col for col in df.columns if col != 'TIMESTAMP' and col != 'solar_TIMESTAMP']
+        numeric_cols = [col for col in df.columns if col != 'TIMESTAMP' and col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
         for col in numeric_cols:
             try:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -102,7 +112,7 @@ class GermanEnvironmentalAnalyzer:
             if flags.index.duplicated().any():
                 flags = flags[~flags.index.duplicated(keep='first')]
             
-            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP']
+            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
             for col in data_cols:
                 flag_col = [fcol for fcol in flags.columns if col in fcol]
                 if flag_col:
@@ -125,7 +135,7 @@ class GermanEnvironmentalAnalyzer:
             outlier_dir.mkdir(parents=True, exist_ok=True)
             
             # Process each column for outliers
-            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP']
+            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
             for col in data_cols:
                 if df[col].isna().all():
                     print(f"Skipping {col} - all values are NA")
@@ -161,7 +171,7 @@ class GermanEnvironmentalAnalyzer:
             output_dir.mkdir(parents=True, exist_ok=True)
 
             # Get columns to resample (exclude solar_TIMESTAMP)
-            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP']
+            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
             
             # Get columns that need sum vs mean
             precip_rad_cols = [col for col in data_cols if 'precip' in col.lower() or 'rad' in col.lower()]
@@ -442,7 +452,7 @@ class GermanEnvironmentalAnalyzer:
             # Find common columns
             try:
                 common_columns = self.get_common_columns_multiple(all_dataframes)
-                common_columns = [col for col in common_columns if col != 'solar_TIMESTAMP']
+                common_columns = [col for col in common_columns if col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
                 
                 if not common_columns:
                     raise ValueError("No common columns found across datasets")
@@ -509,9 +519,16 @@ class GermanEnvironmentalAnalyzer:
                                 continue
                         
                         # Only save if some columns were standardized
+                        print(df.head())
                         if standardized_cols:
                             output_path = std_dir / f"{location}_{plant_type}_standardized.csv"
-                            data.to_csv(output_path, float_format='%.3f')
+                            # for data[standardized_cols] keep 3 decimal points
+                            data[standardized_cols] = data[standardized_cols].apply(lambda x: round(x, 3))
+                            # Save standardized data with lat and long
+                            saved_cols = standardized_cols + ['lat', 'long']     
+                            data = data[saved_cols]
+                            
+                            data.to_csv(output_path)
                             print(f"Saved standardized data to {output_path}")
                             
                             # Update stored data

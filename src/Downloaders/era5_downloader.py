@@ -64,7 +64,7 @@ class ERA5LandDownloader:
                 for month in range(1, 13):
                     month_dir = year_dir / str(month)
                     month_dir.mkdir(exist_ok=True)
-                    output_file = year_dir / str(month) / f"{variable}_{year}_{month:02d}_hourly.grib"
+                    output_file = year_dir / str(month) / f"{variable}_{year}_{month:02d}_hourly.nc"
                     
                     if output_file.exists():
                         logging.info(f"File already exists: {output_file}")
@@ -86,11 +86,11 @@ class ERA5LandDownloader:
 
     def _download_month_hourly(self, variable, year, month, output_file):
         """Download hourly data for a specific month."""
-        dataset = 'reanalysis-era5-single-levels'
+        dataset = 'reanalysis-era5-land'
         request_params = {
             'product_type': ['reanalysis'],
             'download_format': 'unarchived',
-            'format': 'grib',
+            'format': 'netcdf',
             'variable': variable,
             'year': str(year),
             'month': f"{month:02d}",

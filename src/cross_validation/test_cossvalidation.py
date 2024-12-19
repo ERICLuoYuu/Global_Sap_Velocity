@@ -41,11 +41,12 @@ rf = RandomForestRegressor(n_estimators=100, random_state=42)
 cv = MLCrossValidator(estimator=rf, scoring='r2', n_splits=5)
 
 # Perform spatial stratified cross-validation
-spatial_scores = cv.spatial_cv(X, y, groups)
+
+spatial_scores = cv.spatial_cv(X, y, groups=groups)
 random_scores = cv.random_cv(X, y)
 time_groups = test_data.sort_index().index
-print(np.array(time_groups))
-temporal_scores = cv.temporal_cv(X, y, np.array(time_groups))
+
+temporal_scores = cv.temporal_cv(X, y, groups=time_groups)
 print("Spatial Stratified CV Scores:", spatial_scores)
 print("Mean CV Score:", spatial_scores.mean())
 print("CV Score Standard Deviation:", spatial_scores.std())

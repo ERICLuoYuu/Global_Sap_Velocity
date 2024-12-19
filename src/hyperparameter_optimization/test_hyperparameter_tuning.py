@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-
+import pandas as pd
 # Add parent directory to Python path
 parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
@@ -24,6 +24,19 @@ def create_nn(input_shape, output_shape, n_layers, units, dropout_rate):
     
     return model
 
+
+# Create stratification variable (e.g., climate zones)
+# Here we create three climate zones based on latitude
+# strata = pd.qcut(lat, q=3, labels=['cold', 'temperate', 'warm'])
+test_data = pd.read_csv('./data/processed/merged/merged_data.csv')
+test_data = test_data.dropna().set_index('TIMESTAMP').sort_index()
+X = test_data.drop(columns=['sap_velocity', 'lat', 'long']).values
+y = test_data['sap_velocity'].values
+
+
+# Perform spatial stratified cross-validation
+time_groups = test_data.sort_index().index
+
 # Define parameter grid
 param_grid = {
     'architecture': {
@@ -32,7 +45,7 @@ param_grid = {
         'dropout_rate': [0.2, 0.3]
     },
     'optimizer': {
-        'name': ['adam'],
+        'name': ['Adam'],
         'learning_rate': [0.001, 0.0001]
     },
     'training': {
@@ -47,7 +60,7 @@ optimizer = DLOptimizer(
     base_architecture=create_nn,
     task='regression',
     param_grid=param_grid,
-    input_shape=(10,),
+    input_shape=(X.shape[1],),
     output_shape=1,
     scoring='val_loss'
 )
@@ -56,8 +69,8 @@ optimizer = DLOptimizer(
 optimizer.fit(
     X,
     y,
-    split_type='temporal',
-    groups=timestamps,  # timestamps for each sample
+    split_type='random',
+    groups=None,  # timestamps for each sample
     gap=1,  # optional gap between train and test
     max_train_size=1000  # optional limit on training size
 )
@@ -65,3 +78,27 @@ optimizer.fit(
 # Get best model and parameters
 best_model = optimizer.get_best_model()
 best_params = optimizer.best_params_
+
+# Print results
+print(f"best_params: {best_params}")
+print(f"best_model: {best_model}")
+
+"""""
+# do optimatization for ML model
+# Define parameter grid
+# for rf model
+param_grid = {
+    'n_estimators': [100, 200],
+    'max_depth': [10, 20],
+    'min_samples_split': [2, 5],
+    'min_samples_leaf': [1, 2]
+}
+
+optimizer = MLOptimizer( param_grid=param_grid, scoring='r2', model_type='rf', task='regression')
+optimizer.fit(X, y, split_type='random')
+# print results
+print(optimizer.best_params_)
+print(optimizer.best_estimator_)
+print(optimizer.best_score_)
+print(optimizer.cv_results_)
+"""""

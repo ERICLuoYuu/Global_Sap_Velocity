@@ -33,9 +33,10 @@ from sklearn.model_selection import KFold, GroupKFold, TimeSeriesSplit
 import tensorflow as tf
 from src.cross_validation.timeseries_split import GroupedTimeSeriesSplit
 
-
+"""""
 def cross_val_score(estimator, X, y, cv, groups, scoring='r2'):
     scores = []
+    print(f"in cvs: {groups}")
     # cv is our GroupedTimeSeriesSplit instance
     for train_idx, test_idx in cv.split(X, y, groups=groups):
         # Split data
@@ -51,7 +52,7 @@ def cross_val_score(estimator, X, y, cv, groups, scoring='r2'):
         scores.append(score)
     
     return np.array(scores)
-
+"""""
 class BaseCrossValidator(ABC):
     """
     Abstract base class for cross-validation strategies.
@@ -140,6 +141,8 @@ class MLCrossValidator(BaseCrossValidator):
         """
         Perform spatial cross-validation using location-based groups.
         """
+        if groups is None:
+            raise ValueError("The 'groups' parameter should contain spatial group")
         cv = GroupKFold(min(self.n_splits, len(np.unique(groups))))
         return self.get_scores(X, y, cv=cv, groups=groups)
     
@@ -153,6 +156,8 @@ class MLCrossValidator(BaseCrossValidator):
         """
         Perform temporal cross-validation using time series split.
         """
+        if groups is None:
+            raise ValueError("The 'groups' parameter should contain timestamp values.")
         cv = GroupedTimeSeriesSplit(
             n_splits=self.n_splits,
             max_train_size=max_train_size
@@ -184,6 +189,7 @@ class MLCrossValidator(BaseCrossValidator):
         """
         Compute cross-validation scores for ML models.
         """
+        
         return cross_val_score(
             self.estimator,
             X,
@@ -286,6 +292,8 @@ class DLCrossValidator(BaseCrossValidator):
         """
         Perform spatial cross-validation using location-based groups.
         """
+        if groups is None:
+            raise ValueError("The 'groups' parameter should contain spatial group")
         cv = GroupKFold(min(self.n_splits, len(np.unique(groups))))
         return self.get_scores(X, y, cv=cv, groups=groups)
     
@@ -299,6 +307,8 @@ class DLCrossValidator(BaseCrossValidator):
         """
         Perform temporal cross-validation using time series split.
         """
+        if groups is None:
+            raise ValueError("The 'groups' parameter should contain timestamp values.")
         cv = GroupedTimeSeriesSplit(
             n_splits=self.n_splits,
             max_train_size=max_train_size,

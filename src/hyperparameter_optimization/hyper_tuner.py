@@ -129,7 +129,9 @@ class MLOptimizer(BaseOptimizer):
         random_state: int = 42,
         n_jobs: int = -1,
         verbose: int = 1
-    ):
+    ):  
+        if task.lower() not in ['regression', 'classification']:
+            raise ValueError("Unknown task type. Choose 'regression' or 'classification'.")
         # Set default scoring based on task
         if scoring is None:
             scoring = 'r2' if task.lower() == 'regression' else 'accuracy'
@@ -350,7 +352,7 @@ class DLOptimizer(BaseOptimizer):
                 restore_best_weights=True
             ),
             keras.callbacks.ModelCheckpoint(
-                f'best_model_fold_{fold}.h5',
+                f'best_model_fold_{fold}.weights.h5',
                 monitor=self.scoring,
                 save_best_only=True,
                 save_weights_only=True
@@ -414,7 +416,14 @@ class DLOptimizer(BaseOptimizer):
                                                                groups=kwargs.get('groups'))):
                 X_train, X_val = X[train_idx], X[val_idx]
                 y_train, y_val = y[train_idx], y[val_idx]
-                
+                # Convert to tensors with explicit types
+                X_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
+                y_train = tf.convert_to_tensor(y_train, dtype=tf.float32)
+                X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
+                y_val = tf.convert_to_tensor(y_val, dtype=tf.float32)
+                # Print shapes for debugging
+                print(f"X_train shape: {X_train.shape}")
+                print(f"y_train shape: {y_train.shape}")
                 # Create and compile model
                 model = self._create_model(arch_params)
                 model = self._compile_model(model, opt_name, opt_params)

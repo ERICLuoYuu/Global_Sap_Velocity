@@ -116,6 +116,8 @@ class MLCrossValidator(BaseCrossValidator):
         """
         Perform spatial cross-validation using location-based groups.
         """
+        if groups is None:
+            raise ValueError("Groups must be provided for spatial cross-validation.")
         cv = GroupKFold(min(self.n_splits, len(np.unique(groups))))
         return cross_val_score(
             self.estimator,
@@ -131,11 +133,13 @@ class MLCrossValidator(BaseCrossValidator):
         X: Union[np.ndarray, pd.DataFrame],
         y: Union[np.ndarray, pd.Series],
         max_train_size: Optional[int] = None,
-        groups: Union[np.ndarray, List] = None
+        groups: Union[np.ndarray, List, pd.Series] = None
     ) -> np.ndarray:
         """
         Perform temporal cross-validation using time series split.
         """
+        if groups is None:
+            raise ValueError("Groups must be provided for temporal cross-validation.")
         cv = GroupedTimeSeriesSplit(
             n_splits=self.n_splits,
             max_train_size=max_train_size,
@@ -297,6 +301,8 @@ class DLCrossValidator(BaseCrossValidator):
         """
         Perform spatial cross-validation using location-based groups.
         """
+        if groups is None:
+            raise ValueError("Groups must be provided for spatial cross-validation.")
         cv = GroupKFold(min(self.n_splits, len(np.unique(groups))))
         return cross_val_score(
             self.wrapped_model,
@@ -317,6 +323,8 @@ class DLCrossValidator(BaseCrossValidator):
         """
         Perform temporal cross-validation using time series split.
         """
+        if groups is None:
+            raise ValueError("Groups must be provided for temporal cross-validation.")
         cv = GroupedTimeSeriesSplit(
             n_splits=self.n_splits,
             max_train_size=max_train_size,

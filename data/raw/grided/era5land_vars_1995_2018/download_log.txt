@@ -1,0 +1,1060 @@
+2024-12-10 13:29:00,875 - Request ID is dbf21f71-69c4-4d60-93d1-9fac1ebe7a63
+2024-12-10 13:29:01,534 - status has been updated to accepted
+2024-12-10 13:29:08,158 - status has been updated to running
+2024-12-10 13:30:10,013 - Error downloading 2m_temperature for 2001-1: 404 Client Error: Not Found for url: https://ads.atmosphere.copernicus.eu/api/retrieve/v1/processes/reanalysis-era5-land/execution
+process not found
+dataset reanalysis-era5-land not found
+2024-12-10 13:31:10,414 - Error downloading 2m_temperature for 2001-2: 404 Client Error: Not Found for url: https://ads.atmosphere.copernicus.eu/api/retrieve/v1/processes/reanalysis-era5-land/execution
+process not found
+dataset reanalysis-era5-land not found
+2024-12-10 13:32:11,351 - Error downloading 2m_temperature for 2001-3: 404 Client Error: Not Found for url: https://ads.atmosphere.copernicus.eu/api/retrieve/v1/processes/reanalysis-era5-land/execution
+process not found
+dataset reanalysis-era5-land not found
+2024-12-10 13:33:11,641 - Error downloading 2m_temperature for 2001-4: 404 Client Error: Not Found for url: https://ads.atmosphere.copernicus.eu/api/retrieve/v1/processes/reanalysis-era5-land/execution
+process not found
+dataset reanalysis-era5-land not found
+2024-12-10 13:34:11,931 - Error downloading 2m_temperature for 2001-5: 404 Client Error: Not Found for url: https://ads.atmosphere.copernicus.eu/api/retrieve/v1/processes/reanalysis-era5-land/execution
+process not found
+dataset reanalysis-era5-land not found
+2024-12-10 13:34:52,350 - Request ID is 3e256566-c64c-4010-937b-b3b903541291
+2024-12-10 13:34:52,534 - status has been updated to accepted
+2024-12-10 13:34:58,560 - status has been updated to successful
+2024-12-10 13:34:59,736 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/b2798d6ab5cb420937e0b569c701b5e.nc
+2024-12-10 13:35:02,887 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\1\2m_temperature_2001_01_hourly.nc
+2024-12-10 13:35:09,848 - Request ID is ce45f77d-d7fb-453f-a33a-52c9a4daf02d
+2024-12-10 13:35:09,916 - status has been updated to accepted
+2024-12-10 13:35:14,864 - status has been updated to running
+2024-12-10 13:38:02,544 - status has been updated to successful
+2024-12-10 13:38:02,799 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/73593ebc93cacf8dbeb66136fa32895d.nc
+2024-12-10 13:38:04,502 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\2\2m_temperature_2001_02_hourly.nc
+2024-12-10 13:38:10,072 - Request ID is a742b1d9-566f-4bd0-b611-a2c720b213f6
+2024-12-10 13:38:10,150 - status has been updated to accepted
+2024-12-10 13:38:19,096 - status has been updated to running
+2024-12-10 13:40:05,449 - status has been updated to successful
+2024-12-10 13:40:05,602 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/7c231f2749f2d677cc66dc41237effc5.nc
+2024-12-10 13:40:07,406 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\3\2m_temperature_2001_03_hourly.nc
+2024-12-10 13:40:12,816 - Request ID is 7530a954-d2f6-4065-babb-944d3f6fc203
+2024-12-10 13:40:12,934 - status has been updated to accepted
+2024-12-10 13:40:18,119 - status has been updated to running
+2024-12-10 13:43:05,662 - status has been updated to successful
+2024-12-10 13:43:06,967 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/939af57e0bdc019b1bf91a3893e0e713.nc
+2024-12-10 13:43:08,615 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\4\2m_temperature_2001_04_hourly.nc
+2024-12-10 13:43:13,851 - Request ID is 94633697-129d-4c83-8dd0-810b4914f6cd
+2024-12-10 13:43:13,916 - status has been updated to accepted
+2024-12-10 13:43:22,788 - status has been updated to running
+2024-12-10 13:46:07,073 - status has been updated to successful
+2024-12-10 13:46:07,237 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/fc1558e9c30eb5b4760841e065535e95.nc
+2024-12-10 13:46:09,167 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\5\2m_temperature_2001_05_hourly.nc
+2024-12-10 13:46:14,345 - Request ID is 73c317fd-49e8-484a-b598-4ec806933012
+2024-12-10 13:46:14,419 - status has been updated to accepted
+2024-12-10 13:46:19,833 - status has been updated to running
+2024-12-10 13:50:33,769 - status has been updated to successful
+2024-12-10 13:50:34,512 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/1c16fb58faf625449ee595541bf26032.nc
+2024-12-10 13:50:36,161 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\6\2m_temperature_2001_06_hourly.nc
+2024-12-10 13:50:41,368 - Request ID is d708e3bb-5abc-4a95-92fa-abc2bff4cd87
+2024-12-10 13:50:41,591 - status has been updated to accepted
+2024-12-10 13:50:46,761 - status has been updated to running
+2024-12-10 13:55:00,811 - status has been updated to successful
+2024-12-10 13:55:01,085 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/da2b48360777b2cb42afce5a4b7ecd7f.nc
+2024-12-10 13:55:03,457 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\7\2m_temperature_2001_07_hourly.nc
+2024-12-10 13:55:08,834 - Request ID is 70579da2-eb40-4a89-8db1-0cf45070eb49
+2024-12-10 13:55:09,008 - status has been updated to accepted
+2024-12-10 13:55:17,726 - status has been updated to running
+2024-12-10 13:58:01,755 - status has been updated to successful
+2024-12-10 13:58:01,906 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/57b5470c689d7d5535fdb414bd707f63.nc
+2024-12-10 13:58:03,703 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\8\2m_temperature_2001_08_hourly.nc
+2024-12-10 13:58:09,036 - Request ID is 0fee2d78-6167-4fd7-a78e-01921b347faf
+2024-12-10 13:58:09,669 - status has been updated to accepted
+2024-12-10 13:58:18,148 - status has been updated to running
+2024-12-10 14:01:01,697 - status has been updated to successful
+2024-12-10 14:01:02,092 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/d1ec2a27c6c59369e08dbeb1143757b.nc
+2024-12-10 14:01:03,202 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\9\2m_temperature_2001_09_hourly.nc
+2024-12-10 14:01:08,990 - Request ID is ddcdf633-0217-42c9-ac73-cd86b5e25985
+2024-12-10 14:01:09,233 - status has been updated to accepted
+2024-12-10 14:01:18,157 - status has been updated to running
+2024-12-10 14:03:04,462 - status has been updated to successful
+2024-12-10 14:03:04,613 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/72a61debb6fd11cfe6e3ef4807525e31.nc
+2024-12-10 14:03:05,807 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\10\2m_temperature_2001_10_hourly.nc
+2024-12-10 14:03:10,971 - Request ID is e7ec5b10-b598-466e-86bc-6345f4b77258
+2024-12-10 14:03:11,097 - status has been updated to accepted
+2024-12-10 14:03:19,557 - status has been updated to running
+2024-12-10 14:06:03,360 - status has been updated to successful
+2024-12-10 14:06:03,491 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/2312981a70188a98a1e813a6ef3acc8.nc
+2024-12-10 14:06:04,668 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\11\2m_temperature_2001_11_hourly.nc
+2024-12-10 14:06:10,002 - Request ID is 1e1f3f20-38d1-49f6-9171-4431e41e286a
+2024-12-10 14:06:10,081 - status has been updated to accepted
+2024-12-10 14:06:18,631 - status has been updated to running
+2024-12-10 14:09:07,602 - status has been updated to successful
+2024-12-10 14:09:07,869 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/1b1522cbf3e4a7e5377ec33be467830f.nc
+2024-12-10 14:09:09,253 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2001\12\2m_temperature_2001_12_hourly.nc
+2024-12-10 14:09:14,438 - Request ID is 63e0064c-27a2-4c65-8bde-2f9996aa91fc
+2024-12-10 14:09:14,503 - status has been updated to accepted
+2024-12-10 14:09:19,608 - status has been updated to running
+2024-12-10 14:16:26,152 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-10 14:16:26,152 - Retrying in 120 seconds
+2024-12-10 14:18:26,154 - Retrying now...
+2024-12-10 14:18:26,592 - status has been updated to successful
+2024-12-10 14:18:26,984 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/71274cd3bee1cf7ccdd7db47173dcc11.nc
+2024-12-10 14:18:29,800 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\1\2m_temperature_2002_01_hourly.nc
+2024-12-10 14:18:35,103 - Request ID is d6c88409-bb88-45b9-b0c7-1aaab1197292
+2024-12-10 14:18:35,182 - status has been updated to accepted
+2024-12-10 14:18:40,723 - status has been updated to running
+2024-12-10 14:20:31,091 - status has been updated to successful
+2024-12-10 14:20:31,517 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/ff8605b1ad82608817f04c1756724138.nc
+2024-12-10 14:20:33,334 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\2\2m_temperature_2002_02_hourly.nc
+2024-12-10 14:20:38,683 - Request ID is 7ef72997-14d9-48c0-aacc-bef6668b1f0a
+2024-12-10 14:20:38,777 - status has been updated to accepted
+2024-12-10 14:20:43,996 - status has been updated to running
+2024-12-10 14:23:31,908 - status has been updated to successful
+2024-12-10 14:23:32,128 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/d060703cae3cea0192945fb6b6d295e9.nc
+2024-12-10 14:23:32,994 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\3\2m_temperature_2002_03_hourly.nc
+2024-12-10 14:23:38,376 - Request ID is 8a4d2fd5-8632-401d-a2da-fd9c83e9b5af
+2024-12-10 14:23:38,583 - status has been updated to accepted
+2024-12-10 14:23:43,713 - status has been updated to running
+2024-12-10 14:26:31,898 - status has been updated to successful
+2024-12-10 14:26:32,043 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/e72141aebe2526be46dd4808527bdb68.nc
+2024-12-10 14:26:33,503 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\4\2m_temperature_2002_04_hourly.nc
+2024-12-10 14:26:38,790 - Request ID is f480a67e-0bd7-4d64-ba8b-1e6588a3a079
+2024-12-10 14:26:39,177 - status has been updated to accepted
+2024-12-10 14:26:44,230 - status has been updated to running
+2024-12-10 14:31:00,013 - status has been updated to successful
+2024-12-10 14:31:00,752 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/2ead97f300210045173cc9729db24ae1.nc
+2024-12-10 14:31:01,696 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\5\2m_temperature_2002_05_hourly.nc
+2024-12-10 14:31:06,967 - Request ID is 08be5144-bf6e-4e5c-b97d-27448a11638c
+2024-12-10 14:31:07,030 - status has been updated to accepted
+2024-12-10 14:31:14,205 - status has been updated to running
+2024-12-10 14:31:16,625 - status has been updated to accepted
+2024-12-10 14:31:20,135 - status has been updated to running
+2024-12-10 14:34:04,750 - status has been updated to successful
+2024-12-10 14:34:05,111 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/c5ae4aeca70134deb9083f78c229cece.nc
+2024-12-10 14:34:06,198 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\6\2m_temperature_2002_06_hourly.nc
+2024-12-10 14:34:13,408 - Request ID is d926a242-1f13-41fe-8802-dce86f3be475
+2024-12-10 14:34:13,488 - status has been updated to accepted
+2024-12-10 14:34:18,685 - status has been updated to running
+2024-12-10 14:37:06,848 - status has been updated to successful
+2024-12-10 14:37:07,321 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/ef1d0c084d8eef1d5bb745a75eaccb37.nc
+2024-12-10 14:37:08,491 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\7\2m_temperature_2002_07_hourly.nc
+2024-12-10 14:37:13,996 - Request ID is ac5e2207-fdbc-4a87-a5f3-41ea896e227d
+2024-12-10 14:37:14,188 - status has been updated to accepted
+2024-12-10 14:37:23,786 - status has been updated to running
+2024-12-10 14:43:38,003 - status has been updated to successful
+2024-12-10 14:43:38,475 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f44f175fa661a8abeecd1527443f21fb.nc
+2024-12-10 14:43:39,910 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\8\2m_temperature_2002_08_hourly.nc
+2024-12-10 14:43:45,647 - Request ID is b330747b-adee-4c63-85c7-2d6f5b7de377
+2024-12-10 14:43:45,721 - status has been updated to accepted
+2024-12-10 14:43:54,703 - status has been updated to running
+2024-12-10 14:46:39,325 - status has been updated to successful
+2024-12-10 14:46:39,467 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/fb7ec9ae82042fc11b0a809cb7b261d7.nc
+2024-12-10 14:46:40,443 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\9\2m_temperature_2002_09_hourly.nc
+2024-12-10 14:46:45,672 - Request ID is b962b6bf-5a33-4681-8c96-e2fe30c1f0a4
+2024-12-10 14:46:45,912 - status has been updated to accepted
+2024-12-10 14:46:54,559 - status has been updated to running
+2024-12-10 14:49:40,702 - status has been updated to successful
+2024-12-10 14:49:41,034 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f53c73c36a9d1e785184c417c5ca9a1d.nc
+2024-12-10 14:49:43,155 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\10\2m_temperature_2002_10_hourly.nc
+2024-12-10 14:49:50,068 - Request ID is 26226938-a0b3-4cfc-9774-9e07f3283b19
+2024-12-10 14:49:50,187 - status has been updated to accepted
+2024-12-10 14:49:55,219 - status has been updated to running
+2024-12-10 14:52:42,549 - status has been updated to successful
+2024-12-10 14:52:43,177 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/9371db509171a240771038d60c407e91.nc
+2024-12-10 14:52:44,711 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\11\2m_temperature_2002_11_hourly.nc
+2024-12-10 14:52:49,866 - Request ID is 8f73cd2f-05d2-4253-a173-eb3dc0aaca71
+2024-12-10 14:52:49,968 - status has been updated to accepted
+2024-12-10 14:52:54,991 - status has been updated to running
+2024-12-10 14:54:44,963 - status has been updated to successful
+2024-12-10 14:54:46,920 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/94e803115b375755b48ef6d9babeb81c.nc
+2024-12-10 14:54:48,096 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2002\12\2m_temperature_2002_12_hourly.nc
+2024-12-10 14:54:53,333 - Request ID is a7c3a7d5-689f-408e-a828-cb53ee50cf5d
+2024-12-10 14:54:53,396 - status has been updated to accepted
+2024-12-10 14:55:02,220 - status has been updated to running
+2024-12-10 14:57:47,514 - status has been updated to successful
+2024-12-10 14:57:47,660 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/ae2a18184c292ed0fe88510e2a66cc52.nc
+2024-12-10 14:57:49,010 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\1\2m_temperature_2003_01_hourly.nc
+2024-12-10 14:57:54,219 - Request ID is 05834738-8136-400f-8856-99d5612090ed
+2024-12-10 14:57:54,316 - status has been updated to accepted
+2024-12-10 14:58:02,825 - status has been updated to running
+2024-12-10 15:00:47,148 - status has been updated to successful
+2024-12-10 15:00:47,371 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/ecc66434ce54b35dcfb146fc3e5f14cc.nc
+2024-12-10 15:00:48,668 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\2\2m_temperature_2003_02_hourly.nc
+2024-12-10 15:00:53,832 - Request ID is 8855dfd6-3b27-46ac-82aa-46c7fb9b3780
+2024-12-10 15:00:55,916 - status has been updated to accepted
+2024-12-10 15:01:01,523 - status has been updated to running
+2024-12-10 15:02:51,679 - status has been updated to successful
+2024-12-10 15:02:53,257 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/be040e60449743c9117bc0dec1bc64d2.nc
+2024-12-10 15:02:54,757 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\3\2m_temperature_2003_03_hourly.nc
+2024-12-10 15:03:00,289 - Request ID is 3267759d-5c52-497a-8299-338761e737bc
+2024-12-10 15:03:00,428 - status has been updated to accepted
+2024-12-10 15:03:05,623 - status has been updated to running
+2024-12-10 15:05:54,829 - status has been updated to successful
+2024-12-10 15:05:55,379 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/2a86443c7ced99e63780056cd42e93c3.nc
+2024-12-10 15:05:56,840 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\4\2m_temperature_2003_04_hourly.nc
+2024-12-10 15:06:02,151 - Request ID is c498dc5f-3cb1-4474-861a-8f9ed271b744
+2024-12-10 15:06:02,310 - status has been updated to accepted
+2024-12-10 15:06:07,898 - status has been updated to running
+2024-12-10 15:08:56,514 - status has been updated to successful
+2024-12-10 15:08:56,921 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/cc918d9b5402df87bb2edca0a23ec8a6.nc
+2024-12-10 15:09:01,341 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\5\2m_temperature_2003_05_hourly.nc
+2024-12-10 15:09:06,506 - Request ID is 6dec85c7-1876-4787-98ea-41fe3b8ebaa4
+2024-12-10 15:09:07,074 - status has been updated to accepted
+2024-12-10 15:09:12,252 - status has been updated to running
+2024-12-10 15:13:26,966 - status has been updated to successful
+2024-12-10 15:13:27,134 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/b27bcf048fe9ed6975229ab462be394e.nc
+2024-12-10 15:13:28,465 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\6\2m_temperature_2003_06_hourly.nc
+2024-12-10 15:13:36,214 - Request ID is 2d51e6c8-ceac-49b2-85a9-848b7e4b13ea
+2024-12-10 15:13:36,300 - status has been updated to accepted
+2024-12-10 15:13:44,818 - status has been updated to running
+2024-12-10 15:15:30,596 - status has been updated to successful
+2024-12-10 15:15:31,129 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/492d752d359de3911563d91d0309ed41.nc
+2024-12-10 15:15:32,667 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\7\2m_temperature_2003_07_hourly.nc
+2024-12-10 15:15:37,848 - Request ID is 21782de5-4c72-4df5-849e-6c35274365e4
+2024-12-10 15:15:37,931 - status has been updated to accepted
+2024-12-10 15:15:46,427 - status has been updated to running
+2024-12-10 15:19:58,205 - status has been updated to successful
+2024-12-10 15:19:58,722 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/455d953622972dbe10de27423af52683.nc
+2024-12-10 15:19:59,746 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\8\2m_temperature_2003_08_hourly.nc
+2024-12-10 15:20:04,973 - Request ID is ca04e241-474c-4d40-8187-b83a435f30f9
+2024-12-10 15:20:05,159 - status has been updated to accepted
+2024-12-10 15:20:26,465 - status has been updated to running
+2024-12-10 15:22:58,024 - status has been updated to successful
+2024-12-10 15:22:58,700 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/4ed20c583122c4842d74b35c309aeb8.nc
+2024-12-10 15:22:59,922 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\9\2m_temperature_2003_09_hourly.nc
+2024-12-10 15:23:05,269 - Request ID is 7372defa-a3d4-4779-8142-de9cf7fea8e4
+2024-12-10 15:23:05,539 - status has been updated to accepted
+2024-12-10 15:23:19,652 - status has been updated to running
+2024-12-10 15:27:26,161 - status has been updated to successful
+2024-12-10 15:27:26,423 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/b2966dc508df068336d7179fc8b6ad69.nc
+2024-12-10 15:27:28,492 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\10\2m_temperature_2003_10_hourly.nc
+2024-12-10 15:27:35,162 - Request ID is 2b86ee1a-d67b-4ba7-b276-78229d072b76
+2024-12-10 15:27:36,889 - status has been updated to accepted
+2024-12-10 15:27:40,319 - status has been updated to running
+2024-12-10 15:30:32,311 - status has been updated to successful
+2024-12-10 15:30:32,622 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/348219cf6e1314eb20eacf0ebf003fe7.nc
+2024-12-10 15:30:34,694 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\11\2m_temperature_2003_11_hourly.nc
+2024-12-10 15:30:40,052 - Request ID is 9c53c2f2-5187-45e3-87cf-04a069233e6c
+2024-12-10 15:30:40,208 - status has been updated to accepted
+2024-12-10 15:30:45,277 - status has been updated to running
+2024-12-10 15:33:33,407 - status has been updated to successful
+2024-12-10 15:33:33,594 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/fb1a1d41b82e610ac41020f02a317d9f.nc
+2024-12-10 15:33:34,578 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2003\12\2m_temperature_2003_12_hourly.nc
+2024-12-10 15:33:40,052 - Request ID is f2504735-65e1-43a1-91cb-39e0ea411d2e
+2024-12-10 15:33:40,242 - status has been updated to accepted
+2024-12-10 15:35:34,864 - status has been updated to running
+2024-12-10 15:36:33,890 - status has been updated to successful
+2024-12-10 15:36:35,529 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/6eff343da3c98d6e3ad3620e252aed7e.nc
+2024-12-10 15:36:37,306 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\1\2m_temperature_2004_01_hourly.nc
+2024-12-10 15:36:44,908 - Request ID is b4c9c77a-c4da-401c-863e-07cc3e9bc6da
+2024-12-10 15:36:44,974 - status has been updated to accepted
+2024-12-10 15:37:00,085 - status has been updated to running
+2024-12-10 15:39:38,975 - status has been updated to successful
+2024-12-10 15:39:39,310 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/7f75c293baf314aaaa5d0f9904f1ecb0.nc
+2024-12-10 15:39:40,442 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\2\2m_temperature_2004_02_hourly.nc
+2024-12-10 15:39:45,909 - Request ID is 61fbd48d-2b13-48ef-885f-b5c46f61280f
+2024-12-10 15:39:46,061 - status has been updated to accepted
+2024-12-10 15:39:52,157 - status has been updated to running
+2024-12-10 15:42:39,956 - status has been updated to successful
+2024-12-10 15:42:40,133 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/fc01c6a3a563119659d24298f607a6c1.nc
+2024-12-10 15:42:41,425 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\3\2m_temperature_2004_03_hourly.nc
+2024-12-10 15:42:47,051 - Request ID is a2078b58-0e4a-446a-a1b6-dea0b98e0d9c
+2024-12-10 15:42:47,128 - status has been updated to accepted
+2024-12-10 15:42:52,212 - status has been updated to running
+2024-12-10 15:45:40,059 - status has been updated to successful
+2024-12-10 15:45:40,233 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/957ba5c8ea79bee72c91a444168edbc6.nc
+2024-12-10 15:45:41,296 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\4\2m_temperature_2004_04_hourly.nc
+2024-12-10 15:45:46,477 - Request ID is fc8c7097-7964-4b80-b701-1f8f6a58dec6
+2024-12-10 15:45:46,538 - status has been updated to accepted
+2024-12-10 15:45:52,367 - status has been updated to running
+2024-12-10 15:47:43,062 - status has been updated to successful
+2024-12-10 15:47:43,234 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/ac4c48ec950fc60c4329445d2c0a1540.nc
+2024-12-10 15:47:44,378 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\5\2m_temperature_2004_05_hourly.nc
+2024-12-10 15:47:49,628 - Request ID is c06e0048-25f9-4b99-a1d4-009c3175bbed
+2024-12-10 15:47:49,713 - status has been updated to accepted
+2024-12-10 15:47:58,234 - status has been updated to running
+2024-12-10 15:49:44,987 - status has been updated to successful
+2024-12-10 15:49:45,126 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/6e51dfacba2da60c425c342d39a6b3bf.nc
+2024-12-10 15:49:46,308 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\6\2m_temperature_2004_06_hourly.nc
+2024-12-10 15:49:52,748 - Request ID is 48d5e1db-1415-4610-84b6-39a183b3dd5c
+2024-12-10 15:49:52,874 - status has been updated to accepted
+2024-12-10 15:50:06,555 - status has been updated to running
+2024-12-10 15:52:45,120 - status has been updated to successful
+2024-12-10 15:52:45,391 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/414084f3f231a656407694d5efa06a7e.nc
+2024-12-10 15:52:46,550 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\7\2m_temperature_2004_07_hourly.nc
+2024-12-10 15:52:51,822 - Request ID is 4d24d5c4-051a-41ea-95e1-775d29d3e00b
+2024-12-10 15:52:52,045 - status has been updated to accepted
+2024-12-10 15:52:57,334 - status has been updated to running
+2024-12-10 15:54:46,831 - status has been updated to successful
+2024-12-10 15:54:47,055 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/8e37654ed9629124c7b9bf92572b77a0.nc
+2024-12-10 15:54:48,350 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\8\2m_temperature_2004_08_hourly.nc
+2024-12-10 15:54:53,614 - Request ID is 4eec12b9-dcc2-4327-85ee-cbd077259cee
+2024-12-10 15:54:53,881 - status has been updated to accepted
+2024-12-10 15:54:59,348 - status has been updated to running
+2024-12-10 15:57:47,367 - status has been updated to successful
+2024-12-10 15:57:47,591 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/4bffbbd8a51ae0bfbd4916afb50e8206.nc
+2024-12-10 15:57:48,632 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\9\2m_temperature_2004_09_hourly.nc
+2024-12-10 15:57:53,966 - Request ID is 169a3edf-b99e-424b-869f-7aecc81fa068
+2024-12-10 15:57:54,056 - status has been updated to accepted
+2024-12-10 15:58:02,996 - status has been updated to running
+2024-12-10 16:02:13,898 - status has been updated to successful
+2024-12-10 16:02:14,243 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/26926d7a81dba23ae84fe9f552d328f6.nc
+2024-12-10 16:02:15,598 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\10\2m_temperature_2004_10_hourly.nc
+2024-12-10 16:02:21,496 - Request ID is e45008ff-1162-4399-9519-f55f5b296b12
+2024-12-10 16:02:21,772 - status has been updated to accepted
+2024-12-10 16:02:30,223 - status has been updated to running
+2024-12-10 16:06:41,074 - status has been updated to successful
+2024-12-10 16:06:41,362 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/de648ce29abd878106bb3784e931a09.nc
+2024-12-10 16:06:42,866 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\11\2m_temperature_2004_11_hourly.nc
+2024-12-10 16:06:48,252 - Request ID is 06bbac56-a2aa-4c2f-ad11-fb85bdef91f0
+2024-12-10 16:06:48,338 - status has been updated to accepted
+2024-12-10 16:06:57,269 - status has been updated to running
+2024-12-10 16:11:08,016 - status has been updated to successful
+2024-12-10 16:11:08,189 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/fb821d3b26ae84e93e987a2f31370c88.nc
+2024-12-10 16:11:09,846 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2004\12\2m_temperature_2004_12_hourly.nc
+2024-12-10 16:11:15,095 - Request ID is 9bf30a0a-0eab-4e0b-9e85-50e3b96dc51c
+2024-12-10 16:11:15,168 - status has been updated to accepted
+2024-12-10 16:11:20,221 - status has been updated to running
+2024-12-10 16:14:08,823 - status has been updated to successful
+2024-12-10 16:14:09,108 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/cc01f15a70971682941d6599fadfb44d.nc
+2024-12-10 16:14:10,359 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\1\2m_temperature_2005_01_hourly.nc
+2024-12-10 16:14:15,871 - Request ID is bdf952fa-6d40-435a-a26e-2822ff11c377
+2024-12-10 16:14:16,052 - status has been updated to accepted
+2024-12-10 16:14:24,691 - status has been updated to running
+2024-12-10 16:17:08,594 - status has been updated to successful
+2024-12-10 16:17:08,725 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/decb4d5c51f5206c7438f5bf3a132790.nc
+2024-12-10 16:17:10,589 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\2\2m_temperature_2005_02_hourly.nc
+2024-12-10 16:17:16,793 - Request ID is 290a9298-1307-40f3-9599-e02c57439a04
+2024-12-10 16:17:16,849 - status has been updated to accepted
+2024-12-10 16:17:25,602 - status has been updated to running
+2024-12-10 16:19:11,487 - status has been updated to successful
+2024-12-10 16:19:11,660 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/57476f2f9f81a32359f672f03bc64db3.nc
+2024-12-10 16:19:13,508 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\3\2m_temperature_2005_03_hourly.nc
+2024-12-10 16:19:18,687 - Request ID is 455a2755-0591-4bf2-b453-69b67a78ea8a
+2024-12-10 16:19:18,758 - status has been updated to accepted
+2024-12-10 16:19:40,171 - status has been updated to running
+2024-12-10 16:22:10,892 - status has been updated to successful
+2024-12-10 16:22:11,084 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/c7da7250d009cc1b1b8a7dccfab3327f.nc
+2024-12-10 16:22:12,194 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\4\2m_temperature_2005_04_hourly.nc
+2024-12-10 16:22:17,437 - Request ID is b06c8cfa-d419-42d0-a466-c6688c16712f
+2024-12-10 16:22:17,501 - status has been updated to accepted
+2024-12-10 16:22:40,307 - status has been updated to running
+2024-12-10 16:24:13,540 - status has been updated to successful
+2024-12-10 16:24:13,762 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/4aea16d363e77fbd90a66ed0b10ce52f.nc
+2024-12-10 16:24:15,097 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\5\2m_temperature_2005_05_hourly.nc
+2024-12-10 16:24:20,329 - Request ID is 30e81e49-22ae-485e-9297-33aec00222d0
+2024-12-10 16:24:20,430 - status has been updated to accepted
+2024-12-10 16:24:29,022 - status has been updated to running
+2024-12-10 16:27:12,971 - status has been updated to successful
+2024-12-10 16:27:13,124 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/9ca8d1e22624c87e29c33037efff3b0d.nc
+2024-12-10 16:27:14,328 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\6\2m_temperature_2005_06_hourly.nc
+2024-12-10 16:27:19,655 - Request ID is 723a0237-756e-48f0-a831-17eaf4e136be
+2024-12-10 16:27:19,730 - status has been updated to accepted
+2024-12-10 16:27:28,188 - status has been updated to running
+2024-12-10 16:30:11,871 - status has been updated to successful
+2024-12-10 16:30:12,149 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f908aa8ec98b9f73b640020235884c30.nc
+2024-12-10 16:30:13,355 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\7\2m_temperature_2005_07_hourly.nc
+2024-12-10 16:30:18,573 - Request ID is 580d0957-da83-4a93-9261-50b563b2c93a
+2024-12-10 16:30:18,631 - status has been updated to accepted
+2024-12-10 16:30:27,269 - status has been updated to running
+2024-12-10 16:34:37,988 - status has been updated to successful
+2024-12-10 16:34:38,262 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f787bb7d09b9a782ac18d28897c6496b.nc
+2024-12-10 16:34:39,869 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\8\2m_temperature_2005_08_hourly.nc
+2024-12-10 16:34:45,224 - Request ID is 6d0db788-fe8e-443d-a839-ba5e1d47f4f4
+2024-12-10 16:34:45,812 - status has been updated to accepted
+2024-12-10 16:34:54,690 - status has been updated to running
+2024-12-10 16:37:39,166 - status has been updated to successful
+2024-12-10 16:37:39,413 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/146e207faa3235eee628a6ab9390fe66.nc
+2024-12-10 16:37:40,583 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\9\2m_temperature_2005_09_hourly.nc
+2024-12-10 16:37:45,873 - Request ID is 275bee8d-b599-4b93-ad3d-bfe8f4b6a38c
+2024-12-10 16:37:46,018 - status has been updated to accepted
+2024-12-10 16:37:54,806 - status has been updated to running
+2024-12-10 16:39:41,271 - status has been updated to successful
+2024-12-10 16:39:41,481 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/ac4fdf5cc0729d7fcf97adf26683892b.nc
+2024-12-10 16:39:42,849 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\10\2m_temperature_2005_10_hourly.nc
+2024-12-10 16:39:48,200 - Request ID is 1f00772c-1ce4-4675-a113-b9dbe01070ea
+2024-12-10 16:39:48,380 - status has been updated to accepted
+2024-12-10 16:39:57,073 - status has been updated to running
+2024-12-10 16:42:41,081 - status has been updated to successful
+2024-12-10 16:42:41,240 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/2dff5fb092c12daeb794d1b401dfb9d.nc
+2024-12-10 16:42:42,699 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\11\2m_temperature_2005_11_hourly.nc
+2024-12-10 16:42:48,162 - Request ID is 53cc6830-4e5e-42a7-8780-79ed8122c319
+2024-12-10 16:42:48,565 - status has been updated to accepted
+2024-12-10 16:42:51,643 - status has been updated to running
+2024-12-10 16:45:41,381 - status has been updated to successful
+2024-12-10 16:45:41,700 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/210d2361af741538cecdbef190e9700.nc
+2024-12-10 16:45:43,039 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2005\12\2m_temperature_2005_12_hourly.nc
+2024-12-10 16:45:48,906 - Request ID is 99f536ad-a2f2-411c-9ebe-8f5c4ae03fcf
+2024-12-10 16:45:49,066 - status has been updated to accepted
+2024-12-10 16:45:57,625 - status has been updated to running
+2024-12-10 16:50:08,080 - status has been updated to successful
+2024-12-10 16:50:08,270 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/3a91301558d861f05a4e986341687b6c.nc
+2024-12-10 16:50:09,632 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\1\2m_temperature_2006_01_hourly.nc
+2024-12-10 16:50:14,851 - Request ID is f0f01520-d6e1-411a-9e01-044c7b7f5da7
+2024-12-10 16:50:14,983 - status has been updated to accepted
+2024-12-10 16:50:20,022 - status has been updated to running
+2024-12-10 16:54:33,810 - status has been updated to successful
+2024-12-10 16:54:34,029 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/c4a1d93dd58ed1e9ff784486d17c0768.nc
+2024-12-10 16:54:35,081 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\2\2m_temperature_2006_02_hourly.nc
+2024-12-10 16:54:40,357 - Request ID is 77dd45ba-0cf4-44bf-b021-2bb8afbe9151
+2024-12-10 16:54:40,420 - status has been updated to accepted
+2024-12-10 16:54:49,080 - status has been updated to running
+2024-12-10 16:57:34,021 - status has been updated to successful
+2024-12-10 16:57:34,226 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/88c43dc2f6b3e671346002fe47a2c6b1.nc
+2024-12-10 16:57:35,578 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\3\2m_temperature_2006_03_hourly.nc
+2024-12-10 16:57:40,765 - Request ID is 20b2fb25-1437-4214-8949-c2db0f7fae93
+2024-12-10 16:57:40,875 - status has been updated to accepted
+2024-12-10 16:57:49,615 - status has been updated to running
+2024-12-10 17:00:33,682 - status has been updated to successful
+2024-12-10 17:00:34,107 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/efc563ca5f2d42034db6d9736f522d35.nc
+2024-12-10 17:00:35,347 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\4\2m_temperature_2006_04_hourly.nc
+2024-12-10 17:00:40,706 - Request ID is 57727d14-4ac7-4236-95f2-588f2391b62c
+2024-12-10 17:00:40,847 - status has been updated to accepted
+2024-12-10 17:00:49,515 - status has been updated to running
+2024-12-10 17:05:00,205 - status has been updated to successful
+2024-12-10 17:05:00,362 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f1c672b5de06265dde8dc526aac11bf7.nc
+2024-12-10 17:05:01,461 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\5\2m_temperature_2006_05_hourly.nc
+2024-12-10 17:05:06,695 - Request ID is 76110230-6429-428c-9fd1-bf6d3a5efd04
+2024-12-10 17:05:06,805 - status has been updated to accepted
+2024-12-10 17:05:15,508 - status has been updated to running
+2024-12-10 17:07:01,793 - status has been updated to successful
+2024-12-10 17:07:01,982 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/8c395a6f9188994b9054c9a473b5e9ce.nc
+2024-12-10 17:07:03,114 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\6\2m_temperature_2006_06_hourly.nc
+2024-12-10 17:07:08,407 - Request ID is 0e6cbb58-1be9-40bb-a16e-1e57c4e5788b
+2024-12-10 17:07:09,493 - status has been updated to accepted
+2024-12-10 17:07:18,157 - status has been updated to running
+2024-12-10 17:09:04,119 - status has been updated to successful
+2024-12-10 17:09:04,338 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/30f938200d0b28af9f385d774949cf57.nc
+2024-12-10 17:09:05,672 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\7\2m_temperature_2006_07_hourly.nc
+2024-12-10 17:09:11,239 - Request ID is f029e054-9cef-4023-80eb-9cd0566c5bfd
+2024-12-10 17:09:11,307 - status has been updated to accepted
+2024-12-10 17:09:16,343 - status has been updated to running
+2024-12-10 17:12:03,784 - status has been updated to successful
+2024-12-10 17:12:03,917 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/497a861ad074736a2ef89058dde97346.nc
+2024-12-10 17:12:05,080 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\8\2m_temperature_2006_08_hourly.nc
+2024-12-10 17:12:10,252 - Request ID is 29f6a0da-e53c-4eaa-9040-4342328f6b47
+2024-12-10 17:12:10,450 - status has been updated to accepted
+2024-12-10 17:12:31,682 - status has been updated to running
+2024-12-10 17:14:05,031 - status has been updated to successful
+2024-12-10 17:14:05,323 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/c661207847f57922df8900fb74432993.nc
+2024-12-10 17:14:06,485 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\9\2m_temperature_2006_09_hourly.nc
+2024-12-10 17:14:11,678 - Request ID is f02867cc-0b87-4dc8-bd7c-88ae1e839079
+2024-12-10 17:14:11,755 - status has been updated to accepted
+2024-12-10 17:14:25,414 - status has been updated to running
+2024-12-10 17:16:06,105 - status has been updated to successful
+2024-12-10 17:16:06,432 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/34773ec67dcddb667e19ff2896245f4d.nc
+2024-12-10 17:16:07,922 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\10\2m_temperature_2006_10_hourly.nc
+2024-12-10 17:16:13,245 - Request ID is af984e5e-1101-4b3c-ba9b-df3799b72d91
+2024-12-10 17:16:13,395 - status has been updated to accepted
+2024-12-10 17:16:22,117 - status has been updated to running
+2024-12-10 17:19:06,086 - status has been updated to successful
+2024-12-10 17:19:06,399 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/7a1c9f837c36a39153385e3e23a9081f.nc
+2024-12-10 17:19:07,459 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\11\2m_temperature_2006_11_hourly.nc
+2024-12-10 17:19:12,635 - Request ID is 32727c87-aaa0-4c3b-97f0-80882d3bba58
+2024-12-10 17:19:12,689 - status has been updated to accepted
+2024-12-10 17:19:19,498 - status has been updated to running
+2024-12-10 17:21:09,169 - status has been updated to successful
+2024-12-10 17:21:09,702 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f16c61ffc28330e5c561416794dae253.nc
+2024-12-10 17:21:10,931 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2006\12\2m_temperature_2006_12_hourly.nc
+2024-12-10 17:21:16,131 - Request ID is 06aaefc8-8fa2-47d1-9417-6ca5c31ee092
+2024-12-10 17:21:16,219 - status has been updated to accepted
+2024-12-10 17:21:21,430 - status has been updated to running
+2024-12-10 17:25:35,765 - status has been updated to successful
+2024-12-10 17:25:36,281 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/761da189f3ff538958585cfd66e50e12.nc
+2024-12-10 17:25:37,645 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\1\2m_temperature_2007_01_hourly.nc
+2024-12-10 17:25:42,926 - Request ID is 19a44e7c-a0e6-440a-96bf-9e14618e7cfe
+2024-12-10 17:25:43,336 - status has been updated to accepted
+2024-12-10 17:25:48,308 - status has been updated to running
+2024-12-10 17:30:05,881 - status has been updated to successful
+2024-12-10 17:30:06,060 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/fd5997198b19422a5c646c87def90078.nc
+2024-12-10 17:30:07,191 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\2\2m_temperature_2007_02_hourly.nc
+2024-12-10 17:30:12,384 - Request ID is 9026ca45-d19f-4ee7-aa5a-3236480d8148
+2024-12-10 17:30:13,015 - status has been updated to accepted
+2024-12-10 17:30:21,809 - status has been updated to running
+2024-12-10 17:34:32,660 - status has been updated to successful
+2024-12-10 17:34:32,990 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/83d2b4ecbc28ea31ea6cbffde34e28dd.nc
+2024-12-10 17:34:34,424 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\3\2m_temperature_2007_03_hourly.nc
+2024-12-10 17:34:39,771 - Request ID is c3316d02-e471-47e3-a39c-d96afe5d3253
+2024-12-10 17:34:40,000 - status has been updated to accepted
+2024-12-10 17:34:48,821 - status has been updated to running
+2024-12-10 17:37:32,490 - status has been updated to successful
+2024-12-10 17:37:32,929 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/88ad96058bbe372fe3530cd06430de5c.nc
+2024-12-10 17:37:34,202 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\4\2m_temperature_2007_04_hourly.nc
+2024-12-10 17:37:39,559 - Request ID is ee749d84-b4f2-4b83-8018-980653fcdc64
+2024-12-10 17:37:39,638 - status has been updated to accepted
+2024-12-10 17:37:48,475 - status has been updated to running
+2024-12-10 17:41:59,003 - status has been updated to successful
+2024-12-10 17:41:59,255 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/c21402381f9b3d23ca03eb6c9727e053.nc
+2024-12-10 17:42:02,021 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\5\2m_temperature_2007_05_hourly.nc
+2024-12-10 17:42:07,353 - Request ID is f5e5fbbc-5237-4a1c-a50f-2130ec6afc28
+2024-12-10 17:42:07,495 - status has been updated to accepted
+2024-12-10 17:42:15,896 - status has been updated to running
+2024-12-10 17:44:59,703 - status has been updated to successful
+2024-12-10 17:45:00,410 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/b0715c3dfb8d85e670c711a73e789e5f.nc
+2024-12-10 17:45:02,356 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\6\2m_temperature_2007_06_hourly.nc
+2024-12-10 17:45:07,559 - Request ID is 2812c269-bdc8-4d78-91e5-92c0cdfc5d5d
+2024-12-10 17:45:07,622 - status has been updated to accepted
+2024-12-10 17:45:16,115 - status has been updated to running
+2024-12-10 17:47:59,871 - status has been updated to successful
+2024-12-10 17:48:00,390 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/55dfd4db58a624977a4436e2ddceb4ee.nc
+2024-12-10 17:48:01,505 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\7\2m_temperature_2007_07_hourly.nc
+2024-12-10 17:48:06,821 - Request ID is 34af26c9-651c-4ddc-b837-8e130d5b15cf
+2024-12-10 17:48:06,899 - status has been updated to accepted
+2024-12-10 17:48:16,568 - status has been updated to running
+2024-12-10 17:51:00,399 - status has been updated to successful
+2024-12-10 17:51:00,557 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f58ecc9ee4a9be39bfdad6791d30a7c9.nc
+2024-12-10 17:51:01,828 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\8\2m_temperature_2007_08_hourly.nc
+2024-12-10 17:51:07,015 - Request ID is 6fec6025-46c3-428e-83ba-9eb54c8b984d
+2024-12-10 17:51:07,188 - status has been updated to accepted
+2024-12-10 17:51:13,423 - status has been updated to running
+2024-12-10 17:54:00,703 - status has been updated to successful
+2024-12-10 17:54:00,876 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/66dfef888a3da0248f5914b71306cb4c.nc
+2024-12-10 17:54:01,991 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\9\2m_temperature_2007_09_hourly.nc
+2024-12-10 17:54:07,376 - Request ID is f17c148e-90e8-4a02-9e49-f6a8f8656347
+2024-12-10 17:54:07,443 - status has been updated to accepted
+2024-12-10 17:54:12,483 - status has been updated to running
+2024-12-10 17:54:15,921 - status has been updated to accepted
+2024-12-10 17:54:21,225 - status has been updated to running
+2024-12-10 17:56:01,971 - status has been updated to successful
+2024-12-10 17:56:02,259 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/c8476ca90e96a165ba9768e16c54e60d.nc
+2024-12-10 17:56:03,398 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\10\2m_temperature_2007_10_hourly.nc
+2024-12-10 17:56:08,594 - Request ID is cbfe4fdf-4046-4fdb-bf64-d77668218d02
+2024-12-10 17:56:08,673 - status has been updated to accepted
+2024-12-10 17:57:24,925 - status has been updated to running
+2024-12-10 18:00:28,352 - status has been updated to successful
+2024-12-10 18:00:29,074 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/cdecc1bced1f40d1055316cdb8b0de1c.nc
+2024-12-10 18:00:30,273 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\11\2m_temperature_2007_11_hourly.nc
+2024-12-10 18:00:35,555 - Request ID is 59a9e641-c060-4aa1-9091-bd84f1f6f57c
+2024-12-10 18:00:35,623 - status has been updated to accepted
+2024-12-10 18:06:54,465 - status has been updated to successful
+2024-12-10 18:06:54,630 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/61cfaa0414ae44716efffa9b6c546dc1.nc
+2024-12-10 18:06:55,863 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2007\12\2m_temperature_2007_12_hourly.nc
+2024-12-10 18:07:01,071 - Request ID is 73e5f440-8d7a-4f27-baf3-ba38240f073f
+2024-12-10 18:07:01,148 - status has been updated to accepted
+2024-12-10 18:17:27,828 - status has been updated to running
+2024-12-10 18:19:28,001 - status has been updated to successful
+2024-12-10 18:19:28,196 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/3187da16d2daa302638c6979254e5dd5.nc
+2024-12-10 18:19:29,386 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\1\2m_temperature_2008_01_hourly.nc
+2024-12-10 18:19:34,588 - Request ID is 29074351-6372-4883-b65a-e4e995cf5c0f
+2024-12-10 18:19:34,667 - status has been updated to accepted
+2024-12-10 18:31:56,334 - status has been updated to running
+2024-12-10 18:33:56,522 - status has been updated to successful
+2024-12-10 18:33:56,680 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/33208824f06aa129b34bd70aeab82670.nc
+2024-12-10 18:33:58,645 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\2\2m_temperature_2008_02_hourly.nc
+2024-12-10 18:34:03,836 - Request ID is 8a152d48-c47d-46f9-8b3d-ec22863e7ead
+2024-12-10 18:34:03,940 - status has been updated to accepted
+2024-12-10 18:52:29,719 - status has been updated to running
+2024-12-10 18:54:29,915 - status has been updated to successful
+2024-12-10 18:54:30,062 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/c0fc2a88c46d35d724d9644f87334b3a.nc
+2024-12-10 18:54:31,433 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\3\2m_temperature_2008_03_hourly.nc
+2024-12-10 18:54:36,733 - Request ID is 1ddaf274-5bd6-43c2-8e55-2e03338b0f74
+2024-12-10 18:54:36,795 - status has been updated to accepted
+2024-12-11 03:02:07,643 - status has been updated to successful
+2024-12-11 06:36:31,870 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 06:36:31,870 - Retrying in 120 seconds
+2024-12-11 10:12:38,443 - Retrying now...
+2024-12-11 10:12:39,401 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/95990e8182213de44dd5e67a33bfa88f.nc
+2024-12-11 10:12:40,957 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\4\2m_temperature_2008_04_hourly.nc
+2024-12-11 10:12:46,300 - Request ID is 0e60ef45-9d1c-4dde-ad26-3836c453d5b7
+2024-12-11 10:12:46,449 - status has been updated to accepted
+2024-12-11 10:12:51,733 - status has been updated to running
+2024-12-11 10:15:41,805 - status has been updated to successful
+2024-12-11 10:15:42,247 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/734aaa426589cccd2c5d3d8b0c1abbfc.nc
+2024-12-11 10:15:43,445 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\5\2m_temperature_2008_05_hourly.nc
+2024-12-11 10:15:48,609 - Request ID is 6023641a-c1b2-42f0-a320-33f7f0680b06
+2024-12-11 10:15:48,678 - status has been updated to accepted
+2024-12-11 10:16:38,805 - status has been updated to running
+2024-12-11 10:18:41,449 - status has been updated to successful
+2024-12-11 10:18:43,284 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/e3e9b0cb7aeaee9ab9a3ea314ee8970c.nc
+2024-12-11 10:18:44,726 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\6\2m_temperature_2008_06_hourly.nc
+2024-12-11 10:18:50,269 - Request ID is a14dbd54-bf45-487c-bb38-3344b28b84f6
+2024-12-11 10:18:50,395 - status has been updated to accepted
+2024-12-11 10:19:12,035 - status has been updated to running
+2024-12-11 10:23:10,207 - status has been updated to successful
+2024-12-11 10:23:10,425 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/a9b9367c194f635265949192dbe754ad.nc
+2024-12-11 10:23:11,580 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\7\2m_temperature_2008_07_hourly.nc
+2024-12-11 10:23:17,703 - Request ID is 0a9c287e-b1b3-4b26-967a-ae56c3d6ba5a
+2024-12-11 10:23:17,914 - status has been updated to accepted
+2024-12-11 10:23:40,238 - status has been updated to running
+2024-12-11 10:27:38,049 - status has been updated to successful
+2024-12-11 10:27:38,356 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/7622746c819271335b43fe16bd7f47d1.nc
+2024-12-11 10:27:41,131 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\8\2m_temperature_2008_08_hourly.nc
+2024-12-11 10:27:46,318 - Request ID is 0f89aaf4-70a1-4728-8716-8859cc797cb8
+2024-12-11 10:27:46,946 - status has been updated to accepted
+2024-12-11 10:28:08,377 - status has been updated to running
+2024-12-11 10:30:40,275 - status has been updated to successful
+2024-12-11 10:30:47,259 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/ad23913c8eb2d1f201b864110beb5722.nc
+2024-12-11 10:30:48,879 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\9\2m_temperature_2008_09_hourly.nc
+2024-12-11 10:30:54,386 - Request ID is b10a6c05-d290-4625-a472-6d7bcf4529c5
+2024-12-11 10:30:54,529 - status has been updated to accepted
+2024-12-11 10:31:44,880 - status has been updated to running
+2024-12-11 10:49:16,075 - status has been updated to successful
+2024-12-11 10:49:16,450 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/a38a2b05342c31cdca191e38e23c6376.nc
+2024-12-11 10:49:17,690 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\10\2m_temperature_2008_10_hourly.nc
+2024-12-11 10:49:23,462 - Request ID is 60f3cede-f78e-42ce-8036-794c5f5c0216
+2024-12-11 10:49:23,671 - status has been updated to accepted
+2024-12-11 12:31:48,518 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 12:31:48,522 - Retrying in 120 seconds
+2024-12-11 12:33:48,524 - Retrying now...
+2024-12-11 12:33:48,815 - status has been updated to successful
+2024-12-11 12:33:48,995 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/43122a06bbe8c7eef499a622519c2866.nc
+2024-12-11 12:33:49,984 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\11\2m_temperature_2008_11_hourly.nc
+2024-12-11 12:33:55,206 - Request ID is 81244641-ef32-41cf-9f30-f869a05b4576
+2024-12-11 12:33:55,375 - status has been updated to accepted
+2024-12-11 13:17:29,405 - status has been updated to running
+2024-12-11 13:19:29,927 - status has been updated to successful
+2024-12-11 13:19:30,555 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/a9638fb37ea8a93dddc4b16bf754862e.nc
+2024-12-11 13:19:31,958 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2008\12\2m_temperature_2008_12_hourly.nc
+2024-12-11 13:19:37,252 - Request ID is 76b367f3-6fd3-4089-bf2e-995edf86439c
+2024-12-11 13:19:37,356 - status has been updated to accepted
+2024-12-11 13:45:59,642 - status has been updated to running
+2024-12-11 13:47:59,849 - status has been updated to successful
+2024-12-11 13:48:00,054 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/209cdd58792133d2db44765ec9010db.nc
+2024-12-11 13:48:02,144 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\1\2m_temperature_2009_01_hourly.nc
+2024-12-11 13:48:07,739 - Request ID is a788446b-4862-4cb3-935d-24948039f259
+2024-12-11 13:48:07,793 - status has been updated to accepted
+2024-12-11 14:00:30,678 - status has been updated to running
+2024-12-11 14:02:30,859 - status has been updated to successful
+2024-12-11 14:02:31,236 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f1830b056366ff3a4248562255117d0.nc
+2024-12-11 14:02:32,351 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\2\2m_temperature_2009_02_hourly.nc
+2024-12-11 14:02:37,520 - Request ID is 60b23d8e-4f3c-4d5e-a378-63d60a165f82
+2024-12-11 14:02:38,034 - status has been updated to accepted
+2024-12-11 14:06:57,116 - status has been updated to running
+2024-12-11 14:08:57,465 - status has been updated to successful
+2024-12-11 14:08:57,705 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/32399006ff0b5d4550685778ff2083d6.nc
+2024-12-11 14:08:59,171 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\3\2m_temperature_2009_03_hourly.nc
+2024-12-11 14:09:04,404 - Request ID is b3123d50-2188-4ce1-ba30-a06b7e055a84
+2024-12-11 14:09:04,503 - status has been updated to accepted
+2024-12-11 14:13:24,200 - status has been updated to running
+2024-12-11 14:15:24,376 - status has been updated to successful
+2024-12-11 14:15:24,583 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/ccab70e4c2f7ceaf373c01771c9ac8a7.nc
+2024-12-11 14:15:26,001 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\4\2m_temperature_2009_04_hourly.nc
+2024-12-11 14:15:31,201 - Request ID is b7f4d03c-03da-4769-a829-5a3883f98baa
+2024-12-11 14:15:31,282 - status has been updated to accepted
+2024-12-11 14:15:39,874 - status has been updated to running
+2024-12-11 14:18:23,841 - status has been updated to successful
+2024-12-11 14:18:24,335 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f58bee5e14948bebb28d819647dcd0c3.nc
+2024-12-11 14:18:26,241 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\5\2m_temperature_2009_05_hourly.nc
+2024-12-11 14:18:31,437 - Request ID is f5783995-5db8-482e-a0a1-4c417293ccf1
+2024-12-11 14:18:31,571 - status has been updated to accepted
+2024-12-11 14:21:24,144 - status has been updated to running
+2024-12-11 14:24:51,207 - status has been updated to successful
+2024-12-11 14:24:51,894 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/277e23c9b939712f35be755f1234cc47.nc
+2024-12-11 14:24:53,110 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\6\2m_temperature_2009_06_hourly.nc
+2024-12-11 14:24:58,393 - Request ID is 8d5755c2-2f09-4517-b1a8-a02cb466dd74
+2024-12-11 14:24:58,473 - status has been updated to accepted
+2024-12-11 14:25:03,807 - status has been updated to running
+2024-12-11 14:27:51,130 - status has been updated to successful
+2024-12-11 14:27:51,278 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/74e6ad86ab45dad4008c2e8d44a3fe57.nc
+2024-12-11 14:27:53,770 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\7\2m_temperature_2009_07_hourly.nc
+2024-12-11 14:27:59,155 - Request ID is 2b3e414b-a2a3-4b10-bda4-e6fbd661899c
+2024-12-11 14:27:59,225 - status has been updated to accepted
+2024-12-11 14:28:04,562 - status has been updated to running
+2024-12-11 14:42:25,210 - status has been updated to successful
+2024-12-11 14:42:25,399 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/b3448e39b10d02cbadf02763412ea295.nc
+2024-12-11 14:42:26,551 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\8\2m_temperature_2009_08_hourly.nc
+2024-12-11 14:42:31,764 - Request ID is a210032c-4a11-4e0d-b767-8966ab0d5aa0
+2024-12-11 14:42:31,859 - status has been updated to accepted
+2024-12-11 14:42:45,630 - status has been updated to running
+2024-12-11 14:45:24,690 - status has been updated to successful
+2024-12-11 14:45:26,876 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f808ce495ec4431218a1f1a836850fb2.nc
+2024-12-11 14:45:28,015 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\9\2m_temperature_2009_09_hourly.nc
+2024-12-11 14:45:33,173 - Request ID is 2502773d-20fc-40bf-bb51-34ae1622819c
+2024-12-11 14:45:33,239 - status has been updated to accepted
+2024-12-11 14:45:42,830 - status has been updated to running
+2024-12-11 14:49:54,739 - status has been updated to successful
+2024-12-11 14:49:54,898 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/82709b8bd350fd5bd84749978c8ae5c6.nc
+2024-12-11 14:49:56,192 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\10\2m_temperature_2009_10_hourly.nc
+2024-12-11 14:50:01,540 - Request ID is b2efacc5-7be1-4c4e-867b-23f1c2b424b5
+2024-12-11 14:50:01,593 - status has been updated to accepted
+2024-12-11 14:50:15,184 - status has been updated to running
+2024-12-11 14:52:53,780 - status has been updated to successful
+2024-12-11 14:52:54,035 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/83aaf7d88f5fd20dc4a03425258b0826.nc
+2024-12-11 14:52:55,091 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\11\2m_temperature_2009_11_hourly.nc
+2024-12-11 14:53:00,393 - Request ID is 242e7a3b-86b7-4d81-911b-461b2f0a5516
+2024-12-11 14:53:00,568 - status has been updated to accepted
+2024-12-11 14:53:22,096 - status has been updated to running
+2024-12-11 14:57:19,796 - status has been updated to successful
+2024-12-11 14:57:19,958 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/63e58bb32a4144179a2c767c3df891d8.nc
+2024-12-11 14:57:21,202 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2009\12\2m_temperature_2009_12_hourly.nc
+2024-12-11 14:57:26,370 - Request ID is e84d4686-6fba-4873-a86e-8dd1fb9cfb9d
+2024-12-11 14:57:26,452 - status has been updated to accepted
+2024-12-11 15:03:45,808 - status has been updated to running
+2024-12-11 15:07:46,700 - status has been updated to successful
+2024-12-11 15:07:46,844 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/82bdda2142967f45ac44f223cc5eec91.nc
+2024-12-11 15:07:48,388 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\1\2m_temperature_2010_01_hourly.nc
+2024-12-11 15:07:53,554 - Request ID is e6b91533-5c92-4798-9875-43ce3695d6a5
+2024-12-11 15:07:53,804 - status has been updated to accepted
+2024-12-11 15:08:15,082 - status has been updated to running
+2024-12-11 15:10:45,968 - status has been updated to successful
+2024-12-11 15:10:46,284 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/35547b9ec131b7f14de68e274c22ad8c.nc
+2024-12-11 15:10:47,263 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\2\2m_temperature_2010_02_hourly.nc
+2024-12-11 15:10:52,699 - Request ID is 38353538-6966-4ca7-b16b-1718e4fa39fa
+2024-12-11 15:10:52,857 - status has been updated to accepted
+2024-12-11 15:10:57,944 - status has been updated to running
+2024-12-11 15:13:45,325 - status has been updated to successful
+2024-12-11 15:13:45,614 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/e6eda7eeffbaec1210cbc478b10dcd25.nc
+2024-12-11 15:13:47,128 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\3\2m_temperature_2010_03_hourly.nc
+2024-12-11 15:13:52,324 - Request ID is 22766be4-0fcd-45ec-bc14-85e6fba7bbb9
+2024-12-11 15:13:52,391 - status has been updated to accepted
+2024-12-11 15:14:14,187 - status has been updated to running
+2024-12-11 15:16:45,016 - status has been updated to successful
+2024-12-11 15:16:45,763 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/6afe395e6e6a7fcfa7ea4060561d41ac.nc
+2024-12-11 15:16:47,707 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\4\2m_temperature_2010_04_hourly.nc
+2024-12-11 15:16:52,981 - Request ID is c036e2bf-456b-42ec-a82e-b15f91d8e109
+2024-12-11 15:16:53,631 - status has been updated to accepted
+2024-12-11 15:19:46,649 - status has been updated to running
+2024-12-11 15:23:13,778 - status has been updated to successful
+2024-12-11 15:23:14,078 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/92560f16ec3a0c645303d05de71fb898.nc
+2024-12-11 15:23:15,210 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\5\2m_temperature_2010_05_hourly.nc
+2024-12-11 15:23:20,563 - Request ID is a1269670-a9c4-4fd3-8a99-dd55d6a16aa4
+2024-12-11 15:23:20,756 - status has been updated to accepted
+2024-12-11 15:23:42,276 - status has been updated to running
+2024-12-11 15:26:13,299 - status has been updated to successful
+2024-12-11 15:26:13,440 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/9c2603aabf2c07c4de588de90c6b25e3.nc
+2024-12-11 15:26:14,647 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\6\2m_temperature_2010_06_hourly.nc
+2024-12-11 15:26:19,923 - Request ID is 79a6e074-dec2-4021-af4d-635e786025d5
+2024-12-11 15:26:20,011 - status has been updated to accepted
+2024-12-11 15:26:52,713 - status has been updated to running
+2024-12-11 15:29:12,010 - status has been updated to successful
+2024-12-11 15:29:12,280 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/622deb27a8b51e9c7bcccb65e6998835.nc
+2024-12-11 15:29:13,519 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\7\2m_temperature_2010_07_hourly.nc
+2024-12-11 15:29:18,848 - Request ID is b27ff001-731f-4fd7-8f4b-7755fe833370
+2024-12-11 15:29:18,983 - status has been updated to accepted
+2024-12-11 15:29:21,643 - status has been updated to running
+2024-12-11 15:32:11,124 - status has been updated to successful
+2024-12-11 15:32:11,258 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/6e47fb737f6a175e5b862be3e575360d.nc
+2024-12-11 15:32:12,488 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\8\2m_temperature_2010_08_hourly.nc
+2024-12-11 15:32:17,765 - Request ID is 01ffa67a-d2f1-4ce6-a58b-1189fc648d6e
+2024-12-11 15:32:17,847 - status has been updated to accepted
+2024-12-11 15:32:26,445 - status has been updated to running
+2024-12-11 15:35:10,253 - status has been updated to successful
+2024-12-11 15:35:10,393 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/aa8002977d7c3acc99a2d3ab9945ef13.nc
+2024-12-11 15:35:11,891 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\9\2m_temperature_2010_09_hourly.nc
+2024-12-11 15:35:17,041 - Request ID is 574299b2-faac-495a-b02c-1e4a754bc977
+2024-12-11 15:35:17,123 - status has been updated to accepted
+2024-12-11 15:35:38,302 - status has been updated to running
+2024-12-11 15:38:09,509 - status has been updated to successful
+2024-12-11 15:38:09,638 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/9b8edd310b1b30479b8990f446c7c7a4.nc
+2024-12-11 15:38:10,873 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\10\2m_temperature_2010_10_hourly.nc
+2024-12-11 15:38:16,322 - Request ID is 188c9f15-aeb7-49de-87b7-b7e75d9b973e
+2024-12-11 15:38:16,421 - status has been updated to accepted
+2024-12-11 15:38:49,352 - status has been updated to running
+2024-12-11 15:42:35,453 - status has been updated to successful
+2024-12-11 15:42:35,597 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/a3092339ec7b0af3f1f2382a2fae818f.nc
+2024-12-11 15:42:36,879 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\11\2m_temperature_2010_11_hourly.nc
+2024-12-11 15:42:42,497 - Request ID is 8055801f-2810-43db-988f-7cada0ecbe0f
+2024-12-11 15:42:42,599 - status has been updated to accepted
+2024-12-11 15:42:56,306 - status has been updated to running
+2024-12-11 15:45:35,458 - status has been updated to successful
+2024-12-11 15:45:35,712 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/e3b7b58349ff902e3bc146778d7c5536.nc
+2024-12-11 15:45:37,090 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2010\12\2m_temperature_2010_12_hourly.nc
+2024-12-11 15:45:42,290 - Request ID is 33931c12-9fe1-4d85-97a9-3b4b51a6fca5
+2024-12-11 15:45:42,352 - status has been updated to accepted
+2024-12-11 15:45:56,224 - status has been updated to running
+2024-12-11 15:50:02,124 - status has been updated to successful
+2024-12-11 15:50:02,308 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/69cce17833606e3179d72b1b41378016.nc
+2024-12-11 15:50:04,381 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\1\2m_temperature_2011_01_hourly.nc
+2024-12-11 15:50:09,654 - Request ID is 018304ee-841c-4008-bd73-39fd11cae20d
+2024-12-11 15:50:09,889 - status has been updated to accepted
+2024-12-11 15:52:04,116 - status has been updated to running
+2024-12-11 15:54:28,861 - status has been updated to successful
+2024-12-11 15:54:29,224 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/7e97b1a85818097603653bef1dc6bd13.nc
+2024-12-11 15:54:31,068 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\2\2m_temperature_2011_02_hourly.nc
+2024-12-11 15:54:36,517 - Request ID is fab4c12a-036c-4d4c-85a2-a3a5e0540e65
+2024-12-11 15:54:36,609 - status has been updated to accepted
+2024-12-11 15:57:29,091 - status has been updated to running
+2024-12-11 16:00:56,610 - status has been updated to successful
+2024-12-11 16:00:56,792 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/1eb40c09f1218bbe07ddef61b47cfc0.nc
+2024-12-11 16:00:58,569 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\3\2m_temperature_2011_03_hourly.nc
+2024-12-11 16:01:03,844 - Request ID is f8c22898-8786-4d1d-b7a4-e268d17e74d2
+2024-12-11 16:01:04,084 - status has been updated to accepted
+2024-12-11 16:01:25,927 - status has been updated to running
+2024-12-11 16:05:23,680 - status has been updated to successful
+2024-12-11 16:05:23,831 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/bc5e0c775155a5c9547f9a9023a1179a.nc
+2024-12-11 16:05:25,224 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\4\2m_temperature_2011_04_hourly.nc
+2024-12-11 16:05:30,590 - Request ID is 8937c9e3-2de9-4392-ab4f-40941c9b8456
+2024-12-11 16:05:30,754 - status has been updated to accepted
+2024-12-11 16:05:44,387 - status has been updated to running
+2024-12-11 16:07:25,172 - status has been updated to successful
+2024-12-11 16:07:25,531 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/312044e0fe0481ad1b43bce39476d04f.nc
+2024-12-11 16:07:26,932 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\5\2m_temperature_2011_05_hourly.nc
+2024-12-11 16:07:32,258 - Request ID is e30a80ad-0340-4d86-b33d-ce5f3dac1a67
+2024-12-11 16:07:32,350 - status has been updated to accepted
+2024-12-11 16:07:37,453 - status has been updated to running
+2024-12-11 16:11:51,959 - status has been updated to successful
+2024-12-11 16:11:52,119 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/a0b2d2bac1d190e470f8c47bb5e70b91.nc
+2024-12-11 16:11:53,283 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\6\2m_temperature_2011_06_hourly.nc
+2024-12-11 16:11:58,465 - Request ID is ac849e55-91ab-4bd5-8853-d14bc384cbea
+2024-12-11 16:11:58,532 - status has been updated to accepted
+2024-12-11 16:12:06,966 - status has been updated to running
+2024-12-11 16:16:17,604 - status has been updated to successful
+2024-12-11 16:16:17,790 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f7fe85706faa4ff48a74428c7b589354.nc
+2024-12-11 16:16:19,121 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\7\2m_temperature_2011_07_hourly.nc
+2024-12-11 16:16:24,327 - Request ID is ec7f827f-a6bf-4ba9-a356-21b0335a3e88
+2024-12-11 16:16:24,470 - status has been updated to accepted
+2024-12-11 16:17:14,469 - status has been updated to running
+2024-12-11 16:19:16,879 - status has been updated to successful
+2024-12-11 16:19:17,090 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/253c6f1ae84bb11a62dd7f08e7d92149.nc
+2024-12-11 16:19:18,414 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\8\2m_temperature_2011_08_hourly.nc
+2024-12-11 16:19:23,594 - Request ID is fde377ba-3a95-442b-9167-aedf3d9bc47d
+2024-12-11 16:19:23,673 - status has been updated to accepted
+2024-12-11 16:19:28,618 - status has been updated to running
+2024-12-11 16:22:17,535 - status has been updated to successful
+2024-12-11 16:22:17,737 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/9ad327e44f89576842fecb472283acb2.nc
+2024-12-11 16:22:19,080 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\9\2m_temperature_2011_09_hourly.nc
+2024-12-11 16:22:24,302 - Request ID is 8fc2712c-33ff-49f6-90b8-3308a5ebf061
+2024-12-11 16:22:24,401 - status has been updated to accepted
+2024-12-11 16:22:29,370 - status has been updated to running
+2024-12-11 16:25:16,530 - status has been updated to successful
+2024-12-11 16:25:17,019 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/555984c90ec1aa368f1ece975a54c726.nc
+2024-12-11 16:25:18,520 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\10\2m_temperature_2011_10_hourly.nc
+2024-12-11 16:25:23,916 - Request ID is eb84f25f-6177-4665-9e34-ee91ef3d98b2
+2024-12-11 16:25:23,971 - status has been updated to accepted
+2024-12-11 16:25:28,920 - status has been updated to running
+2024-12-11 16:28:16,140 - status has been updated to successful
+2024-12-11 16:28:16,291 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/dc38d96183d735e79b655336fa4b4587.nc
+2024-12-11 16:28:17,490 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\11\2m_temperature_2011_11_hourly.nc
+2024-12-11 16:28:22,742 - Request ID is f1a3028e-cd71-4b3a-a0c0-4df48eda81e7
+2024-12-11 16:28:22,835 - status has been updated to accepted
+2024-12-11 16:28:28,020 - status has been updated to running
+2024-12-11 16:30:17,195 - status has been updated to successful
+2024-12-11 16:30:17,452 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/7097cc17e4f3fb04e71b50160fc0d14f.nc
+2024-12-11 16:30:18,916 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2011\12\2m_temperature_2011_12_hourly.nc
+2024-12-11 16:30:24,177 - Request ID is 7e8b6960-6cbf-4db2-b06c-ca1600dc0c2c
+2024-12-11 16:30:24,269 - status has been updated to accepted
+2024-12-11 16:30:32,829 - status has been updated to running
+2024-12-11 16:33:16,733 - status has been updated to successful
+2024-12-11 16:33:16,887 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/78cda984789d49845995408fc22f72e6.nc
+2024-12-11 16:33:18,174 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\1\2m_temperature_2012_01_hourly.nc
+2024-12-11 16:33:23,576 - Request ID is db2d38e8-04ee-4dd7-a1a5-1d9d672985cf
+2024-12-11 16:33:23,653 - status has been updated to accepted
+2024-12-11 16:33:37,610 - status has been updated to running
+2024-12-11 16:36:17,600 - status has been updated to successful
+2024-12-11 16:36:18,009 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/49ada3ecb6e16bae2c2df6234796cf54.nc
+2024-12-11 16:36:19,257 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\2\2m_temperature_2012_02_hourly.nc
+2024-12-11 16:36:24,502 - Request ID is b5cce835-891c-4216-981d-57386b81fcdc
+2024-12-11 16:36:24,588 - status has been updated to accepted
+2024-12-11 16:36:33,104 - status has been updated to running
+2024-12-11 16:39:16,845 - status has been updated to successful
+2024-12-11 16:39:16,973 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/a9baf3abf1d1c3d40f51dbe15116240c.nc
+2024-12-11 16:39:18,350 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\3\2m_temperature_2012_03_hourly.nc
+2024-12-11 16:39:23,522 - Request ID is f1b0da41-d0a2-4f99-8d7d-a865cb686b54
+2024-12-11 16:39:23,845 - status has been updated to accepted
+2024-12-11 16:39:28,877 - status has been updated to running
+2024-12-11 16:43:43,158 - status has been updated to successful
+2024-12-11 16:43:43,476 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/352851a3dfcdc5dd3088dc54f91f4045.nc
+2024-12-11 16:43:44,793 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\4\2m_temperature_2012_04_hourly.nc
+2024-12-11 16:43:49,970 - Request ID is ae4436d4-234d-4cfe-9ca8-feaac50e9dcd
+2024-12-11 16:43:50,115 - status has been updated to accepted
+2024-12-11 16:48:09,761 - status has been updated to running
+2024-12-11 16:50:10,160 - status has been updated to successful
+2024-12-11 16:50:10,378 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f03d10fbc14bfa26a2e2ad80133d7cd9.nc
+2024-12-11 16:50:11,765 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\5\2m_temperature_2012_05_hourly.nc
+2024-12-11 16:50:16,990 - Request ID is c078bb8c-b03c-432c-8cb2-4103122a8ae6
+2024-12-11 16:50:17,398 - status has been updated to accepted
+2024-12-11 16:50:22,502 - status has been updated to running
+2024-12-11 16:53:12,195 - status has been updated to successful
+2024-12-11 16:53:12,369 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/bc6f624388f94b93ad7b38e047a17169.nc
+2024-12-11 16:53:13,494 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\6\2m_temperature_2012_06_hourly.nc
+2024-12-11 16:53:18,743 - Request ID is d862c700-261c-43be-8348-a6d805ad8242
+2024-12-11 16:53:18,862 - status has been updated to accepted
+2024-12-11 16:53:33,025 - status has been updated to running
+2024-12-11 16:56:11,565 - status has been updated to successful
+2024-12-11 16:56:12,163 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/69b6a517737304bd24f14a3a91ec502.nc
+2024-12-11 16:56:15,596 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\7\2m_temperature_2012_07_hourly.nc
+2024-12-11 16:56:20,885 - Request ID is 55d807df-26ef-46b9-a4d5-21265af1ab79
+2024-12-11 16:56:21,248 - status has been updated to accepted
+2024-12-11 16:56:29,833 - status has been updated to running
+2024-12-11 16:58:15,836 - status has been updated to successful
+2024-12-11 16:58:16,068 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/36e19151d51dcee575b79f2343c26f2f.nc
+2024-12-11 16:58:17,410 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\8\2m_temperature_2012_08_hourly.nc
+2024-12-11 16:58:22,723 - Request ID is 4a127275-df97-4dbe-a926-cca9d81d50d4
+2024-12-11 16:58:22,851 - status has been updated to accepted
+2024-12-11 16:59:38,762 - status has been updated to running
+2024-12-11 17:02:42,287 - status has been updated to successful
+2024-12-11 17:02:42,441 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/33bf6e759bb4f2a20b1c0dff37e9fb03.nc
+2024-12-11 17:02:43,405 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\9\2m_temperature_2012_09_hourly.nc
+2024-12-11 17:02:48,560 - Request ID is 78a3aa5d-07da-4c1e-8af5-01375840a96d
+2024-12-11 17:02:48,654 - status has been updated to accepted
+2024-12-11 17:02:57,236 - status has been updated to running
+2024-12-11 17:05:41,068 - status has been updated to successful
+2024-12-11 17:05:41,300 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/cb6dbe0dfcb2a41f8574bfe5897ada22.nc
+2024-12-11 17:05:42,719 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\10\2m_temperature_2012_10_hourly.nc
+2024-12-11 17:05:48,125 - Request ID is 84ed438c-3db9-4ec0-993d-edeaed66ce39
+2024-12-11 17:05:48,179 - status has been updated to accepted
+2024-12-11 17:05:53,285 - status has been updated to running
+2024-12-11 17:12:07,585 - status has been updated to successful
+2024-12-11 17:12:07,775 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/1fe6af2e528a5a85a655357eb00b127a.nc
+2024-12-11 17:12:09,164 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\11\2m_temperature_2012_11_hourly.nc
+2024-12-11 17:12:14,313 - Request ID is d847073e-33a5-4b18-9ada-57476dbdb225
+2024-12-11 17:12:14,386 - status has been updated to accepted
+2024-12-11 17:13:30,333 - status has been updated to running
+2024-12-11 17:15:06,823 - status has been updated to successful
+2024-12-11 17:15:07,136 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/10cff0727722e4e7ad4fcfec9e3aff5.nc
+2024-12-11 17:15:09,048 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2012\12\2m_temperature_2012_12_hourly.nc
+2024-12-11 17:15:14,286 - Request ID is 6e9d1622-4de1-4939-b13e-d522c6cb50f3
+2024-12-11 17:15:14,349 - status has been updated to accepted
+2024-12-11 17:15:47,066 - status has been updated to running
+2024-12-11 17:20:40,289 - status has been updated to successful
+2024-12-11 17:20:40,541 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/5920362dcf2aa37687373e9ba2664fde.nc
+2024-12-11 17:20:42,408 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\1\2m_temperature_2013_01_hourly.nc
+2024-12-11 17:20:47,559 - Request ID is 5b8a38f6-6d69-40c9-a152-12e497206b9a
+2024-12-11 17:20:47,622 - status has been updated to accepted
+2024-12-11 17:21:01,392 - status has been updated to running
+2024-12-11 17:23:39,934 - status has been updated to successful
+2024-12-11 17:23:42,017 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/912745d44ed3167f31d07e45d78dabfd.nc
+2024-12-11 17:23:43,129 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\2\2m_temperature_2013_02_hourly.nc
+2024-12-11 17:23:48,305 - Request ID is 519ec368-eb73-411b-a951-1a9f72dd7dcb
+2024-12-11 17:23:48,383 - status has been updated to accepted
+2024-12-11 17:23:53,438 - status has been updated to running
+2024-12-11 17:26:41,277 - status has been updated to successful
+2024-12-11 17:26:41,430 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/c1d627495e09e256be519bf5030b0269.nc
+2024-12-11 17:26:42,935 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\3\2m_temperature_2013_03_hourly.nc
+2024-12-11 17:26:48,118 - Request ID is ff38c969-86b7-4bd9-9275-a1648f52641d
+2024-12-11 17:26:48,253 - status has been updated to accepted
+2024-12-11 17:27:01,818 - status has been updated to running
+2024-12-11 17:29:40,380 - status has been updated to successful
+2024-12-11 17:29:40,557 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/aadc84ff41cb9dcf56f41e67ce2abb98.nc
+2024-12-11 17:29:41,941 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\4\2m_temperature_2013_04_hourly.nc
+2024-12-11 17:29:47,291 - Request ID is 62148ec3-43f2-4338-b0c4-0b6bfb90047d
+2024-12-11 17:29:47,443 - status has been updated to accepted
+2024-12-11 17:29:52,533 - status has been updated to running
+2024-12-11 17:34:06,441 - status has been updated to successful
+2024-12-11 17:34:06,792 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/a9f5d72ede1a97a4082bc323322d29e0.nc
+2024-12-11 17:34:13,456 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\5\2m_temperature_2013_05_hourly.nc
+2024-12-11 17:34:18,642 - Request ID is 07f5446e-cda7-4359-8030-1cdc37743aa9
+2024-12-11 17:34:18,713 - status has been updated to accepted
+2024-12-11 17:34:40,049 - status has been updated to running
+2024-12-11 17:37:10,955 - status has been updated to successful
+2024-12-11 17:37:11,249 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/665b650b5912cc4a07edc3f1b751de01.nc
+2024-12-11 17:37:12,511 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\6\2m_temperature_2013_06_hourly.nc
+2024-12-11 17:37:17,713 - Request ID is 1ee87f55-d75a-4a15-a8b6-47d00cc6edba
+2024-12-11 17:37:17,878 - status has been updated to accepted
+2024-12-11 17:37:31,927 - status has been updated to running
+2024-12-11 17:40:10,620 - status has been updated to successful
+2024-12-11 17:40:10,772 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/5108622ad0d44bafa62f88ff76484ce1.nc
+2024-12-11 17:40:12,030 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\7\2m_temperature_2013_07_hourly.nc
+2024-12-11 17:40:17,196 - Request ID is 7d5b8a6c-cdc8-4090-bd64-7e9fe5c048b5
+2024-12-11 17:40:17,296 - status has been updated to accepted
+2024-12-11 17:40:50,272 - status has been updated to running
+2024-12-11 17:44:36,399 - status has been updated to successful
+2024-12-11 17:44:36,582 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/52d954dcebcf9eb185793befc81c7e3b.nc
+2024-12-11 17:44:37,692 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\8\2m_temperature_2013_08_hourly.nc
+2024-12-11 17:44:43,444 - Request ID is 6c5d24b7-5b04-4fd1-9273-9d1cc543821f
+2024-12-11 17:44:43,509 - status has been updated to accepted
+2024-12-11 17:44:52,320 - status has been updated to running
+2024-12-11 17:49:02,781 - status has been updated to successful
+2024-12-11 17:49:03,049 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/e8097f72eec8ac4fdf126496ec9c0985.nc
+2024-12-11 17:49:04,085 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\9\2m_temperature_2013_09_hourly.nc
+2024-12-11 17:49:09,326 - Request ID is 5bc11e48-1469-4d0b-99d1-7538859ffce6
+2024-12-11 17:49:09,508 - status has been updated to accepted
+2024-12-11 17:51:04,441 - status has been updated to running
+2024-12-11 17:56:19,522 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 17:56:19,522 - Retrying in 120 seconds
+2024-12-11 17:58:19,527 - Retrying now...
+2024-12-11 17:58:19,899 - status has been updated to successful
+2024-12-11 17:58:20,143 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/27fdb87b877460a91b0b9eb4d87af1ee.nc
+2024-12-11 17:58:21,256 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\10\2m_temperature_2013_10_hourly.nc
+2024-12-11 17:58:26,600 - Request ID is cdaa29e1-658d-4386-a108-adab356a4a28
+2024-12-11 17:58:26,716 - status has been updated to accepted
+2024-12-11 17:59:19,353 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 17:59:19,353 - Retrying in 120 seconds
+2024-12-11 18:01:19,366 - Retrying now...
+2024-12-11 18:01:19,589 - status has been updated to running
+2024-12-11 18:01:21,920 - status has been updated to successful
+2024-12-11 18:01:22,040 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/f3375b741034add038b7aba6ff6fa851.nc
+2024-12-11 18:01:25,322 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\11\2m_temperature_2013_11_hourly.nc
+2024-12-11 18:01:30,537 - Request ID is 3a802526-7d94-4c3f-8da5-00535e17442d
+2024-12-11 18:01:30,595 - status has been updated to accepted
+2024-12-11 18:02:08,514 - status has been updated to running
+2024-12-11 18:04:09,294 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 18:04:09,294 - Retrying in 120 seconds
+2024-12-11 18:06:09,302 - Retrying now...
+2024-12-11 18:06:09,484 - status has been updated to successful
+2024-12-11 18:06:09,754 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/4ead6dbcabae2d24c9b2bfb5d5899dd.nc
+2024-12-11 18:06:11,020 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2013\12\2m_temperature_2013_12_hourly.nc
+2024-12-11 18:07:06,059 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 18:07:06,059 - Retrying in 120 seconds
+2024-12-11 18:09:06,074 - Retrying now...
+2024-12-11 18:09:07,068 - Request ID is 9e04cc2d-cf6c-4355-bc9a-7a09b47d93b2
+2024-12-11 18:09:07,210 - status has been updated to accepted
+2024-12-11 18:09:59,847 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 18:09:59,847 - Retrying in 120 seconds
+2024-12-11 18:11:59,860 - Retrying now...
+2024-12-11 18:12:00,212 - status has been updated to running
+2024-12-11 18:13:09,124 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 18:13:09,125 - Retrying in 120 seconds
+2024-12-11 18:15:09,126 - Retrying now...
+2024-12-11 18:15:09,404 - status has been updated to successful
+2024-12-11 18:15:13,436 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/4622c314ee846a66895420450641a796.nc
+2024-12-11 18:15:14,738 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\1\2m_temperature_2014_01_hourly.nc
+2024-12-11 18:15:23,105 - Request ID is 7fb73dc4-d92e-4f53-ba9f-cb66fc8b40f9
+2024-12-11 18:15:23,173 - status has been updated to accepted
+2024-12-11 18:16:43,409 - status has been updated to running
+2024-12-11 18:19:54,015 - status has been updated to successful
+2024-12-11 18:19:56,389 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/2d83cecc9f401ae5b08e0cc723ea215a.nc
+2024-12-11 18:19:57,568 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\2\2m_temperature_2014_02_hourly.nc
+2024-12-11 18:20:04,923 - Request ID is 80dfa239-a269-48fc-80ed-7af48566bf54
+2024-12-11 18:20:05,011 - status has been updated to accepted
+2024-12-11 18:21:01,154 - status has been updated to running
+2024-12-11 18:23:06,576 - status has been updated to successful
+2024-12-11 18:23:16,095 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/2e7a4f129268d763cbfd941b6f2f147c.nc
+2024-12-11 18:23:18,459 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\3\2m_temperature_2014_03_hourly.nc
+2024-12-11 18:23:32,801 - Request ID is a6244712-2024-4a26-9360-eb6c6b484374
+2024-12-11 18:23:34,722 - status has been updated to accepted
+2024-12-11 18:23:36,036 - status has been updated to running
+2024-12-11 18:26:41,268 - status has been updated to successful
+2024-12-11 18:26:41,543 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/8281982ed3511e88ff5424aa2946fd04.nc
+2024-12-11 18:26:45,139 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\4\2m_temperature_2014_04_hourly.nc
+2024-12-11 18:26:50,450 - Request ID is 137725b8-e548-403c-afbb-afc39e7e2322
+2024-12-11 18:26:50,534 - status has been updated to accepted
+2024-12-11 18:26:59,047 - status has been updated to running
+2024-12-11 18:29:43,053 - status has been updated to successful
+2024-12-11 18:29:43,302 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/2b10a680cb7ab912d554adf61a35cca3.nc
+2024-12-11 18:29:44,599 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\5\2m_temperature_2014_05_hourly.nc
+2024-12-11 18:29:50,499 - Request ID is 248f5524-7221-417a-9daf-711362ce01fd
+2024-12-11 18:29:50,608 - status has been updated to accepted
+2024-12-11 18:30:23,641 - status has been updated to running
+2024-12-11 18:31:58,831 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 18:31:58,832 - Retrying in 120 seconds
+2024-12-11 18:33:58,833 - Retrying now...
+2024-12-11 18:33:59,415 - status has been updated to successful
+2024-12-11 18:33:59,784 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/94f090c2ff011ee64c568a5829a76665.nc
+2024-12-11 18:34:01,217 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\6\2m_temperature_2014_06_hourly.nc
+2024-12-11 18:34:06,848 - Request ID is 4389928e-a508-40f0-b891-dc610aa9c6fb
+2024-12-11 18:34:07,076 - status has been updated to accepted
+2024-12-11 18:35:02,235 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 18:35:02,235 - Retrying in 120 seconds
+2024-12-11 18:37:02,247 - Retrying now...
+2024-12-11 18:37:02,446 - status has been updated to running
+2024-12-11 18:38:01,281 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-11 18:38:01,281 - Retrying in 120 seconds
+2024-12-11 18:40:01,293 - Retrying now...
+2024-12-11 18:40:01,464 - status has been updated to successful
+2024-12-11 18:40:04,244 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/b4971d04ec5c8e9c9391917d60e5b49b.nc
+2024-12-11 18:40:08,211 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\7\2m_temperature_2014_07_hourly.nc
+2024-12-11 18:40:13,912 - Request ID is 6ea1f10d-3cf4-4c8d-898e-35f491966fc1
+2024-12-11 18:40:28,474 - status has been updated to running
+2024-12-11 18:42:55,953 - status has been updated to successful
+2024-12-11 18:43:22,556 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/97e31b87b2eb669447a89c7f99843ac9.nc
+2024-12-11 18:43:24,424 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\8\2m_temperature_2014_08_hourly.nc
+2024-12-11 18:43:37,321 - Request ID is dbc6b6a4-09a3-42c0-87fc-7ace6e024af2
+2024-12-11 18:43:37,521 - status has been updated to accepted
+2024-12-11 18:43:43,159 - status has been updated to running
+2024-12-11 18:46:32,178 - status has been updated to successful
+2024-12-11 18:46:46,311 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/3cd2670e58c8e9d16d4457c31dd4afcd.nc
+2024-12-11 18:46:47,486 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\9\2m_temperature_2014_09_hourly.nc
+2024-12-11 18:46:52,785 - Request ID is 57ad390b-9727-40e9-a97f-0b9870870c15
+2024-12-11 18:47:02,189 - status has been updated to accepted
+2024-12-11 18:47:05,590 - status has been updated to running
+2024-12-11 18:50:14,868 - status has been updated to successful
+2024-12-11 18:50:15,563 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/500fc9187e74b36ac16988d5f380d597.nc
+2024-12-11 18:50:22,438 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\10\2m_temperature_2014_10_hourly.nc
+2024-12-11 18:50:28,990 - Request ID is db393205-09ee-4dea-ba46-6460de7fb8ed
+2024-12-11 18:50:29,045 - status has been updated to accepted
+2024-12-11 18:50:35,138 - status has been updated to running
+2024-12-11 18:53:38,338 - status has been updated to successful
+2024-12-11 18:53:38,822 - Downloading https://object-store.os-api.cci2.ecmwf.int:443/cci2-prod-cache/7d8f9f911e5e8c3cadad516c4160a7a9.nc
+2024-12-11 18:53:41,148 - Successfully downloaded: data\raw\grided\era5land_vars_1995_2018\2m_temperature\2014\11\2m_temperature_2014_11_hourly.nc
+2024-12-11 18:53:51,297 - Request ID is 3eb9edca-f6df-4f59-aecf-31137de41ab2
+2024-12-11 18:53:52,849 - status has been updated to accepted
+2024-12-11 18:53:55,798 - status has been updated to running
+2024-12-12 05:41:23,939 - Recovering from connection error [('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))], attemps 1 of 500
+2024-12-12 05:41:23,939 - Retrying in 120 seconds

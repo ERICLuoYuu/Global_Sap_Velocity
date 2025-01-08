@@ -18,12 +18,6 @@ venv/
 # Jupyter Notebooks
 .ipynb_checkpoints
 
-# Data and outputs
-data/raw/*
-data/processed/*
-outputs/models/*
-*.csv
-*.xlsx
 
 # Keep .gitkeep files
 !.gitkeep

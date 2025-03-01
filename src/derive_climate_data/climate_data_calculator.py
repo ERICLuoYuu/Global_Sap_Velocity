@@ -1,56 +1,78 @@
 import numpy as np
+import math
 class ClimateDataCalculator:
     """
     A class to calculate various climate variables from meteorological data
     """
     @staticmethod
-    def calculate_rh(t, td):
-        """
-        Calculate relative humidity from temperature and dewpoint
-        t: temperature in Celsius
-        td: dewpoint temperature in Celsius
-        Returns: RH in percentage (0-100)
-        """
-        # Constants for Magnus formula
-        a = 17.625
-        b = 243.04
-        
-        # Calculate vapor pressure and saturated vapor pressure
-        es = np.exp((a * t) / (b + t))  # Saturated vapor pressure
-        e =  np.exp((a * td) / (b + td))  # Actual vapor pressure
-        
-        rh = (e / es) * 100
-        return rh
+    def kelvin_to_celsius(temp_k):
+        """Convert Kelvin to Celsius"""
+        return temp_k - 273.15
     @staticmethod
-    def calculate_vpd(T: float, RH: float) -> float:
+    def calculate_vapor_pressure(temp_c):
         """
-        Calculate Vapor Pressure Deficit (VPD)
-        
-        Parameters:
-        -----------
-        T : float
-            Temperature in degrees Celsius
-        RH : float
-            Relative humidity (0-100)
-            
+        Calculate saturated vapor pressure using Tetens Formula
+        Args:
+            temp_c (float): Temperature in Celsius
         Returns:
-        --------
-        float : VPD in kPa
-        
-        References:
-        -----------
-        1. Murray, F.W. (1967). "On the computation of saturation vapor pressure"
-        2. Allen, R.G., et al. (1998). FAO Irrigation and Drainage Paper No. 56
-        3. Buck, A.L. (1981). "New equations for computing vapor pressure and enhancement factor"
+            float: Vapor pressure in millibars
         """
-        # Calculate saturation vapor pressure
-        es = 0.61121 * np.exp((18.678 - T/234.5) * (T/(257.14 + T)))
+        return 6.1078 * np.exp((17.269 * temp_c) / (237.3 + temp_c))
+    @staticmethod
+    def calculate_rh(air_temp_k, dew_temp_k):
+        """
+        Calculate Relative Humidity using air temperature and dew point temperature
+        Args:
+            air_temp_k (float): Air temperature in Kelvin
+            dew_temp_k (float): Dew point temperature in Kelvin
+        Returns:
+            float: Relative humidity in percentage
+        """
+        # Convert temperatures to Celsius
+        air_temp_c = ClimateDataCalculator.kelvin_to_celsius(air_temp_k)
+        dew_temp_c = ClimateDataCalculator.kelvin_to_celsius(dew_temp_k)
         
-        # Calculate actual vapor pressure
-        ea = es * (RH/100)
+        # Ensure dew point temperature is not higher than air temperature
+        if dew_temp_c > air_temp_c:
+            dew_temp_c = air_temp_c
         
-        # Calculate VPD
-        vpd = es - ea
+        # Calculate saturated vapor pressure (es) at air temperature
+        es = ClimateDataCalculator.calculate_vapor_pressure(air_temp_c)
+        
+        # Calculate actual vapor pressure (ea) at dew point temperature
+        ea = ClimateDataCalculator.calculate_vapor_pressure(dew_temp_c)
+        
+        # Calculate relative humidity
+        rh = (ea / es) * 100
+        
+        # Ensure RH doesn't exceed 100%
+        return min(rh, 100.0)
+    @staticmethod
+    def calculate_vpd(air_temp_k, dew_temp_k):
+        """
+        Calculate Vapor Pressure Deficit (VPD) using air temperature and dew point temperature
+        Args:
+            air_temp_k (float): Air temperature in Kelvin
+            dew_temp_k (float): Dew point temperature in Kelvin
+        Returns:
+            float: Vapor Pressure Deficit in millibars
+        """
+        # Convert temperatures to Celsius
+        air_temp_c = ClimateDataCalculator.kelvin_to_celsius(air_temp_k)
+        dew_temp_c = ClimateDataCalculator.kelvin_to_celsius(dew_temp_k)
+        
+        # Ensure dew point temperature is not higher than air temperature
+        if dew_temp_c > air_temp_c:
+            dew_temp_c = air_temp_c
+        
+        # Calculate saturated vapor pressure (es) at air temperature
+        es = ClimateDataCalculator.calculate_vapor_pressure(air_temp_c)
+        
+        # Calculate actual vapor pressure (ea) at dew point temperature
+        ea = ClimateDataCalculator.calculate_vapor_pressure(dew_temp_c)
+        
+        # Calculate Vapor Pressure Deficit (VPD)
+        vpd = max(es - ea, 0.0)  # Ensure VPD is never negative
         
         return vpd
     @staticmethod

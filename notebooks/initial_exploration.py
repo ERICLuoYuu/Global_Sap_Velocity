@@ -15,36 +15,49 @@ from src.Analyzers import env_analyzer
 if __name__ == "__main__":
  
     # Initialize analyzer
-    analyzer = sap_analyzer.GermanSapFlowAnalyzer()
-    env_analyzer = env_analyzer.GermanEnvironmentalAnalyzer()
+    # analyzer = sap_analyzer.SapFlowAnalyzer()
+    env_analyzer = env_analyzer.EnvironmentalAnalyzer()
     
     
     # Print available sites and their basic info
     print("\nSite summaries:")
     print("-" * 50)
+    '''
     for location in analyzer.sapflow_data:
         for plant_type in analyzer.sapflow_data[location]:
             summary = analyzer.get_summary(location, plant_type)
-            print(f"\nDEU_{location}_{plant_type}")
+            print(f"\n{location}_{plant_type}")
             print(f"Period: {summary['time_range']['start']} to {summary['time_range']['end']}")
             print(f"Trees: {summary['trees']}")
             print(f"Missing data: {summary['missing_data']:.1f}%")
-    
-    # Plot individual plants for all sites
+    """
+    """
     print("\nGenerating individual plant plots...")
-    analyzer.plot_all_plants(
-        figsize=(20, 10),
-        save_dir='german_sapflow_plots'
+    analyzer.plot_histogram(save_dir='./outputs/figures/sap/histograms')
+    summary = analyzer.plot_all_plants(
+        figsize=(15, 8),
+        save_dir='./outputs/figures/sap/cleaned',
+        skip_empty=True,
+        plot_limit=20,  # limit plots per location
+        progress_update=True
     )
-   
+    
+    # Print summary
+    print(summary)
+    '''
     # plot environmental data
-    print("\nGenerating environmental data plots...")
-    env_analyzer.plot_all(
-        figsize=(20, 10),
-        save_dir='german_env_plots'
+    # Plot all environmental variables with customization
+    env_analyzer.plot_histogram(save_dir='./outputs/figures/env/histograms')
+    summary = env_analyzer.plot_all(
+        figsize=(15, 8),
+        save_dir='./outputs/figures/env/cleaned',
+        skip_empty=True,
+        plot_limit=10,  # limit plots per location
+        progress_update=True
     )
-
-
+    
+    print(summary)
+    
     # Collect all DataFrames
     all_dfs = []
     for location in env_analyzer.env_data:

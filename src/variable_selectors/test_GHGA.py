@@ -10,40 +10,47 @@ from GHGA_selector import GHGA_selector
 
 # Main example
 def main():
-    training_data = pd.read_csv('data/processed/merged/merged_data.csv')
-    training_data = training_data.drop(columns=['TIMESTAMP']).dropna()
+    all_data = pd.read_csv('data/processed/merged/site/merged_data.csv')
+    print(all_data.shape)
+    # randomly split the data into training and testing
+    training_data = all_data.sample(frac=0.8, random_state=42)
+    print(training_data.shape)
+    testing_data = all_data.drop(training_data.index)
+    # save the testing data and training data
+    training_data.to_csv('data/processed/merged/site/training/training_data.csv', index=False)
+    testing_data.to_csv('data/processed/merged/site/testing/testing_data.csv', index=False)
+    
+    training_data = training_data.set_index('TIMESTAMP').sort_index()
+    print("training shape:",training_data.shape)
+    training_data = training_data[['ta_mean', 'ws_mean', 'precip_sum', 'vpd_mean', 'sw_in_mean', 'sap_velocity']]
+    training_data = training_data.dropna()
     print("Dataset shape:", training_data.shape)
     y = training_data['sap_velocity']
-    x = training_data.drop(columns=['sap_velocity'])
+    X = training_data.drop(columns=['sap_velocity'])
     
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        x, y, test_size=0.2, random_state=42
-    )
+    
     
     # Scale features
     scaler = StandardScaler()
     X_train_scaled = pd.DataFrame(
-        scaler.fit_transform(X_train),
-        columns=X_train.columns
+        scaler.fit_transform(X),
+        columns=X.columns
     )
-    X_test_scaled = pd.DataFrame(
-        scaler.transform(X_test),
-        columns=X_test.columns
-    )
+    
     
     # Initialize and fit GHGA selector
     selector = GHGA_selector(
         population_size=10,
-        generations=2,
+        generations=10,
         mutation_rate=0.1,
         local_search_prob=0.1,
         elite_size=1,
-        random_state=42
+        random_state=42,
+        
     )
     
     # Fit selector
-    selector.fit(X_train_scaled, y_train)
+    selector.fit(X_train_scaled, y)
     
     # Get selected features
     selected_features = selector.get_feature_names()
@@ -60,9 +67,11 @@ def main():
     plt.title('Feature Importance Scores')
     plt.tight_layout()
     plt.show()
-    
+    # save the feature importance plot
+    plt.savefig('plots/feature_importance_plot.png')
+
     # Plot convergence curve
-    selector.plot_convergence()
+    selector.plot_convergence(save_path='plots/convergence_plot.png')
     
     # Get summary statistics
     summary = selector.summary()
@@ -76,10 +85,10 @@ def main():
     
     # Transform data using selected features
     X_train_selected = selector.transform(X_train_scaled)
-    X_test_selected = selector.transform(X_test_scaled)
+    
     print("\nTransformed data shapes:")
     print("Training data:", X_train_selected.shape)
-    print("Test data:", X_test_selected.shape)
+    
 
 if __name__ == "__main__":
     main()

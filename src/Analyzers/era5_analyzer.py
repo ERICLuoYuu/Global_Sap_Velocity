@@ -1,9 +1,16 @@
 import xarray as xr
 import pandas as pd
+import sys
 import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict, Union
 import logging
+import seaborn as sns
+import matplotlib.pyplot as plt
+parent_dir = str(Path(__file__).parent.parent.parent)
+print(parent_dir)
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 from src.derive_climate_data.climate_data_calculator import ClimateDataCalculator
 class ERA5DerivedProcessor:
     """
@@ -160,4 +167,15 @@ processor = ERA5DerivedProcessor(
     output_dir='./data/raw/grided/era5land_vars_1995_2018'
 )
 
-processor.process_period(1995, 2018)
+
+
+def main():
+    processor = ERA5DerivedProcessor(
+        input_dir='./data/raw/grided/era5land_vars_1995_2018',
+        output_dir='./data/raw/grided/era5land_vars_1995_2018'
+    )
+
+    processor.process_period(1995, 2018)
+
+if __name__ == "__main__":
+    main()

@@ -46,8 +46,8 @@ class GHGA_selector:
         local_search_prob: float = 0.1,
         elite_size: int = 1,
         random_state: Optional[int] = None,
-        cv_method: str = 'temporal',
-        spatial_groups: Optional[np.ndarray] = None
+        cv_method: str = 'random',
+        groups: Union[np.ndarray, pd.Series, List] = None
     ):
         self.population_size = population_size
         self.generations = generations
@@ -55,7 +55,7 @@ class GHGA_selector:
         self.local_search_prob = local_search_prob
         self.elite_size = elite_size
         self.cv_method = cv_method
-        self.groups = spatial_groups
+        self.groups = groups
         
         if random_state is not None:
             np.random.seed(random_state)
@@ -256,11 +256,13 @@ class GHGA_selector:
             model = RandomForestRegressor(n_estimators=100, random_state=42)
             cross_validator = MLCrossValidator(estimator=model, scoring='r2', n_splits=5)
             if self.cv_method == 'temporal':
-                scores = cross_validator.temporal_cv(X_selected, self.y_)
+                scores = cross_validator.temporal_cv(X_selected, self.y_, groups = self.groups)
             elif self.cv_method == 'random':
                 scores = cross_validator.random_cv(X_selected, self.y_)
             elif self.cv_method == 'spatial':
                 scores = cross_validator.spatial_cv(X_selected, self.y_, self.groups)
+            
+            print(scores)
             
             # Calculate fitness with penalty for number of features
             cv_score = np.mean(scores)

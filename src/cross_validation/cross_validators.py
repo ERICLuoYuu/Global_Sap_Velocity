@@ -14,12 +14,6 @@ from sklearn.model_selection import (
     TimeSeriesSplit
 )
 import numpy as np
-from sklearn.model_selection import (
-    KFold, 
-    # cross_val_score,
-    GroupKFold,
-    TimeSeriesSplit
-)
 from sklearn.base import BaseEstimator
 import pandas as pd
 from abc import ABC, abstractmethod
@@ -156,6 +150,10 @@ class MLCrossValidator(BaseCrossValidator):
         """
         Perform temporal cross-validation using time series split.
         """
+        print(f"Start of temporal_cv - groups type: {type(groups)}")
+        print(f"Start of temporal_cv - groups shape/length: {len(groups) if groups is not None else 'None'}")
+        print(f"Start of temporal_cv - first few groups: {groups[:5] if groups is not None else 'None'}")
+        print(f"groups: {groups}")
         if groups is None:
             raise ValueError("The 'groups' parameter should contain timestamp values.")
         cv = GroupedTimeSeriesSplit(

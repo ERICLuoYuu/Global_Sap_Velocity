@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-
+import os
 # Add parent directory to Python path
 parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
@@ -11,7 +11,7 @@ import pandas as pd
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.svm import SVR, SVC
-from xgboost import XGBRegressor, XGBClassifier
+from xgboost.sklearn import XGBRegressor, XGBClassifier
 from abc import ABC, abstractmethod
 from sklearn.model_selection import KFold, GroupKFold
 from typing import Dict, Union, List, Optional, Tuple, Callable
@@ -149,8 +149,20 @@ class MLOptimizer(BaseOptimizer):
                 'classification': RandomForestClassifier(random_state=self.random_state)
             },
             'xgb': {
-                'regression': XGBRegressor(random_state=self.random_state),
-                'classification': XGBClassifier(random_state=self.random_state)
+            'regression': XGBRegressor(
+                random_state=self.random_state,
+                n_jobs=self.n_jobs,
+                objective='reg:squarederror',
+                eval_metric='rmse',
+                enable_categorical=True,
+                tree_method='hist'  # Added for better compatibility
+            ),
+            'classification': XGBClassifier(
+                random_state=self.random_state,
+                n_jobs=self.n_jobs,
+                enable_categorical=True,
+                tree_method='hist'
+            )
             },
             'svm': {
                 'regression': SVR(),
@@ -285,6 +297,7 @@ class DLOptimizer(BaseOptimizer):
         self.input_shape = input_shape
         self.output_shape = output_shape
         self.label_encoder = LabelEncoder() if task == 'classification' else None
+        self.best_model_weights = None
         
         # Organize parameters by category
         self.architecture_params = param_grid.get('architecture', {})
@@ -330,8 +343,8 @@ class DLOptimizer(BaseOptimizer):
         optimizer = optimizer_class(**optimizer_params)
         
         if self.task == 'regression':
-            loss = 'mse'
-            metrics = ['mae']
+            loss = 'mean_squared_error'
+            metrics = ['mean_absolute_error']
         else:
             loss = 'categorical_crossentropy'
             metrics = ['accuracy']
@@ -352,12 +365,42 @@ class DLOptimizer(BaseOptimizer):
                 restore_best_weights=True
             ),
             keras.callbacks.ModelCheckpoint(
-                f'best_model_fold_{fold}.weights.h5',
+                f'temp_best_model_fold_{fold}.weights.h5',
                 monitor=self.scoring,
                 save_best_only=True,
-                save_weights_only=True
+                save_weights_only=True,
+                mode='min' if 'loss' in self.scoring else 'max'
+            ),
+            keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                patience=5,
+                factor=0.5,
+                min_lr=1e-6
             )
         ]
+    
+    def _get_param_combinations(self):
+        """Generate all parameter combinations for grid search."""
+        param_combinations = []
+        arch_keys, arch_values = zip(*self.architecture_params.items())
+        opt_name = self.optimizer_params.get('name', ['adam'])[0]
+        opt_params = {k: v for k, v in self.optimizer_params.items() if k != 'name'}
+        
+        if opt_params:
+            opt_keys, opt_values = zip(*opt_params.items())
+        else:
+            opt_keys, opt_values = [], []
+        
+        for arch_combo in itertools.product(*arch_values):
+            arch_params = dict(zip(arch_keys, arch_combo))
+            if opt_params:
+                for opt_combo in itertools.product(*opt_values):
+                    opt_params = dict(zip(opt_keys, opt_combo))
+                    param_combinations.append((arch_params, opt_params))
+            else:
+                param_combinations.append((arch_params, {}))
+                
+        return param_combinations
     
     def fit(
         self,
@@ -387,86 +430,98 @@ class DLOptimizer(BaseOptimizer):
         X, y = self._prepare_data(X, y)
         cv = self._get_cv_splitter(split_type, **kwargs)
         
-        # Generate all parameter combinations
-        param_combinations = []
-        arch_keys, arch_values = zip(*self.architecture_params.items())
-        opt_name = self.optimizer_params.get('name', ['adam'])[0]
-        opt_params_keys, opt_params_values = zip(*{k: v for k, v in 
-                                                 self.optimizer_params.items() 
-                                                 if k != 'name'}.items())
-        
-        for arch_combo in itertools.product(*arch_values):
-            arch_params = dict(zip(arch_keys, arch_combo))
-            for opt_combo in itertools.product(*opt_params_values):
-                opt_params = dict(zip(opt_params_keys, opt_combo))
-                param_combinations.append((arch_params, opt_params))
-        
-        # Track results
+        param_combinations = self._get_param_combinations()
         all_results = []
         best_score = float('inf') if 'loss' in self.scoring else float('-inf')
         best_params = None
-        best_model = None
         
-        # Perform grid search
-        for arch_params, opt_params in param_combinations:
-            fold_scores = []
-            
-            # Cross-validation loop
-            for fold, (train_idx, val_idx) in enumerate(cv.split(X, y, 
-                                                               groups=kwargs.get('groups'))):
-                X_train, X_val = X[train_idx], X[val_idx]
-                y_train, y_val = y[train_idx], y[val_idx]
-                # Convert to tensors with explicit types
-                X_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
-                y_train = tf.convert_to_tensor(y_train, dtype=tf.float32)
-                X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
-                y_val = tf.convert_to_tensor(y_val, dtype=tf.float32)
-                # Print shapes for debugging
-                print(f"X_train shape: {X_train.shape}")
-                print(f"y_train shape: {y_train.shape}")
-                # Create and compile model
-                model = self._create_model(arch_params)
-                model = self._compile_model(model, opt_name, opt_params)
+        try:
+            for arch_params, opt_params in param_combinations:
+                fold_scores = []
+                fold_histories = []
+                current_model = None
                 
-                # Train model
-                history = model.fit(
-                    X_train,
-                    y_train,
-                    validation_data=(X_val, y_val),
-                    batch_size=self.training_params.get('batch_size', 32),
-                    epochs=self.training_params.get('epochs', 100),
-                    callbacks=self._get_callbacks(fold),
-                    verbose=self.verbose
-                )
+                for fold, (train_idx, val_idx) in enumerate(cv.split(X, y, groups=kwargs.get('groups'))):
+                    # Clear backend to free memory
+                    keras.backend.clear_session()
+                    
+                    X_train, X_val = X[train_idx], X[val_idx]
+                    y_train, y_val = y[train_idx], y[val_idx]
+                    
+                    # Convert to tensors with explicit types
+                    X_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
+                    y_train = tf.convert_to_tensor(y_train, dtype=tf.float32)
+                    X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
+                    y_val = tf.convert_to_tensor(y_val, dtype=tf.float32)
+                    
+                    # Create and compile model
+                    model = self._create_model(arch_params)
+                    model = self._compile_model(model, 
+                                             self.optimizer_params.get('name', ['adam'])[0],
+                                             opt_params)
+                    
+                    # Train model
+                    history = model.fit(
+                        X_train, y_train,
+                        validation_data=(X_val, y_val),
+                        batch_size=self.training_params.get('batch_size', 32),
+                        epochs=self.training_params.get('epochs', 100),
+                        callbacks=self._get_callbacks(fold),
+                        verbose=self.verbose
+                    )
+                    
+                    # Store history and score
+                    fold_histories.append(history.history)
+                    best_fold_score = min(history.history[self.scoring]) if 'loss' in self.scoring \
+                        else max(history.history[self.scoring])
+                    fold_scores.append(best_fold_score)
+                    
+                    # Save model if it's the best so far
+                    if current_model is None or \
+                       (('loss' in self.scoring and best_fold_score < best_score) or \
+                        ('loss' not in self.scoring and best_fold_score > best_score)):
+                        current_model = model
                 
-                # Get best score for this fold
-                fold_score = min(history.history[self.scoring]) if 'loss' in self.scoring \
-                    else max(history.history[self.scoring])
-                fold_scores.append(fold_score)
-            
-            # Calculate mean score across folds
-            mean_score = np.mean(fold_scores)
-            all_results.append({
-                'params': {'architecture': arch_params, 'optimizer': opt_params},
-                'mean_score': mean_score,
-                'std_score': np.std(fold_scores)
-            })
-            
-            # Update best results
-            is_better = (mean_score < best_score if 'loss' in self.scoring 
-                        else mean_score > best_score)
-            if is_better:
-                best_score = mean_score
-                best_params = {'architecture': arch_params, 'optimizer': opt_params}
+                # Calculate mean score across folds
+                mean_score = np.mean(fold_scores)
+                std_score = np.std(fold_scores)
                 
-                # Create best model
-                best_model = self._create_model(arch_params)
-                best_model = self._compile_model(best_model, opt_name, opt_params)
+                all_results.append({
+                    'params': {'architecture': arch_params, 'optimizer': opt_params},
+                    'mean_score': mean_score,
+                    'std_score': std_score,
+                    'fold_scores': fold_scores,
+                    'histories': fold_histories
+                })
+                
+                # Update best results
+                is_better = (mean_score < best_score if 'loss' in self.scoring 
+                           else mean_score > best_score)
+                if is_better:
+                    best_score = mean_score
+                    best_params = {'architecture': arch_params, 'optimizer': opt_params}
+                    self.best_model_weights = current_model.get_weights()
+                    
+        finally:
+            # Cleanup temporary files
+            for fold in range(self.n_splits):
+                try:
+                    os.remove(f'temp_best_model_fold_{fold}.weights.h5')
+                except:
+                    pass
         
-        # Store results
+        # Create final best model and set weights
+        self.best_estimator_ = self._create_model(best_params['architecture'])
+        self.best_estimator_ = self._compile_model(
+            self.best_estimator_,
+            self.optimizer_params.get('name', ['adam'])[0],
+            best_params['optimizer']
+        )
+        if self.best_model_weights is not None:
+            self.best_estimator_.set_weights(self.best_model_weights)
+        
         self.best_params_ = best_params
         self.best_score_ = best_score
-        self.best_estimator_ = best_model
         self.cv_results_ = pd.DataFrame(all_results)
         
         return self

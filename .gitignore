@@ -11,16 +11,32 @@ build/
 
 # Environments
 .env
-.venv
+.venv/
 env/
 venv/
 
 # Jupyter Notebooks
-.ipynb_checkpoints
-
+.ipynb_checkpoints/
 
 # Keep .gitkeep files
 !.gitkeep
-# data files
+
+# Data files
 data/
 outputs/
+.csv
+.png
+
+# macOS
+.DS_Store
+
+# IDE specific
+.idea/
+.vscode/
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Editor specific
+*.swp

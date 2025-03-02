@@ -21,3 +21,6 @@ venv/
 
 # Keep .gitkeep files
 !.gitkeep
+# data files
+data/
+outputs/

@@ -29,9 +29,9 @@ def create_nn(input_shape, output_shape, n_layers, units, dropout_rate):
     return model
 
 
-training_data = pd.read_csv('./data/processed/merged/site/training/training_data.csv')
+training_data = pd.read_csv('./outputs/processed_data/merged/site/training/training_data.csv')
 training_data = training_data[['TIMESTAMP', 'ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean', 'sap_velocity']].dropna().set_index('TIMESTAMP').sort_index()
-test_data = pd.read_csv('./data/processed/merged/site/testing/testing_data.csv')
+test_data = pd.read_csv('./outputs/processed_data/merged/site/testing/testing_data.csv')
 test_data = test_data[['TIMESTAMP', 'ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean', 'sap_velocity']].dropna().set_index('TIMESTAMP').sort_index()
 print(training_data.shape)
 X = training_data[['ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean']]

@@ -29,6 +29,7 @@ outputs/
 .nc
 .tif
 .zip
+.RData
 
 # macOS
 .DS_Store

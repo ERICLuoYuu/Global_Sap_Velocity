@@ -26,6 +26,9 @@ data/
 outputs/
 .csv
 .png
+.nc
+.tif
+.zip
 
 # macOS
 .DS_Store

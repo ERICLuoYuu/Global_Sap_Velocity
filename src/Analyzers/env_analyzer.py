@@ -220,11 +220,11 @@ class EnvironmentalAnalyzer:
             data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
             
             # Get columns that need sum vs mean
-            precip_rad_cols = [col for col in data_cols if 'precip' in col.lower() or 'rad' in col.lower()]
-            mean_cols = [col for col in data_cols if col not in precip_rad_cols]
+            sum_cols = [col for col in data_cols if 'precip' in col.lower()]
+            mean_cols = [col for col in data_cols if col not in sum_cols]
 
             # Resample separately
-            daily_sums = df[precip_rad_cols].resample('D').sum() if precip_rad_cols else None
+            daily_sums = df[sum_cols].resample('D').sum() if sum_cols else None
             daily_means = df[mean_cols].resample('D').mean() if mean_cols else None
 
             # Combine results
@@ -236,7 +236,7 @@ class EnvironmentalAnalyzer:
                 daily_df = daily_means
 
             # Add appropriate suffixes
-            daily_df.columns = [f"{col}_sum" if col in precip_rad_cols else f"{col}_mean" 
+            daily_df.columns = [f"{col}_sum" if col in sum_cols else f"{col}_mean" 
                                for col in daily_df.columns]
             
             # Save daily data
@@ -852,5 +852,3 @@ class EnvironmentalAnalyzer:
         except Exception as e:
             print(f"Error finding columns: {str(e)}")
             return []
-            
-            

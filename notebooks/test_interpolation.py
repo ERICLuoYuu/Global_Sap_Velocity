@@ -9,8 +9,8 @@ parent_dir = str(Path(__file__).parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
-from src.Analyzers import sap_analyzer
-from src.Analyzers import env_analyzer
+from src.Analyzers import sap_analyzer_parallel
+from src.Analyzers import env_analyzer_parallel
 
 def create_spaced_gaps(n_gaps, min_spacing, max_idx):
     """

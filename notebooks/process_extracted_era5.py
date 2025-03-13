@@ -148,7 +148,7 @@ for env_file in env_files:
         # Time series plot
         plt.ioff()
         fig, ax = plt.subplots()
-        sns.set_style("white")
+        sns.set_style("ggplot2")
         
         ax.plot(era5_matched.index, era5_matched['vpd'], label='ERA5', alpha=0.5)
         ax.plot(env_matched.index, env_matched['vpd'], label='ENV', alpha=0.5)

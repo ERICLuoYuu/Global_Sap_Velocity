@@ -9,6 +9,7 @@ import warnings
 import plotly.graph_objects as go
 import plotly.io as pio
 import copy
+import concurrent.futures
 parent_dir = str(Path(__file__).parent.parent.parent)
 print(parent_dir)
 if parent_dir not in sys.path:
@@ -109,14 +110,50 @@ class SapFlowAnalyzer:
             except Exception as e:
                 print(f"Error converting column {col}: {str(e)}")
 
-        # Set index
-        df = df.set_index('TIMESTAMP')
-        df = df.sort_index()
-        
-        # Remove duplicates
-        if df.index.duplicated().any():
-            print(f"Removing {df.index.duplicated().sum()} duplicate timestamps")
-            df = df[~df.index.duplicated(keep='first')]
+        # Set index with error checking
+        try:
+            if 'TIMESTAMP' not in df.columns:
+                print("Error: TIMESTAMP column not found")
+                return None, None
+                
+            # Check if TIMESTAMP is already datetime (should be from parse_dates)
+            is_datetime = pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP'])
+            print(f"TIMESTAMP column is already datetime: {is_datetime}")
+            
+            # Set index 
+            df = df.set_index('TIMESTAMP')
+            df = df.sort_index()
+            
+            # Check for all-NaN index
+            if df.index.isna().all():
+                print("Error: All timestamp values are NaN")
+                return None, None
+            
+            # REMOVE THIS LINE - it's causing the issue
+            # df.index = pd.to_datetime(df.index)  # This second conversion is unnecessary
+                
+        except Exception as e:
+            print(f"Error setting timestamp index: {str(e)}")
+            return None, None
+
+        # Check for duplicates properly
+        dup_mask = df.index.duplicated()
+        dup_count = dup_mask.sum()
+
+        if dup_count > 0:
+            print(f"Found {dup_count} duplicate timestamps")
+            
+            # Export duplicates for analysis
+            dup_dir = Path(f"./outputs/processed_data/sap/duplicates")
+            dup_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Export duplicate rows
+            df[dup_mask].to_csv(dup_dir / f"{location}_{plant_type}_duplicates.csv")
+            
+            print(f"Removing {dup_count} duplicate timestamps ({dup_count/len(df)*100:.1f}%)")
+            df = df[~dup_mask]  # Remove duplicates
+        else:
+            print("No duplicates found in timestamps")
         
         # Apply flag-based filtering
         if flags is not None:

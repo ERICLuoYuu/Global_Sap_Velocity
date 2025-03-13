@@ -368,7 +368,7 @@ def extract_site_info(directory: Path) -> pd.DataFrame:
         }
 
     return pd.DataFrame.from_dict(site_dict, orient='index')
-def calculate_gap_size(time_serie: Union[pd.Series, pd.DataFrame], frequency_unit: str = 'h') -> list:
+def calculate_gap_size(time_serie: Union[pd.Series, pd.DataFrame]) -> list:
     """
     Calculate the gap sizes in a time series dataset.
     
@@ -489,7 +489,7 @@ def plot_gap_size(save_dir: Path, gaps: Union[list, pd.Series, pd.DataFrame], fr
         save_dir.mkdir(parents=True, exist_ok=True)
         
         # Save figure with high DPI
-        fig.savefig(save_dir / 'gap_size.png', 
+        fig.savefig(save_dir / f'gap_size_{frequency}.png', 
                    dpi=300, 
                    bbox_inches='tight')
     

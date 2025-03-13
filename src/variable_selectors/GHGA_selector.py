@@ -6,7 +6,7 @@ import pandas as pd
 from sklearn.model_selection import cross_val_score
 from sklearn.ensemble import RandomForestRegressor
 from scipy.special import softmax
-from typing import List, Dict, Union, Optional, Tuple, Callable
+from typing import List, Dict, Union, Optional, Tuple, Callable, Any
 import warnings
 from functools import lru_cache
 import time
@@ -14,6 +14,10 @@ import os
 import pickle
 from datetime import datetime
 from sklearn.exceptions import NotFittedError
+parent_dir = str(Path(__file__).parent.parent.parent)
+print(parent_dir)
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 from src.cross_validation.cross_validators import MLCrossValidator
 
 # Parallel processing imports
@@ -23,16 +27,26 @@ from joblib import Parallel, delayed
 # Optional GPU imports - will be checked at runtime
 try:
     import cupy as cp
+    HAS_CUPY = True
+except ImportError:
+    HAS_CUPY = False
+
+# Optional cuDF and cuML imports - will be checked at runtime
+try:
     import cudf
     import cuml
-    HAS_GPU = True
+    from cuml.ensemble import RandomForestRegressor as cuRFR
+    HAS_CUDF_CUML = True
 except ImportError:
-    HAS_GPU = False
+    HAS_CUDF_CUML = False
+
+# Determine overall GPU availability
+HAS_GPU = HAS_CUPY  # At minimum, we need CuPy
 
 class GHGASelector:
     """
     Guided Hybrid Genetic Algorithm for feature selection.
-    Optimized for high-performance computing environments.
+    Optimized for high-performance computing environments with improved GPU utilization.
     
     Parameters:
     -----------
@@ -64,6 +78,8 @@ class GHGASelector:
         Whether to use GPU acceleration if available
     gpu_id : int, default=0
         ID of the GPU to use if multiple are available
+    gpu_mem_limit : float, default=0.8
+        Maximum fraction of GPU memory to use (0.0-1.0)
     checkpoint_interval : int, default=10
         Save checkpoint every N generations (0 to disable)
     checkpoint_dir : str, optional
@@ -88,6 +104,7 @@ class GHGASelector:
         n_jobs: int = -1,
         use_gpu: bool = False,
         gpu_id: int = 0,
+        gpu_mem_limit: float = 0.8,
         checkpoint_interval: int = 10,
         checkpoint_dir: Optional[str] = None,
         fitness_batch_size: int = 10
@@ -102,28 +119,11 @@ class GHGASelector:
         self.cv_method = cv_method
         self.groups = groups
         self.n_jobs = n_jobs
-        self.use_gpu = use_gpu and HAS_GPU
+        self.use_gpu = use_gpu
         self.gpu_id = gpu_id
+        self.gpu_mem_limit = gpu_mem_limit
         self.checkpoint_interval = checkpoint_interval
         self.fitness_batch_size = fitness_batch_size
-        
-        # Setup GPU if requested and available
-        if self.use_gpu:
-            if HAS_GPU:
-                try:
-                    cp.cuda.Device(self.gpu_id).use()
-                    self.xp = cp  # Use cupy for array operations
-                    self.logger.info(f"Using GPU {self.gpu_id}")
-                except Exception as e:
-                    self.use_gpu = False
-                    self.xp = np
-                    warnings.warn(f"Failed to initialize GPU {self.gpu_id}: {str(e)}. Falling back to CPU.")
-            else:
-                self.use_gpu = False
-                self.xp = np
-                warnings.warn("GPU requested but required libraries not found. Install cupy, cudf, and cuml for GPU support.")
-        else:
-            self.xp = np
         
         # Determine number of jobs for parallel processing
         if self.n_jobs == -1:
@@ -143,8 +143,13 @@ class GHGASelector:
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
-        self.logger = logging.getLogger('GHGASelector')
+        self.logger = logging.getLogger('ghga_selector')
+        self.logger.addHandler(logging.StreamHandler())
+
         
+        # Check and setup GPU capabilities
+        self._setup_gpu()
+         
         # Setup checkpoint directory
         if checkpoint_dir is not None:
             self.checkpoint_dir = Path(checkpoint_dir)
@@ -158,7 +163,7 @@ class GHGASelector:
         # Set random seed
         if random_state is not None:
             np.random.seed(random_state)
-            if self.use_gpu:
+            if self.use_gpu and self.has_cupy:
                 cp.random.seed(random_state)
             self.random_state = random_state
         else:
@@ -182,8 +187,50 @@ class GHGASelector:
             'generation_time': []   # Time taken for each generation
         }
         
-        # Log initialization
-        self.logger.info(f"Initialized GHGASelector with {self.n_jobs} CPU cores and GPU={self.use_gpu}")
+        # Log initialization with GPU status
+        gpu_info = f"GPU={self.use_gpu} (cupy={self.has_cupy}, cudf/cuml={self.has_cudf_cuml})"
+        self.logger.info(f"Initialized GHGASelector with {self.n_jobs} CPU cores and {gpu_info}")
+    
+    def _setup_gpu(self):
+        """
+        Setup and detect GPU capabilities, setting appropriate flags.
+        """
+        # Check if GPU libraries are available
+        self.has_cupy = HAS_CUPY
+        self.has_cudf_cuml = HAS_CUDF_CUML
+        
+        # Overall GPU availability
+        gpu_available = self.has_cupy
+        
+        # Initialize GPU if requested and available
+        self.use_gpu = self.use_gpu and gpu_available
+        
+        if self.use_gpu:
+            try:
+                if self.has_cupy:
+                    # Setup GPU device
+                    cp.cuda.Device(self.gpu_id).use()
+                    
+                    # Get memory info for logging
+                    try:
+                        mem_info = cp.cuda.runtime.memGetInfo()
+                        free_mem = mem_info[0] / 1024**3  # Convert to GB
+                        total_mem = mem_info[1] / 1024**3  # Convert to GB
+                        self.logger.info(f"GPU {self.gpu_id} memory: {free_mem:.2f}GB free / {total_mem:.2f}GB total")
+                    except Exception as e:
+                        self.logger.warning(f"Could not get GPU memory info: {str(e)}")
+                    
+                    # Set xp as cupy for array operations
+                    self.xp = cp
+                    self.logger.info(f"Successfully initialized GPU {self.gpu_id} with CuPy")
+            except Exception as e:
+                self.use_gpu = False
+                self.xp = np
+                self.logger.warning(f"Failed to initialize GPU {self.gpu_id}: {str(e)}. Falling back to CPU.")
+        else:
+            self.xp = np
+            if not gpu_available and self.use_gpu:
+                self.logger.warning("GPU requested but required libraries not found. Install cupy for basic GPU support.")
     
     def fit(
         self, 
@@ -225,17 +272,34 @@ class GHGASelector:
         self.logger.info(f"Initialized selection with {self.n_features_} features")
         
         # Transfer data to GPU if using it
+        self.X_cpu = X  # Always keep a CPU copy for methods that don't support GPU
+        self.y_cpu = y
+        
         if self.use_gpu:
             try:
-                self.logger.info("Moving data to GPU...")
-                self.X_ = X  # Keep original data for reference
-                self.y_ = y
-                # Note: We're not actually moving to GPU here because the MLCrossValidator
-                # might not support GPU data. We'll convert specific operations as needed.
+                self.logger.info("Setting up data for GPU processing...")
+                
+                # For CuPy-based operations (most of our custom code)
+                if self.has_cupy:
+                    # Keep original references
+                    self.X_ = X
+                    self.y_ = y
+                    # We'll convert data to GPU arrays as needed in specific operations
+                
+                # For cuDF/cuML operations if they're available
+                if self.has_cudf_cuml:
+                    self.logger.info("Converting data to cuDF format...")
+                    try:
+                        # Convert to cuDF dataframes
+                        self.X_gpu = cudf.DataFrame.from_pandas(X)
+                        self.y_gpu = cudf.Series.from_pandas(y)
+                        self.logger.info("Data successfully converted to cuDF format")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to convert data to cuDF: {str(e)}. Specific cuDF/cuML operations will use CPU.")
+                        self.X_gpu = None
+                        self.y_gpu = None
             except Exception as e:
-                self.use_gpu = False
-                self.xp = np
-                self.logger.warning(f"Failed to move data to GPU: {str(e)}. Falling back to CPU.")
+                self.logger.warning(f"Error in GPU data setup: {str(e)}. Falling back to CPU for data operations.")
                 self.X_ = X
                 self.y_ = y
         else:
@@ -259,9 +323,11 @@ class GHGASelector:
             start_gen = 0
             
         self.logger.info(f"Population initialized with {len(population)} chromosomes")
-        
+        stagnation_count = 0
+        best_fitness_history = []
         # Main evolution loop
         for generation in range(start_gen, self.generations):
+            
             gen_start_time = time.time()
             self.current_generation = generation
             
@@ -276,11 +342,7 @@ class GHGASelector:
             # Save current population for checkpointing
             self.current_population = population
             
-            # Check if we have valid solutions
-            if np.all(np.isinf(fitness_scores)):
-                self.logger.warning("All solutions have -inf fitness. Reinitializing population.")
-                population = self._initialize_population()
-                continue
+            
             
             # Update best solution
             max_idx = np.argmax(fitness_scores)
@@ -304,10 +366,27 @@ class GHGASelector:
             self.convergence_metrics_['generation_time'].append(gen_time)
             self.logger.info(f"Generation {generation+1} completed in {gen_time:.2f}s: best fitness = {current_gen_best_fitness:.4f}, avg fitness = {avg_fitness:.4f}")
             
+
             # Save checkpoint if needed
             if self.checkpoint_interval > 0 and (generation + 1) % self.checkpoint_interval == 0:
                 self._save_checkpoint()
             
+            # Track best fitness for stagnation detection
+            best_fitness_history.append(current_gen_best_fitness)
+            # Check for stagnation (no improvement in last 5 generations)
+            if len(best_fitness_history) > 5:
+                if all(abs(best_fitness_history[-1] - bf) < 1e-6 for bf in best_fitness_history[-5:]):
+                    # increase mutation rate
+                    self.mutation_rate = min(0.5, self.mutation_rate + 0.1)
+                    stagnation_count += 1
+                    
+                    # If stagnated for too long, inject diversity
+                    if stagnation_count >= 10:
+                        self.logger.warning(f"Stagnation detected for {stagnation_count} cycles, program stops.")
+                        break
+                else:
+                    stagnation_count = 0
+
             # Check if we've reached the final generation
             if generation == self.generations - 1:
                 break
@@ -322,7 +401,7 @@ class GHGASelector:
             elite_idx = np.argsort(fitness_scores)[-self.elite_size:]
             elite_solutions = [population[i].copy() for i in elite_idx]
             
-            # Perform crossover and mutation in parallel batches
+            # Perform crossover and mutation in parallel batches (now with GPU acceleration where appropriate)
             offspring = self._parallel_offspring_generation(parents)
             new_population.extend(offspring)
             
@@ -332,9 +411,7 @@ class GHGASelector:
             # Ensure we maintain the correct population size
             while len(new_population) < self.population_size:
                 # Add random solutions if needed
-                new_solution = np.random.randint(2, size=self.n_features_)
-                if np.sum(new_solution) == 0:  # Ensure at least one feature
-                    new_solution[np.random.randint(0, self.n_features_)] = 1
+                new_solution = self._fast_random_chromosome()
                 new_population.append(new_solution)
                 
             # Truncate if too many solutions
@@ -342,7 +419,8 @@ class GHGASelector:
                 new_population = new_population[:self.population_size]
                 
             population = np.array(new_population)
-        
+            
+
         # Calculate feature importance
         self._calculate_feature_importance()
         
@@ -357,9 +435,35 @@ class GHGASelector:
         
         return self
     
+    def _fast_random_chromosome(self) -> np.ndarray:
+        """
+        Generate a random chromosome efficiently, using GPU if available.
+        
+        Returns:
+        --------
+        np.ndarray
+            A random binary chromosome with at least one feature selected
+        """
+        if self.use_gpu and self.has_cupy:
+            try:
+                # Generate random chromosome on GPU
+                chromosome = cp.random.randint(2, size=self.n_features_).get()
+                if np.sum(chromosome) == 0:  # Ensure at least one feature
+                    chromosome[cp.random.randint(0, self.n_features_).get()] = 1
+                return chromosome
+            except:
+                # Fall back to CPU if GPU fails
+                pass
+                
+        # CPU fallback
+        chromosome = np.random.randint(2, size=self.n_features_)
+        if np.sum(chromosome) == 0:  # Ensure at least one feature
+            chromosome[np.random.randint(0, self.n_features_)] = 1
+        return chromosome
+    
     def _parallel_fitness_evaluation(self, population: np.ndarray) -> np.ndarray:
         """
-        Evaluate fitness of the population in parallel.
+        Evaluate fitness of the population in parallel with GPU acceleration when possible.
         
         Parameters:
         -----------
@@ -386,19 +490,23 @@ class GHGASelector:
         
         # If we need to evaluate chromosomes
         if to_evaluate:
-            # Split into batches for parallel processing
-            batch_size = min(self.fitness_batch_size, len(to_evaluate))
-            batches = [to_evaluate[i:i + batch_size] for i in range(0, len(to_evaluate), batch_size)]
-            
-            # Process batches in parallel
-            batch_results = Parallel(n_jobs=self.n_jobs)(
-                delayed(self._evaluate_batch)(batch) for batch in batches
-            )
-            
-            # Flatten results
-            evaluated_fitness = []
-            for batch_result in batch_results:
-                evaluated_fitness.extend(batch_result)
+            # Use GPU batch processing if available and beneficial
+            if self.use_gpu and self.has_cupy and len(to_evaluate) > 10:
+                evaluated_fitness = self._evaluate_batch_gpu(to_evaluate)
+            else:
+                # Split into batches for parallel CPU processing
+                batch_size = min(self.fitness_batch_size, len(to_evaluate))
+                batches = [to_evaluate[i:i + batch_size] for i in range(0, len(to_evaluate), batch_size)]
+                
+                # Process batches in parallel
+                batch_results = Parallel(n_jobs=self.n_jobs)(
+                    delayed(self._evaluate_batch)(batch) for batch in batches
+                )
+                
+                # Flatten results
+                evaluated_fitness = []
+                for batch_result in batch_results:
+                    evaluated_fitness.extend(batch_result)
         else:
             evaluated_fitness = []
             
@@ -408,9 +516,65 @@ class GHGASelector:
         
         return np.array([f for _, f in all_fitness])
     
+    def _evaluate_batch_gpu(self, batch: List[Tuple[int, tuple]]) -> List[Tuple[int, float]]:
+        """
+        Evaluate a batch of chromosomes using GPU acceleration.
+        
+        Parameters:
+        -----------
+        batch : List[Tuple[int, tuple]]
+            List of (index, chromosome_tuple) pairs
+            
+        Returns:
+        --------
+        List[Tuple[int, float]]
+            List of (index, fitness) pairs
+        """
+        results = []
+        
+        # Extract chromosomes and create a 2D array
+        indices = [idx for idx, _ in batch]
+        chromosomes = np.array([np.array(chrom) for _, chrom in batch])
+        
+        try:
+            # Move chromosomes to GPU
+            chromosomes_gpu = cp.array(chromosomes)
+            
+            # Process in smaller sub-batches to avoid GPU memory issues
+            sub_batch_size = min(20, len(chromosomes))
+            for i in range(0, len(chromosomes), sub_batch_size):
+                end_idx = min(i + sub_batch_size, len(chromosomes))
+                sub_batch = chromosomes_gpu[i:end_idx]
+                
+                # Process each chromosome in the sub-batch
+                for j in range(sub_batch.shape[0]):
+                    idx = indices[i + j]
+                    chrom = cp.asnumpy(sub_batch[j])
+                    chrom_tuple = tuple(chrom.tolist())
+                    
+                    # Calculate fitness (this uses CPU for now as _fitness_function is not GPU-optimized)
+                    fitness = self._fitness_function(chrom)
+                    
+                    # Cache the result
+                    self._fitness_cache[chrom_tuple] = fitness
+                    results.append((idx, fitness))
+                
+            return results
+        except Exception as e:
+            self.logger.warning(f"GPU batch evaluation failed: {str(e)}. Falling back to CPU.")
+            
+            # Fall back to CPU evaluation
+            for idx, chrom_tuple in batch:
+                chromosome = np.array(chrom_tuple)
+                fitness = self._fitness_function(chromosome)
+                self._fitness_cache[chrom_tuple] = fitness
+                results.append((idx, fitness))
+                
+            return results
+    
     def _evaluate_batch(self, batch: List[Tuple[int, tuple]]) -> List[Tuple[int, float]]:
         """
-        Evaluate a batch of chromosomes.
+        Evaluate a batch of chromosomes on CPU.
         
         Parameters:
         -----------
@@ -438,7 +602,7 @@ class GHGASelector:
     
     def _parallel_offspring_generation(self, parents: List[np.ndarray]) -> List[np.ndarray]:
         """
-        Generate offspring using parallel processing.
+        Generate offspring using parallel processing with GPU acceleration for batch operations.
         
         Parameters:
         -----------
@@ -456,7 +620,14 @@ class GHGASelector:
             if i + 1 < len(parents):
                 parent_pairs.append((parents[i], parents[i+1]))
         
-        # Generate offspring in parallel
+        # Use GPU batch processing if available and beneficial
+        if self.use_gpu and self.has_cupy and len(parent_pairs) >= 10:
+            try:
+                return self._generate_offspring_batch_gpu(parent_pairs)
+            except Exception as e:
+                self.logger.warning(f"GPU offspring generation failed: {str(e)}. Falling back to CPU.")
+        
+        # Generate offspring in parallel on CPU
         results = Parallel(n_jobs=self.n_jobs)(
             delayed(self._generate_offspring_pair)(parent1, parent2) 
             for parent1, parent2 in parent_pairs
@@ -468,6 +639,73 @@ class GHGASelector:
             offspring.extend(pair)
             
         return offspring
+    
+    def _generate_offspring_batch_gpu(self, parent_pairs: List[Tuple[np.ndarray, np.ndarray]]) -> List[np.ndarray]:
+        """
+        Generate offspring in a batch using GPU acceleration.
+        
+        Parameters:
+        -----------
+        parent_pairs : List[Tuple[np.ndarray, np.ndarray]]
+            List of parent pairs
+            
+        Returns:
+        --------
+        List[np.ndarray]
+            Generated offspring
+        """
+        offspring = []
+        
+        # Extract parents and create arrays
+        parent1_array = np.array([p1 for p1, _ in parent_pairs])
+        parent2_array = np.array([p2 for _, p2 in parent_pairs])
+        
+        try:
+            # Move to GPU
+            parent1_gpu = cp.array(parent1_array)
+            parent2_gpu = cp.array(parent2_array)
+            
+            # Process in smaller batches to avoid memory issues
+            batch_size = min(20, len(parent_pairs))
+            for i in range(0, len(parent_pairs), batch_size):
+                end_idx = min(i + batch_size, len(parent_pairs))
+                
+                # Get sub-batch
+                p1_batch = parent1_gpu[i:end_idx]
+                p2_batch = parent2_gpu[i:end_idx]
+                
+                # For each pair in batch
+                for j in range(p1_batch.shape[0]):
+                    p1 = cp.asnumpy(p1_batch[j])
+                    p2 = cp.asnumpy(p2_batch[j])
+                    
+                    # Process this pair (currently happens on CPU)
+                    # In future iterations, these operations could be further GPU-optimized
+                    child1, child2 = self._crossover(p1, p2)
+                    
+                    # Mutation
+                    child1 = self._mutation(child1)
+                    child2 = self._mutation(child2)
+                    
+                    # Local search
+                    if np.random.random() < self.local_search_prob:
+                        child1 = self._local_search(child1)
+                    if np.random.random() < self.local_search_prob:
+                        child2 = self._local_search(child2)
+                    
+                    offspring.extend([child1, child2])
+            
+            return offspring
+            
+        except Exception as e:
+            self.logger.warning(f"Error in GPU offspring generation: {str(e)}. Falling back to CPU.")
+            
+            # Fall back to CPU processing
+            for parent1, parent2 in parent_pairs:
+                child1, child2 = self._generate_offspring_pair(parent1, parent2)
+                offspring.extend([child1, child2])
+                
+            return offspring
     
     def _generate_offspring_pair(self, parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -526,7 +764,7 @@ class GHGASelector:
     
     def _tournament_selection(self, population: np.ndarray, fitness_scores: np.ndarray, tournament_size: int = 3) -> List[np.ndarray]:
         """
-        Perform tournament selection.
+        Perform tournament selection with GPU acceleration if available.
         
         Parameters:
         -----------
@@ -544,6 +782,27 @@ class GHGASelector:
         """
         selected_parents = []
         
+        # Use GPU for tournament selection if available
+        if self.use_gpu and self.has_cupy:
+            try:
+                # Move population and fitness scores to GPU
+                population_gpu = cp.array(population)
+                fitness_scores_gpu = cp.array(fitness_scores)
+                
+                for _ in range(self.population_size):
+                    # Select random individuals for the tournament
+                    tournament_idx = cp.random.choice(len(population), size=tournament_size, replace=False)
+                    tournament_fitness = fitness_scores_gpu[tournament_idx]
+                    
+                    # Get the best individual from the tournament
+                    winner_idx = tournament_idx[cp.argmax(tournament_fitness)]
+                    selected_parents.append(cp.asnumpy(population_gpu[winner_idx]).copy())
+                
+                return selected_parents
+            except Exception as e:
+                self.logger.warning(f"GPU tournament selection failed: {str(e)}. Falling back to CPU.")
+        
+        # CPU fallback
         for _ in range(self.population_size):
             # Select random individuals for the tournament
             tournament_idx = np.random.choice(len(population), size=tournament_size, replace=False)
@@ -557,7 +816,7 @@ class GHGASelector:
     
     def _update_convergence_metrics(self, population: np.ndarray, fitness_scores: np.ndarray) -> None:
         """
-        Update convergence metrics for the current generation.
+        Update convergence metrics for the current generation with GPU acceleration.
         
         Parameters:
         -----------
@@ -576,28 +835,49 @@ class GHGASelector:
         self.convergence_metrics_['mean_fitness'].append(mean_fitness)
         
         # Population diversity (using Hamming distance)
-        # More efficient calculation using numpy operations
         pop_size = population.shape[0]
         diversity = 0
+        
         if pop_size > 1:
             # Calculate sum of Hamming distances between all pairs
-            if self.use_gpu and population.size > 1000:  # Only use GPU for larger populations
+            if self.use_gpu and self.has_cupy and population.size >= 1000:  # Only use GPU for larger populations
                 try:
                     pop_gpu = cp.array(population)
-                    # Vectorized Hamming distance calculation on GPU
-                    total_distance = 0
-                    for i in range(pop_size):
-                        distances = cp.sum(pop_gpu[i] != pop_gpu, axis=1)
-                        total_distance += cp.sum(distances)
                     
-                    # Average distance (excluding self-comparisons)
+                    # More efficient GPU implementation of diversity calculation
+                    total_distance = 0
+                    # Process in chunks to avoid memory issues
+                    chunk_size = min(50, pop_size)
+                    
+                    for i in range(0, pop_size, chunk_size):
+                        end_i = min(i + chunk_size, pop_size)
+                        chunk_i = pop_gpu[i:end_i]
+                        
+                        for j in range(0, pop_size, chunk_size):
+                            end_j = min(j + chunk_size, pop_size)
+                            chunk_j = pop_gpu[j:end_j]
+                            
+                            # Compute pairwise Hamming distances for this block
+                            for k in range(chunk_i.shape[0]):
+                                # Use broadcasting for efficient comparison
+                                distances = cp.sum(chunk_i[k:k+1] != chunk_j, axis=1)
+                                total_distance += cp.sum(distances)
+                    
+                    # Correct for self-comparisons
+                    total_distance -= pop_size  # Subtract self-comparisons
+                    
+                    # Average distance
                     diversity = cp.asnumpy(total_distance / (pop_size * (pop_size - 1)))
-                except:
-                    # Fall back to CPU if GPU calculation fails
+                except Exception as e:
+                    self.logger.warning(f"GPU diversity calculation failed: {str(e)}. Falling back to CPU.")
+                    # Fall back to CPU calculation
                     total_distance = 0
                     for i in range(pop_size):
                         distances = np.sum(population[i] != population, axis=1)
                         total_distance += np.sum(distances)
+                    
+                    # Correct for self-comparisons
+                    total_distance -= pop_size
                     
                     diversity = total_distance / (pop_size * (pop_size - 1))
             else:
@@ -606,6 +886,9 @@ class GHGASelector:
                 for i in range(pop_size):
                     distances = np.sum(population[i] != population, axis=1)
                     total_distance += np.sum(distances)
+                
+                # Correct for self-comparisons
+                total_distance -= pop_size
                 
                 diversity = total_distance / (pop_size * (pop_size - 1))
         
@@ -621,7 +904,7 @@ class GHGASelector:
 
     def _initialize_population(self) -> np.ndarray:
         """
-        Initialize population with both random and guided solutions.
+        Initialize population with both random and guided solutions using GPU when available.
         
         Returns:
         --------
@@ -631,54 +914,112 @@ class GHGASelector:
         self.logger.info("Initializing population")
         population = []
         
-        # Create random solutions
-        for _ in range(self.population_size - 3):  # Leave room for guided solutions
-            # Ensure each solution has at least one feature
-            chromosome = np.random.randint(2, size=self.n_features_)
-            if np.sum(chromosome) == 0:
-                random_idx = np.random.randint(0, self.n_features_)
-                chromosome[random_idx] = 1
-            population.append(chromosome)
+        # Create random solutions - utilize GPU for batch generation if available
+        if self.use_gpu and self.has_cupy:
+            try:
+                # Generate random solutions in batch on GPU
+                n_random = self.population_size - 3  # Leave room for guided solutions
+                
+                # Generate binary matrix on GPU
+                random_pop = cp.random.randint(0, 2, (n_random, self.n_features_))
+                
+                # Find rows with all zeros
+                row_sums = cp.sum(random_pop, axis=1)
+                zero_indices = cp.where(row_sums == 0)[0]
+                
+                # Handle rows with all zeros (ensure at least one feature)
+                if zero_indices.size > 0:
+                    random_indices = cp.random.randint(0, self.n_features_, size=zero_indices.size)
+                    for i, row_idx in enumerate(zero_indices):
+                        random_pop[row_idx, random_indices[i]] = 1
+                
+                # Copy back to CPU
+                population = [cp.asnumpy(random_pop[i]) for i in range(n_random)]
+                
+                self.logger.info(f"Generated {n_random} random solutions using GPU")
+                
+            except Exception as e:
+                self.logger.warning(f"GPU population initialization failed: {str(e)}. Falling back to CPU.")
+                # Fall back to CPU initialization for random solutions
+                for _ in range(self.population_size - 3):
+                    chromosome = np.random.randint(2, size=self.n_features_)
+                    if np.sum(chromosome) == 0:
+                        random_idx = np.random.randint(0, self.n_features_)
+                        chromosome[random_idx] = 1
+                    population.append(chromosome)
+        else:
+            # CPU initialization for random solutions
+            for _ in range(self.population_size - 3):
+                chromosome = np.random.randint(2, size=self.n_features_)
+                if np.sum(chromosome) == 0:
+                    random_idx = np.random.randint(0, self.n_features_)
+                    chromosome[random_idx] = 1
+                population.append(chromosome)
         
         # Add guided solution based on correlation
         try:
             guided_chromosome = np.zeros(self.n_features_, dtype=int)
             
-            if isinstance(self.X_, pd.DataFrame) and isinstance(self.y_, pd.Series):
-                # Pandas method for correlation
-                correlations = self.X_.corrwith(self.y_).abs()
-                correlations = correlations.fillna(0)  # Replace NaNs with 0
-                
-                # Select features with correlation above median
-                median_corr = correlations.median()
-                for i, corr in enumerate(correlations):
-                    if corr >= median_corr:
-                        guided_chromosome[i] = 1
-                
-                # Ensure at least one feature is selected
-                if np.sum(guided_chromosome) == 0:
-                    top_idx = np.argmax(correlations.values)
-                    guided_chromosome[top_idx] = 1
-            else:
-                # NumPy method for correlation
-                correlations = np.zeros(self.n_features_)
-                for i in range(self.n_features_):
-                    try:
-                        corr = np.corrcoef(self.X_[:, i], self.y_)[0, 1]
-                        correlations[i] = abs(corr) if not np.isnan(corr) else 0
-                    except Exception:
-                        correlations[i] = 0
-                
-                # Select features with correlation above median
-                median_corr = np.median(correlations)
-                for i, corr in enumerate(correlations):
-                    if corr >= median_corr:
-                        guided_chromosome[i] = 1
-                
-                # Ensure at least one feature is selected
-                if np.sum(guided_chromosome) == 0:
-                    top_idx = np.argmax(correlations)
-                    guided_chromosome[top_idx] = 1
+            # Try using cuDF for correlation calculation if available
+            if self.use_gpu and self.has_cudf_cuml and hasattr(self, 'X_gpu') and self.X_gpu is not None:
+                try:
+                    # Use cuDF for correlation calculation
+                    correlations = self.X_gpu.corrwith(self.y_gpu).abs().to_pandas()
+                    correlations = correlations.fillna(0)
+                    
+                    # Select features with correlation above median
+                    median_corr = correlations.median()
+                    for i, corr in enumerate(correlations):
+                        if corr >= median_corr:
+                            guided_chromosome[i] = 1
+                    
+                    # Ensure at least one feature is selected
+                    if np.sum(guided_chromosome) == 0:
+                        top_idx = np.argmax(correlations.values)
+                        guided_chromosome[top_idx] = 1
+                        
+                    self.logger.info("Created correlation-based solution using GPU acceleration")
+                except Exception as e:
+                    self.logger.warning(f"GPU correlation calculation failed: {str(e)}. Using CPU.")
+                    raise  # Fall through to CPU method
+            
+            # If no GPU or GPU failed, use pandas/numpy
+            if np.sum(guided_chromosome) == 0:  # If not set by GPU method
+                if isinstance(self.X_cpu, pd.DataFrame) and isinstance(self.y_cpu, pd.Series):
+                    # Pandas method for correlation
+                    correlations = self.X_cpu.corrwith(self.y_cpu).abs()
+                    correlations = correlations.fillna(0)  # Replace NaNs with 0
+                    
+                    # Select features with correlation above median
+                    median_corr = correlations.median()
+                    for i, corr in enumerate(correlations):
+                        if corr >= median_corr:
+                            guided_chromosome[i] = 1
+                    
+                    # Ensure at least one feature is selected
+                    if np.sum(guided_chromosome) == 0:
+                        top_idx = np.argmax(correlations.values)
+                        guided_chromosome[top_idx] = 1
+                else:
+                    # NumPy method for correlation
+                    correlations = np.zeros(self.n_features_)
+                    for i in range(self.n_features_):
+                        try:
+                            corr = np.corrcoef(self.X_cpu[:, i], self.y_cpu)[0, 1]
+                            correlations[i] = abs(corr) if not np.isnan(corr) else 0
+                        except Exception:
+                            correlations[i] = 0
+                    
+                    # Select features with correlation above median
+                    median_corr = np.median(correlations)
+                    for i, corr in enumerate(correlations):
+                        if corr >= median_corr:
+                            guided_chromosome[i] = 1
+                    
+                    # Ensure at least one feature is selected
+                    if np.sum(guided_chromosome) == 0:
+                        top_idx = np.argmax(correlations)
+                        guided_chromosome[top_idx] = 1
             
             population.append(guided_chromosome)
             self.logger.info("Guided solution added based on correlation")
@@ -693,7 +1034,15 @@ class GHGASelector:
         # Add a sparse solution (few features)
         sparse_solution = np.zeros(self.n_features_, dtype=int)
         n_to_select = max(1, int(0.1 * self.n_features_))  # Select 10% of features or at least 1
-        selected_indices = np.random.choice(self.n_features_, size=n_to_select, replace=False)
+        
+        if self.use_gpu and self.has_cupy:
+            try:
+                selected_indices = cp.random.choice(self.n_features_, size=n_to_select, replace=False).get()
+            except:
+                selected_indices = np.random.choice(self.n_features_, size=n_to_select, replace=False)
+        else:
+            selected_indices = np.random.choice(self.n_features_, size=n_to_select, replace=False)
+            
         sparse_solution[selected_indices] = 1
         population.append(sparse_solution)
         self.logger.info("Sparse solution added with few features")
@@ -701,9 +1050,18 @@ class GHGASelector:
         # Add a dense solution (many features)
         dense_solution = np.ones(self.n_features_, dtype=int)
         n_to_deselect = max(0, int(0.2 * self.n_features_))  # Deselect 20% of features
+        
         if n_to_deselect > 0:
-            deselected_indices = np.random.choice(self.n_features_, size=n_to_deselect, replace=False)
+            if self.use_gpu and self.has_cupy:
+                try:
+                    deselected_indices = cp.random.choice(self.n_features_, size=n_to_deselect, replace=False).get()
+                except:
+                    deselected_indices = np.random.choice(self.n_features_, size=n_to_deselect, replace=False)
+            else:
+                deselected_indices = np.random.choice(self.n_features_, size=n_to_deselect, replace=False)
+                
             dense_solution[deselected_indices] = 0
+        
         population.append(dense_solution)
         self.logger.info("Dense solution added with many features")
         
@@ -711,13 +1069,13 @@ class GHGASelector:
     
     def _fitness_function(self, chromosome: np.ndarray) -> float:
         """
-        Evaluate solution quality using cross-validation.
+        Evaluate solution quality using cross-validation with correlation-based penalty.
         
         Parameters:
         -----------
         chromosome : np.ndarray
             Binary array indicating selected features
-            
+                
         Returns:
         --------
         float
@@ -729,28 +1087,103 @@ class GHGASelector:
             self.logger.debug("Empty feature set encountered, assigning minimum fitness")
             return float('-inf')
         
-        # Extract selected features
-        X_selected = self.X_.iloc[:, selected] if isinstance(self.X_, pd.DataFrame) else self.X_[:, selected]
-        
         try:
-            # Perform cross-validation
-            model = RandomForestRegressor(n_estimators=100, random_state=self.random_state)
-            cross_validator = MLCrossValidator(estimator=model, scoring='r2', n_splits=5)
+            # GPU PATH
+            if self.use_gpu and self.has_cudf_cuml and hasattr(self, 'X_gpu') and self.X_gpu is not None:
+                try:
+                    # Extract selected features using cuDF
+                    X_selected = self.X_gpu.iloc[:, selected]
+                    
+                    # Use cuML for RandomForest
+                    model = cuRFR(n_estimators=100, random_state=self.random_state)
+                    
+                    # Convert to pandas for cross-validation
+                    X_selected_pd = X_selected.to_pandas()
+                    
+                    cross_validator = MLCrossValidator(estimator=model, scoring='r2', n_splits=5)
+                    
+                    if self.cv_method == 'temporal':
+                        scores = cross_validator.temporal_cv(X_selected_pd, self.y_cpu, groups=self.groups)
+                    elif self.cv_method == 'random':
+                        scores = cross_validator.random_cv(X_selected_pd, self.y_cpu)
+                    elif self.cv_method == 'spatial':
+                        scores = cross_validator.spatial_cv(X_selected_pd, self.y_cpu, self.groups)
+                    else:
+                        raise ValueError(f"Unknown CV method: {self.cv_method}")
+                    
+                    cv_score = np.mean(scores)
+                    
+                    # For correlation penalty, we'll use pandas (CPU)
+                    X_selected_corr = self.X_cpu.iloc[:, selected]
+                except Exception as e:
+                    self.logger.warning(f"GPU fitness calculation failed: {str(e)}. Falling back to CPU.")
+                    # Fall through to CPU implementation
+                    raise  # Re-raise to fall through to CPU path
             
-            if self.cv_method == 'temporal':
-                scores = cross_validator.temporal_cv(X_selected, self.y_, groups=self.groups)
-            elif self.cv_method == 'random':
-                scores = cross_validator.random_cv(X_selected, self.y_)
-            elif self.cv_method == 'spatial':
-                scores = cross_validator.spatial_cv(X_selected, self.y_, self.groups)
-            else:
-                raise ValueError(f"Unknown CV method: {self.cv_method}")
+            # CPU PATH
+            else:  # CPU implementation (primary or fallback from GPU exception)
+                # Extract selected features
+                X_selected = self.X_cpu.iloc[:, selected] if isinstance(self.X_cpu, pd.DataFrame) else self.X_cpu[:, selected]
+                X_selected_corr = X_selected  # For correlation calculation later
+                
+                # Perform cross-validation
+                model = RandomForestRegressor(
+                    random_state=self.random_state, 
+                    n_jobs=self.n_jobs,
+                    n_estimators=100
+                )
+                cross_validator = MLCrossValidator(estimator=model, scoring='r2', n_splits=5)
+                
+                if self.cv_method == 'temporal':
+                    scores = cross_validator.temporal_cv(X_selected, self.y_cpu, groups=self.groups)
+                elif self.cv_method == 'random':
+                    scores = cross_validator.random_cv(X_selected, self.y_cpu)
+                elif self.cv_method == 'spatial':
+                    scores = cross_validator.spatial_cv(X_selected, self.y_cpu, self.groups)
+                else:
+                    raise ValueError(f"Unknown CV method: {self.cv_method}")
+                
+                cv_score = np.mean(scores)
             
-            # Calculate fitness with penalty for number of features
-            cv_score = np.mean(scores)
-            penalty = self.feature_penalty * len(selected) / self.n_features_  # Normalized penalty
+            # CORRELATION PENALTY CALCULATION (after either GPU or CPU path)
+            # Basic feature count penalty
+            basic_penalty = self.feature_penalty * len(selected) / self.n_features_
             
-            return cv_score - penalty
+            # Only calculate correlation penalty if we have multiple features
+            correlation_penalty = 0.0
+            if len(selected) > 1:
+                try:
+                    # Ensure we have a DataFrame for correlation calculation
+                    if not isinstance(X_selected_corr, pd.DataFrame):
+                        X_selected_corr = pd.DataFrame(X_selected_corr)
+                    
+                    # Calculate correlation matrix (absolute values)
+                    correlation_matrix = np.abs(X_selected_corr.corr().values)
+                    np.fill_diagonal(correlation_matrix, 0)  # Ignore self-correlations
+                    
+                    # Calculate average correlation across features
+                    mean_correlation = np.mean(correlation_matrix)
+                    
+                    # Apply stronger penalties for highly correlated feature sets
+                    if mean_correlation > 0.7:
+                        correlation_penalty = self.feature_penalty * 0.8 * mean_correlation
+                    else:
+                        correlation_penalty = self.feature_penalty * 0.5 * mean_correlation
+                        
+                    # Apply a threshold for minimal correlation
+                    if mean_correlation < 0.2:
+                        correlation_penalty = 0
+                except Exception as e:
+                    self.logger.warning(f"Correlation calculation failed: {str(e)}. Using only basic penalty.")
+                    correlation_penalty = 0.0
+            
+            
+                
+            # Combine penalties and calculate final fitness
+            total_penalty = basic_penalty + correlation_penalty
+            fitness = cv_score - total_penalty
+            
+            return fitness
             
         except Exception as e:
             self.logger.error(f"Error in fitness evaluation: {str(e)}", exc_info=True)
@@ -758,7 +1191,7 @@ class GHGASelector:
     
     def _crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Perform two-point crossover between parents.
+        Perform two-point crossover between parents with GPU acceleration when appropriate.
         
         Parameters:
         -----------
@@ -771,7 +1204,13 @@ class GHGASelector:
             Two child chromosomes
         """
         # Get random crossover points
-        points = sorted(np.random.choice(self.n_features_, 2, replace=False))
+        if self.use_gpu and self.has_cupy:
+            try:
+                points = sorted(cp.random.choice(self.n_features_, 2, replace=False).get())
+            except:
+                points = sorted(np.random.choice(self.n_features_, 2, replace=False))
+        else:
+            points = sorted(np.random.choice(self.n_features_, 2, replace=False))
         
         child1 = np.copy(parent1)
         child2 = np.copy(parent2)
@@ -782,17 +1221,30 @@ class GHGASelector:
         
         # Ensure at least one feature is selected
         if np.sum(child1) == 0:
-            random_idx = np.random.randint(0, self.n_features_)
+            if self.use_gpu and self.has_cupy:
+                try:
+                    random_idx = cp.random.randint(0, self.n_features_).get()
+                except:
+                    random_idx = np.random.randint(0, self.n_features_)
+            else:
+                random_idx = np.random.randint(0, self.n_features_)
             child1[random_idx] = 1
+            
         if np.sum(child2) == 0:
-            random_idx = np.random.randint(0, self.n_features_)
+            if self.use_gpu and self.has_cupy:
+                try:
+                    random_idx = cp.random.randint(0, self.n_features_).get()
+                except:
+                    random_idx = np.random.randint(0, self.n_features_)
+            else:
+                random_idx = np.random.randint(0, self.n_features_)
             child2[random_idx] = 1
             
         return child1, child2
     
     def _mutation(self, chromosome: np.ndarray) -> np.ndarray:
         """
-        Perform bit-flip mutation.
+        Perform bit-flip mutation with GPU acceleration when appropriate.
         
         Parameters:
         -----------
@@ -807,6 +1259,27 @@ class GHGASelector:
         # Create a copy to avoid modifying the original
         mutated = chromosome.copy()
         
+        if self.use_gpu and self.has_cupy:
+            try:
+                # Generate mutation mask on GPU
+                random_values = cp.random.random(self.n_features_).get()
+                mutation_mask = random_values < self.mutation_rate
+                
+                # Apply mutations
+                if np.any(mutation_mask):
+                    mutated[mutation_mask] = 1 - mutated[mutation_mask]
+                
+                # Ensure at least one feature is selected
+                if np.sum(mutated) == 0:
+                    random_idx = cp.random.randint(0, self.n_features_).get()
+                    mutated[random_idx] = 1
+                
+                return mutated
+            except:
+                # Fall back to CPU if GPU fails
+                pass
+        
+        # CPU implementation
         # Apply mutation
         for i in range(len(mutated)):
             if np.random.random() < self.mutation_rate:
@@ -821,7 +1294,7 @@ class GHGASelector:
     
     def _local_search(self, chromosome: np.ndarray) -> np.ndarray:
         """
-        Implement hill climbing to improve solution.
+        Implement hill climbing to improve solution with GPU acceleration where possible.
         
         Parameters:
         -----------
@@ -844,7 +1317,7 @@ class GHGASelector:
         
         # Try to improve by flipping bits one by one
         improved = True
-        max_iterations = min(20, self.n_features_)  # Limit iterations to avoid getting stuck
+        max_iterations = min(10, self.n_features_)  # Limit iterations to avoid getting stuck
         iteration = 0
         
         while improved and iteration < max_iterations:
@@ -852,7 +1325,13 @@ class GHGASelector:
             iteration += 1
             
             # Identify features to try first (randomly shuffled)
-            feature_indices = np.random.permutation(self.n_features_)
+            if self.use_gpu and self.has_cupy:
+                try:
+                    feature_indices = cp.random.permutation(self.n_features_).get()
+                except:
+                    feature_indices = np.random.permutation(self.n_features_)
+            else:
+                feature_indices = np.random.permutation(self.n_features_)
             
             for i in feature_indices:
                 # Try flipping this bit
@@ -879,10 +1358,7 @@ class GHGASelector:
     
     def _calculate_feature_importance(self) -> None:
         """
-        Calculate feature importance scores based on multiple criteria:
-        1. Selection frequency across top solutions
-        2. Correlation with target variable
-        3. Impact on model performance
+        Calculate feature importance scores with GPU acceleration where possible.
         """
         # Initialize importance scores
         self.logger.info("Calculating feature importance scores")
@@ -949,14 +1425,34 @@ class GHGASelector:
         # 2. Correlation with target (if available)
         correlation = 0
         try:
-            if isinstance(self.X_, pd.DataFrame) and isinstance(self.y_, pd.Series):
-                correlation = abs(self.X_[feature].corr(self.y_))
-                if pd.isna(correlation):
-                    correlation = 0
+            # Try GPU correlation if available
+            if self.use_gpu and self.has_cudf_cuml and hasattr(self, 'X_gpu') and self.X_gpu is not None:
+                try:
+                    # Use cuDF for correlation calculation
+                    feature_series = self.X_gpu[feature]
+                    correlation = abs(feature_series.corr(self.y_gpu))
+                    if pd.isna(correlation):
+                        correlation = 0
+                except:
+                    # Fall back to CPU correlation
+                    if isinstance(self.X_cpu, pd.DataFrame) and isinstance(self.y_cpu, pd.Series):
+                        correlation = abs(self.X_cpu[feature].corr(self.y_cpu))
+                        if pd.isna(correlation):
+                            correlation = 0
+                    else:
+                        correlation = abs(np.corrcoef(self.X_cpu[:, index], self.y_cpu)[0, 1])
+                        if np.isnan(correlation):
+                            correlation = 0
             else:
-                correlation = abs(np.corrcoef(self.X_[:, index], self.y_)[0, 1])
-                if np.isnan(correlation):
-                    correlation = 0
+                # CPU correlation
+                if isinstance(self.X_cpu, pd.DataFrame) and isinstance(self.y_cpu, pd.Series):
+                    correlation = abs(self.X_cpu[feature].corr(self.y_cpu))
+                    if pd.isna(correlation):
+                        correlation = 0
+                else:
+                    correlation = abs(np.corrcoef(self.X_cpu[:, index], self.y_cpu)[0, 1])
+                    if np.isnan(correlation):
+                        correlation = 0
         except Exception as e:
             self.logger.warning(f"Error calculating correlation for feature {feature}: {str(e)}")
             correlation = 0
@@ -1130,7 +1626,22 @@ class GHGASelector:
         # Get selected feature mask
         mask = self.get_support()
         
-        # Transform data
+        # Transform data - try using GPU if available
+        if self.use_gpu and self.has_cudf_cuml and isinstance(X, pd.DataFrame):
+            try:
+                # Convert to cuDF DataFrame
+                X_gpu = cudf.DataFrame.from_pandas(X)
+                
+                # Select features
+                X_transformed = X_gpu.iloc[:, mask]
+                
+                # Convert back to pandas for compatibility
+                return X_transformed.to_pandas()
+            except:
+                # Fall back to CPU if GPU transform fails
+                pass
+                
+        # CPU transform
         if isinstance(X, pd.DataFrame):
             return X.iloc[:, mask]
         return X[:, mask]
@@ -1200,6 +1711,7 @@ class GHGASelector:
             'n_jobs': self.n_jobs,
             'use_gpu': self.use_gpu,
             'gpu_id': self.gpu_id,
+            'gpu_mem_limit': self.gpu_mem_limit,
             'checkpoint_interval': self.checkpoint_interval,
             'fitness_batch_size': self.fitness_batch_size
         }
@@ -1397,6 +1909,34 @@ class GHGASelector:
         else:
             raise ValueError("plot_type must be either 'matplotlib' or 'plotly'")
     
+    def get_gpu_info(self) -> Dict[str, Any]:
+        """
+        Get information about the GPU configuration and usage.
+        
+        Returns:
+        --------
+        Dict[str, Any]
+            Dictionary with GPU information
+        """
+        gpu_info = {
+            "gpu_enabled": self.use_gpu,
+            "gpu_id": self.gpu_id if self.use_gpu else None,
+            "cupy_available": self.has_cupy,
+            "cudf_cuml_available": self.has_cudf_cuml,
+        }
+        
+        # Add memory info if available
+        if self.use_gpu and self.has_cupy:
+            try:
+                mem_info = cp.cuda.runtime.memGetInfo()
+                gpu_info["free_memory_gb"] = mem_info[0] / 1024**3
+                gpu_info["total_memory_gb"] = mem_info[1] / 1024**3
+                gpu_info["memory_usage_percent"] = 100 * (1 - mem_info[0] / mem_info[1])
+            except:
+                gpu_info["memory_info"] = "Not available"
+        
+        return gpu_info
+    
     def summary(self) -> Dict:
         """
         Get a summary of the feature selection results.
@@ -1419,6 +1959,11 @@ class GHGASelector:
         # Calculate total runtime
         total_time = sum(self.convergence_metrics_['generation_time'])
         
+        # Get GPU info
+        gpu_info = self.get_gpu_info() if hasattr(self, 'use_gpu') and self.use_gpu else {
+            "gpu_enabled": False
+        }
+        
         summary = {
             'n_total_features': self.n_features_,
             'input_features': self.feature_names_,
@@ -1434,7 +1979,7 @@ class GHGASelector:
                 'avg_generation_time': total_time / max(1, len(self.convergence_metrics_['generation_time']))
             },
             'hardware_info': {
-                'used_gpu': self.use_gpu,
+                'gpu': gpu_info,
                 'n_jobs': self.n_jobs
             }
         }

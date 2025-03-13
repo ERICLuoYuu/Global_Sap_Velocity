@@ -41,7 +41,7 @@ y_test = test_data['sap_velocity'].values
 
 # Perform spatial stratified cross-validation
 time_groups = test_data.sort_index().index
-""""
+
 # Define parameter grid
 param_grid = {
     'architecture': {
@@ -67,7 +67,8 @@ optimizer = DLOptimizer(
     param_grid=param_grid,
     input_shape=(X.shape[1],),
     output_shape=1,
-    scoring='val_loss'
+    scoring='val_loss',
+    model_type='nn'
 )
 
 # Temporal cross-validation with multiple measurements per timestamp
@@ -119,7 +120,7 @@ param_grid = {
 optimizer = MLOptimizer( param_grid=param_grid, scoring='r2', model_type='rf', task='regression')
 optimizer.fit(X, y, split_type='random')
 """
-
+"""
 param_grid = {
     # Core Tree Structure
     'max_depth': [3,  5,  7],
@@ -135,7 +136,7 @@ param_grid = {
 }
 optimizer = MLOptimizer( param_grid=param_grid, scoring='neg_mean_squared_error', model_type='xgb', task='regression')
 optimizer.fit(X, y, split_type='random')
-"""
+
 # print results
 print(optimizer.best_params_)
 print(optimizer.best_estimator_)
@@ -208,3 +209,4 @@ plt.tight_layout()
 plt.show()
 # save the plot
 fig1.savefig('./plots/rf_scatter.png')
+"""

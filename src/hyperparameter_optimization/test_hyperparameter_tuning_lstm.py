@@ -1,40 +1,72 @@
-import tensorflow as tf
-from tensorflow.keras import regularizers
-from tensorflow import keras
-import pandas as pd
-import numpy as np
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import r2_score
-from pathlib import Path
+"""
+Deterministic LSTM model for time series prediction with comprehensive
+randomness control for reproducible results.
+"""
+import os
 import sys
-from sklearn.model_selection import train_test_split
+from pathlib import Path
+
+# Set environment variables for determinism BEFORE importing TensorFlow
+os.environ['TF_DETERMINISTIC_OPS'] = '1'
+os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+os.environ['PYTHONHASHSEED'] = '42'
+
 # Add parent directory to Python path
 parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
+
+# Import frameworks with global seed control
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+from tensorflow.keras import regularizers
+from tensorflow import keras
+from typing import List, Optional, Union, Dict, Tuple, Any
+
+# Set global seeds
+SEED = 42
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+# Apply additional TensorFlow determinism settings - version compatible
+try:
+    # For TensorFlow 2.8+
+    tf.config.experimental.enable_op_determinism()
+except AttributeError:
+    # For older TensorFlow versions
+    # Set environment variables and session config instead
+    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+    
+    # Try to set operation determinism at session level if available
+    try:
+        from tensorflow.compat.v1 import ConfigProto
+        from tensorflow.compat.v1 import InteractiveSession
+        config = ConfigProto()
+        config.intra_op_parallelism_threads = 1
+        config.inter_op_parallelism_threads = 1
+        session = InteractiveSession(config=config)
+    except:
+        print("Warning: Could not configure session-level determinism")
+
+# Limit TensorFlow to use only one thread for CPU operations
+tf.config.threading.set_inter_op_parallelism_threads(1)
+tf.config.threading.set_intra_op_parallelism_threads(1)
+
+# Configure GPU for determinism if available
+physical_devices = tf.config.list_physical_devices('GPU')
+if physical_devices:
+    for device in physical_devices:
+        try:
+            tf.config.experimental.set_memory_growth(device, True)
+        except:
+            print(f"Warning: Could not set memory growth for GPU device {device}")
+
+# Import the hyperparameter optimizer
 from src.hyperparameter_optimization.hyper_tuner import DLOptimizer
-
-import numpy as np
-import pandas as pd
-from pathlib import Path
-
-
-
-
-import numpy as np
-import pandas as pd
-import tensorflow as tf
-import matplotlib.pyplot as plt
-from typing import List, Optional, Union, Dict, Tuple, Any
-
-
-import numpy as np
-import pandas as pd
-import tensorflow as tf
-import matplotlib.pyplot as plt
-from typing import List, Optional, Union, Dict, Tuple, Any
 
 
 class TimeSeriesSegmenter:
@@ -210,6 +242,7 @@ class TimeSeriesSegmenter:
             Figure size
         """
         plt.figure(figsize=figsize)
+        # Use deterministic colors and fixed order
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
                  '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         
@@ -371,15 +404,33 @@ class WindowGenerator:
             Dataset of (input_window, label_window) pairs
         """
         data = np.array(data, dtype=np.float32)
+        
+        # Use deterministic seed for dataset creation
         ds = tf.keras.utils.timeseries_dataset_from_array(
             data=data,
             targets=None,
             sequence_length=self.total_window_size,
             sequence_stride=1,
             shuffle=self.shuffle,
-            batch_size=self.batch_size)
+            batch_size=self.batch_size,
+            seed=SEED)  # Add seed for determinism
 
         ds = ds.map(self.split_window)
+        
+        # Apply deterministic options to dataset in a version-compatible way
+        try:
+            options = tf.data.Options()
+            options.experimental_deterministic = True
+            # Try setting auto shard policy if available
+            try:
+                options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.OFF
+            except:
+                pass
+            ds = ds.with_options(options)
+        except:
+            # If options aren't available, rely on seed for determinism
+            pass
+            
         return ds
     
     @property
@@ -423,6 +474,9 @@ class WindowGenerator:
         max_subplots : int
             Maximum number of examples to plot
         """
+        # Set matplotlib to deterministic mode
+        plt.rcParams['agg.path.chunksize'] = 10000
+        
         inputs, labels = self.example
         plt.figure(figsize=(12, 8))
         plot_col_index = self.column_indices[plot_col]
@@ -446,7 +500,14 @@ class WindowGenerator:
                        edgecolors='k', label='Labels', c='#2ca02c', s=64)
                        
             if model is not None:
-                predictions = model(inputs)
+                # Use deterministic prediction
+                try:
+                    tf.config.run_functions_eagerly(True)
+                    predictions = model(inputs)
+                    tf.config.run_functions_eagerly(False)
+                except:
+                    predictions = model(inputs)
+                
                 plt.scatter(self.label_indices, predictions[n, :, label_col_index],
                           marker='X', edgecolors='k', label='Predictions',
                           c='#ff7f0e', s=64)
@@ -600,8 +661,24 @@ class SegmentedWindowGenerator:
             combined['val'] = combined['val'].concatenate(wg.val)
             combined['test'] = combined['test'].concatenate(wg.test)
         
-        # Shuffle training data
-        combined['train'] = combined['train'].shuffle(buffer_size)
+        # Set deterministic options for each dataset in a version-compatible way
+        try:
+            options = tf.data.Options()
+            options.experimental_deterministic = True
+            # Try setting auto shard policy if available
+            try:
+                options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.OFF
+            except:
+                pass
+                
+            # Apply options if available
+            combined['train'] = combined['train'].shuffle(buffer_size, seed=SEED).with_options(options)
+            combined['val'] = combined['val'].with_options(options)
+            combined['test'] = combined['test'].with_options(options)
+        except:
+            # If options aren't available, at least use seed for shuffle
+            combined['train'] = combined['train'].shuffle(buffer_size, seed=SEED)
+            # And continue with datasets as they are
         
         return combined
     
@@ -663,6 +740,7 @@ class SegmentedWindowGenerator:
             buffer_size=buffer_size
         )
 
+
 def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
     """
     Create an improved LSTM model with regularization and bidirectional layers.
@@ -679,6 +757,13 @@ def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
     --------
     model: keras.Model, compiled LSTM model
     """
+    # Create a deterministic model with seeds for all random operations
+    tf.random.set_seed(SEED)
+    
+    # Create incrementing seeds for each layer to ensure independence
+    kernel_seeds = [SEED + i for i in range(100)]
+    seed_idx = 0
+    
     model = keras.Sequential()
     
     # Input layer
@@ -686,7 +771,7 @@ def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
     
     # Add a time-distributed attention mechanism (optional)
     if n_layers > 1:
-        # First layer can be bidirectional
+        # First layer can be bidirectional with deterministic seed
         model.add(keras.layers.Bidirectional(
             keras.layers.LSTM(
                 units,
@@ -699,10 +784,18 @@ def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
                 recurrent_regularizer=regularizers.l2(0.001),
                 bias_regularizer=regularizers.l2(0.001),
                 unroll=False,
-                use_bias=True
+                use_bias=True,
+                # Add deterministic initializers
+                kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+                recurrent_initializer=keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+                bias_initializer=keras.initializers.Zeros()
             )
         ))
-        model.add(keras.layers.Dropout(dropout_rate))
+        seed_idx += 2
+        
+        # Add seeded dropout
+        model.add(keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx]))
+        seed_idx += 1
         
         # Middle layers
         for i in range(1, n_layers - 1):
@@ -718,9 +811,17 @@ def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
                 # recurrent_regularizer=regularizers.l2(0.001),
                 # bias_regularizer=regularizers.l2(0.001),
                 unroll=False,
-                use_bias=True
-            ))) 
-            model.add(keras.layers.Dropout(dropout_rate))
+                use_bias=True,
+                # Add deterministic initializers
+                kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+                recurrent_initializer=keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+                bias_initializer=keras.initializers.Zeros()
+            )))
+            seed_idx += 2
+            
+            # Add seeded dropout
+            model.add(keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx]))
+            seed_idx += 1
         
         # Final LSTM layer
         model.add(keras.layers.Bidirectional(keras.layers.LSTM(
@@ -734,9 +835,17 @@ def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
             # recurrent_regularizer=regularizers.l2(0.001),
             # bias_regularizer=regularizers.l2(0.001),
             unroll=False,
-            use_bias=True
+            use_bias=True,
+            # Add deterministic initializers
+            kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+            recurrent_initializer=keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+            bias_initializer=keras.initializers.Zeros()
         )))
-        model.add(keras.layers.Dropout(dropout_rate))
+        seed_idx += 2
+        
+        # Add seeded dropout
+        model.add(keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx]))
+        seed_idx += 1
     else:
         # If only one layer, make it bidirectional for better performance
         model.add(keras.layers.Bidirectional(
@@ -751,28 +860,58 @@ def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
                 # recurrent_regularizer=regularizers.l2(0.001),
                 # bias_regularizer=regularizers.l2(0.001),
                 unroll=False,
-                use_bias=True
+                use_bias=True,
+                # Add deterministic initializers
+                kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+                recurrent_initializer=keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+                bias_initializer=keras.initializers.Zeros()
             )
         ))
-        model.add(keras.layers.Dropout(dropout_rate))
+        seed_idx += 2
+        
+        # Add seeded dropout
+        model.add(keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx]))
+        seed_idx += 1
     
     # Add a dense layer before the output for better representation
     model.add(keras.layers.Dense(
         units=max(units // 2, output_shape * 2),
         activation='relu',
-        kernel_regularizer=regularizers.l2(0.001)
+        kernel_regularizer=regularizers.l2(0.001),
+        # Add deterministic initializers
+        kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=keras.initializers.Zeros()
     ))
+    seed_idx += 1
     
     # Output layer
-    model.add(keras.layers.Dense(output_shape))
+    model.add(keras.layers.Dense(
+        output_shape,
+        # Add deterministic initializers
+        kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=keras.initializers.Zeros()
+    ))
+    
+   
+    
     
     return model
 
+
 def get_predictions(model, dataset, scaler):
     """Get predictions from a windowed dataset and inverse transform them."""
+    # Set evaluation mode to be deterministic - version-compatible approach
+    try:
+        # For newer TensorFlow versions
+        tf.config.run_functions_eagerly(True)
+    except:
+        # For older versions, use an alternative approach
+        pass
+    
     all_predictions = []
     all_labels = []
     
+    # Use a fixed batch size for prediction to ensure consistency
     for features, labels in dataset:
         batch_predictions = model.predict(features, verbose=0)
         
@@ -801,7 +940,15 @@ def get_predictions(model, dataset, scaler):
     all_predictions = all_predictions[:min_length]
     all_labels = all_labels[:min_length]
     
+    try:
+        # Reset eager execution when done for newer TF versions
+        tf.config.run_functions_eagerly(False)
+    except:
+        pass
+    
     return all_predictions.flatten(), all_labels.flatten()
+
+
 def add_time_features(df, datetime_column=None):
     """
     Create cyclical time features from a datetime column or index.
@@ -859,32 +1006,43 @@ def add_time_features(df, datetime_column=None):
     df['Month sin'] = np.sin(timestamp_s * (2 * np.pi / month))
     df['Month cos'] = np.cos(timestamp_s * (2 * np.pi / month))
     
-    
     return df
+
+
 def main():
     # Set parameters for the model
-    INPUT_WIDTH = 7   # Use 7 time steps as input
+    INPUT_WIDTH = 4   # Use 4 time steps as input
     LABEL_WIDTH = 1    # Predict 1 time step ahead
-    SHIFT = 2          # Predict 1 step ahead
-    BATCH_SIZE = 128   # Batch size for training
+    SHIFT = 1          # Predict 1 step ahead
+    BATCH_SIZE = 64   # Batch size for training
     EXCLUDE_LABEL = True  # Exclude labels in input features
+    
+    # Set matplotlib to deterministic mode
+    import matplotlib as mpl
+    mpl.rcParams['agg.path.chunksize'] = 10000
+    np.random.seed(SEED)  # Ensure matplotlib's random operations use our seed
     
     # Load data
     print("Loading data...")
-    data_dir = Path('./outputs/processed_data/merged/site/gap_filled_size1')
+    data_dir = Path('./outputs/processed_data/merged/site/gap_filled_size1_with_era5')
     data_list = list(data_dir.glob('*_merged.csv'))
     
     if not data_list:
         print(f"No CSV files found in {data_dir}")
         sys.exit(1)
     
+    # Sort data files for deterministic processing order
+    data_list = sorted(data_list)
+    
     print(f"Found {len(data_list)} data files")
     
     # Process data files
-   # Process data files
     all_segments = []
-    used_cols = ['sap_velocity', 'ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean', 'swc_shallow_mean', 'swc_deep_mean', 'biome'] 
+    used_cols = ['sap_velocity','soil_temperature_level_1','soil_temperature_level_3','surface_net_solar_radiation', 'volumetric_soil_water_layer_3', 'volumetric_soil_water_layer_1','ppfd_in','sw_in', 'ta', 'precip', 'u_component_of_wind_10m', 'v_component_of_wind_10m', 'vpd', 'leaf_area_index_high_vegetation', 'leaf_area_index_low_vegetation', 'biome']
     all_biome_types = set()  # Will collect all unique biome types
+
+    # Sort data files for deterministic processing order
+    data_list = sorted(data_list)
 
     for data_file in data_list:
         print(f"Processing {data_file.name}")
@@ -902,23 +1060,24 @@ def main():
             # Fix potential case/whitespace issues
             df.columns = [col.strip().lower() for col in df.columns]
             used_cols_lower = [col.lower() for col in used_cols]
-            
+            df = df[used_cols_lower]
             # Process biome column
-            if 'biome' in df.columns:
-                # Store biome values to collect all types
-                all_biome_types.update(df['biome'].unique())
-                
-                # Get non-biome columns 
-                orig_cols = [col for col in used_cols_lower if col != 'biome']
-                
-                # Create dummy variables for biome
-                biome_df = pd.get_dummies(df['biome'], prefix='', prefix_sep='', dtype=float)
-                
-                # Join with original data
-                df = df[orig_cols].join(biome_df)
-            else:
-                print(f"Warning: Missing biome column in {data_file.name}")
-                continue
+            if 'biome' in used_cols_lower:
+                if 'biome' in df.columns:
+                    # Store biome values to collect all types
+                    all_biome_types.update(df['biome'].unique())
+                    
+                    # Get non-biome columns 
+                    orig_cols = [col for col in used_cols_lower if col != 'biome']
+                    
+                    # Create dummy variables for biome with fixed random state and no dropping of first column
+                    biome_df = pd.get_dummies(df['biome'], prefix='', prefix_sep='', dtype=float, drop_first=False)
+                    
+                    # Join with original data
+                    df = df[orig_cols].join(biome_df)
+                else:
+                    print(f"Warning: Missing biome column in {data_file.name}")
+                    continue
             
             # Clean data (only once)
             df = df.replace([np.inf, -np.inf], np.nan)
@@ -949,12 +1108,14 @@ def main():
     print(f"Total segments collected: {len(all_segments)}")
     print(f"All biome types found: {all_biome_types}")
 
-    # Ensure all segments have all biome types as columns
+    # Sort biome types for consistent order
+    all_biome_types = sorted(all_biome_types)
+
+    # Ensure all segments have all biome types as columns in the same order
     for segment in all_segments:
         for biome_type in all_biome_types:
             if biome_type not in segment.columns:
                 segment[biome_type] = 0.0
-        #print('segment:',segment)
 
     # Now standardize the data
     all_data = pd.concat(all_segments)
@@ -1011,32 +1172,6 @@ def main():
     train_ds = datasets['train']
     val_ds = datasets['val']
     test_ds = datasets['test']
-    # randomly split the training data into training and validation
-    # randomly split the training data into training and validation
-    """
-    full_ds = train_ds.concatenate(val_ds).concatenate(test_ds)
-
-    # This works but could be memory-intensive for large datasets
-    DATASET_SIZE = len(list(full_ds.as_numpy_iterator()))
-
-    # Your split calculations are good
-    train_size = int(0.7 * DATASET_SIZE)
-    val_size = int(0.15 * DATASET_SIZE)
-
-    # Issue 1: You have 'full_dataset' here but defined 'full_ds' above
-    # Issue 2: The shuffle() method needs a buffer_size parameter
-    full_ds = full_ds.shuffle(buffer_size=DATASET_SIZE)  # Corrected
-
-    # This is correct
-    train_ds = full_ds.take(train_size)
-
-   
-    remaining_dataset = full_ds.skip(train_size)  
-    val_ds = remaining_dataset.take(val_size)
-    test_ds = remaining_dataset.skip(val_size) 
-
-    """
-
     
     # Check dataset properties
     if train_ds is None:
@@ -1051,7 +1186,7 @@ def main():
         n_features = features_batch.shape[2]
 
     
-    # Define parameter grid for LSTM
+    # Define parameter grid for LSTM with deterministic settings
     param_grid = {
         'architecture': {
             'n_layers': [1],
@@ -1069,7 +1204,7 @@ def main():
         }
     }
     
-    # Create and fit optimizer
+    # Create and fit optimizer with deterministic behavior
     print("Starting hyperparameter optimization...")
     optimizer = DLOptimizer(
         base_architecture=create_lstm_model,
@@ -1079,10 +1214,10 @@ def main():
         input_shape=(INPUT_WIDTH, n_features),  # (timesteps, features)
         output_shape=LABEL_WIDTH,  # Output prediction length
         scoring='val_loss',
-        
+        random_state=SEED,  # Add random state for deterministic behavior
     )
     
-    # Convert TensorFlow dataset to X and y numpy arrays
+    # Convert TensorFlow dataset to X and y numpy arrays in a deterministic way
     def convert_tf_dataset_to_xy(dataset):
         features_list = []
         labels_list = []
@@ -1097,19 +1232,26 @@ def main():
         X = np.concatenate(features_list, axis=0)
         y = np.concatenate(labels_list, axis=0)
         
-        # Reshape if needed - depends on what your model expects
-        # For sequence data, you might need to reshape
-        
         # If labels are shape (batch, seq_len, features) and you need (batch, features)
         if y.ndim > 2:
             y = y.reshape(y.shape[0], -1)
         
         return X, y
 
-    # Using the function
+    # Using the function with deterministic behavior
     X_train, y_train = convert_tf_dataset_to_xy(train_ds)
     X_val, y_val = convert_tf_dataset_to_xy(val_ds)
 
+    # Set additional TensorFlow determinism options before fitting
+    # Use version-compatible approach
+    try:
+        # For newer TensorFlow versions
+        tf.keras.utils.set_random_seed(SEED)
+    except:
+        # For older TensorFlow versions
+        tf.random.set_seed(SEED)
+        np.random.seed(SEED)
+    
     # Custom fitting for time series data
     optimizer.fit(
         X_train, 
@@ -1117,14 +1259,13 @@ def main():
         is_cv=False,  # We're not using cross-validation
         X_val=X_val,  # Validation data
         y_val=y_val,  # Validation labels
-        split_type='random ',  # We've already created our datasets
-        
+        split_type='random',  # We've already created our datasets
     )
     
     # Get the best model
     best_model = optimizer.get_best_model()
     
-    # Get predictions
+    # Get predictions with deterministic settings
     print("Generating predictions...")
     test_predictions, test_labels_actual = get_predictions(best_model, test_ds, label_scaler)
     train_predictions, train_labels_actual = get_predictions(best_model, train_ds, label_scaler)
@@ -1213,9 +1354,7 @@ def main():
     print(f"Best parameters: {optimizer.best_params_}")
     print(f"Best validation score: {optimizer.best_score_}")
     
-    
-    
-    # Plot training history if available
+    # Plot training history if available with deterministic rendering
     if hasattr(optimizer, 'history_') and optimizer.history_ is not None:
         plt.figure(figsize=(12, 4))
         plt.subplot(1, 2, 1)
@@ -1237,7 +1376,56 @@ def main():
         plt.tight_layout()
         plt.savefig(plot_dir / 'lstm_training_history.png')
         plt.close()
+    
+    # Save the best model
+    model_dir = Path('./models')
+    model_dir.mkdir(exist_ok=True)
+    best_model.save(model_dir / 'lstm_sap_velocity_model')
+    
+    print("\nAnalysis complete. Model and visualizations saved.")
+    
+    # Return some key metric for determinism testing
+    return test_rmse
+
+
+def verify_determinism():
+    """Test if the pipeline produces deterministic results."""
+    # Save current random state
+    current_seed = SEED
+    
+    # First run with fixed seed
+    np.random.seed(42)
+    tf.random.set_seed(42)
+    os.environ['PYTHONHASHSEED'] = '42'
+    print("\nRunning first determinism test...")
+    result1 = main()
+    
+    # Second run with same seed
+    np.random.seed(42)
+    tf.random.set_seed(42)
+    os.environ['PYTHONHASHSEED'] = '42'
+    print("\nRunning second determinism test...")
+    result2 = main()
+    
+    # Check if results match
+    print("\nDeterminism Test Results:")
+    print(f"First run RMSE: {result1:.6f}")
+    print(f"Second run RMSE: {result2:.6f}")
+    print(f"Difference: {abs(result1 - result2):.10f}")
+    print(f"Results identical: {np.isclose(result1, result2, rtol=1e-10, atol=1e-10)}")
+    
+    # Restore original seed
+    np.random.seed(current_seed)
+    tf.random.set_seed(current_seed)
+    
+    return result1, result2
 
 
 if __name__ == "__main__":
+    # Run the main function with deterministic controls
+    print("\nRunning main function with enhanced determinism...")
     main()
+    
+    # Uncomment to verify pipeline determinism
+    # print("\nVerifying pipeline determinism...")
+    # result1, result2 = verify_determinism()

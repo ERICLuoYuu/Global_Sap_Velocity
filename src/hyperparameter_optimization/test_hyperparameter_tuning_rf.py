@@ -12,137 +12,113 @@ from src.hyperparameter_optimization.hyper_tuner import DLOptimizer
 from src.hyperparameter_optimization.hyper_tuner import MLOptimizer
 from tensorflow import keras
 
-# Define the base architecture function
-def create_nn(input_shape, output_shape, n_layers, units, dropout_rate):
-    model = keras.Sequential()
-    model.add(keras.layers.Input(shape=input_shape))
-    
-    for _ in range(n_layers):
-        model.add(keras.layers.Dense(units, activation='relu'))
-        model.add(keras.layers.Dropout(dropout_rate))
-    
-    if isinstance(output_shape, int) and output_shape > 1:
-        model.add(keras.layers.Dense(output_shape, activation='softmax'))
-    else:
-        model.add(keras.layers.Dense(1))
-    
-    return model
 
+
+def add_time_features(df, datetime_column=None):
+    """
+    Create cyclical time features from a datetime column or index.
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        DataFrame containing the datetime column or with datetime index
+    datetime_column : str, optional
+        Name of the datetime column. If None, uses the DataFrame index
+        
+    Returns:
+    --------
+    df : pandas.DataFrame
+        DataFrame with additional cyclical time features
+    """
+    # Make a copy to avoid modifying the original DataFrame
+    df = df.copy()
+    
+    # Get the datetime series from column or index
+    if datetime_column is not None:
+        if datetime_column not in df.columns:
+            raise ValueError(f"Column '{datetime_column}' not found in DataFrame")
+        date_time = pd.to_datetime(df[datetime_column])
+    else:
+        # Use index if no column specified
+        if not isinstance(df.index, pd.DatetimeIndex):
+            try:
+                date_time = pd.to_datetime(df.index)
+            except:
+                raise ValueError("DataFrame index cannot be converted to datetime and no datetime_column specified")
+        else:
+            date_time = df.index
+    
+    # Convert datetime to timestamp in seconds
+    timestamp_s = date_time.map(pd.Timestamp.timestamp)
+    
+    # Define day and year in seconds
+    day = 24 * 60 * 60  # seconds in a day
+    year = 365.2425 * day  # seconds in a year
+    
+    # Create cyclical features for day and year
+    df['Day sin'] = np.sin(timestamp_s * (2 * np.pi / day))
+    df['Day cos'] = np.cos(timestamp_s * (2 * np.pi / day))
+    df['Year sin'] = np.sin(timestamp_s * (2 * np.pi / year))
+    df['Year cos'] = np.cos(timestamp_s * (2 * np.pi / year))
+    
+    # Add week features (7 day cycle)
+    week = 7 * day
+    df['Week sin'] = np.sin(timestamp_s * (2 * np.pi / week))
+    df['Week cos'] = np.cos(timestamp_s * (2 * np.pi / week))
+    
+    # Add month features (30.44 day cycle)
+    month = 30.44 * day
+    df['Month sin'] = np.sin(timestamp_s * (2 * np.pi / month))
+    df['Month cos'] = np.cos(timestamp_s * (2 * np.pi / month))
+    
+    
+    return df
 # Load and preprocess data
-data = pd.read_csv('./outputs/processed_data/merged/site/gap_filled_size1/good_sites_merged_data.csv').dropna().set_index('TIMESTAMP').sort_index()
-data = data[['ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean', 'sap_velocity']]
+data = pd.read_csv('./outputs/processed_data/merged/site/gap_filled_size1_with_era5/all_biomes_merged_data.csv').set_index('TIMESTAMP').sort_index().dropna()
+data = data[['sap_velocity','vpd', 'ta','swc_shallow', 'ppfd_in', 'volumetric_soil_water_layer_4', 'leaf_area_index_low_vegetation', 'soil_temperature_level_3', 'volumetric_soil_water_layer_3', 'biome', 'swc_deep', 'u_component_of_wind_10m', 'v_component_of_wind_10m',]]
+# Convert biome to categorical if it exists
+if 'biome' in data.columns:
+    data['biome'] = data['biome'].astype('category')
+# get dummy variables for the biome column
+data = pd.get_dummies(data, columns=['biome'])
+print(data.columns)
+data = add_time_features(data)
+
 training_portion = 0.8
 #training_data = data.loc[:data.index[int(len(data)*training_portion)]]
 #test_data = data.loc[data.index[int(len(data)*training_portion)+1:]]
 # Use positional indexing instead of label-based indexing
-# training_data = data.iloc[:int(len(data)*training_portion)]
-# test_data = data.iloc[int(len(data)*training_portion)+1:]
-training_data = data.sample(frac=0.8, random_state=42)
-test_data = data.drop(training_data.index)
+training_data = data.iloc[:int(len(data)*training_portion)]
+test_data = data.iloc[int(len(data)*training_portion):]
+#training_data = data.sample(frac=0.8, random_state=42).sort_index()
+#b test_data = data.drop(training_data.index).sort_index()
 # training_data = training_data[['TIMESTAMP', 'ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean', 'sap_velocity']].dropna().set_index('TIMESTAMP')
 # test_data = test_data[['TIMESTAMP', 'ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean', 'sap_velocity']].dropna().set_index('TIMESTAMP')
 print(training_data.shape)
-X = training_data[['ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean']]
+X = training_data.drop(columns=['sap_velocity'])
 y = training_data['sap_velocity'].values
-X_test = test_data[['ws_mean', 'vpd_mean', 'sw_in_mean', 'ta_mean']]
+X_test = test_data.drop(columns=['sap_velocity'])
 y_test = test_data['sap_velocity'].values
 # Perform spatial stratified cross-validation
 time_groups = test_data.sort_index().index
-""""
-# Define parameter grid
-param_grid = {
-    'architecture': {
-        'n_layers': [2, 3, 5],
-        'units': [64, 128, 256],
-        'dropout_rate': [0.2, 0.3]
-    },
-    'optimizer': {
-        'name': ['Adam'],
-        'learning_rate': [0.001, 0.0001]
-    },
-    'training': {
-        'batch_size': 32,
-        'epochs': 100,
-        'patience': 10
-    }
-}
 
-# Create optimizer
-optimizer = DLOptimizer(
-    base_architecture=create_nn,
-    task='regression',
-    param_grid=param_grid,
-    input_shape=(X.shape[1],),
-    output_shape=1,
-    scoring='val_loss'
-)
-
-# Temporal cross-validation with multiple measurements per timestamp
-optimizer.fit(
-    X,
-    y,
-    split_type='random',
-    groups=None,  # timestamps for each sample
-    gap=1,  # optional gap between train and test
-    max_train_size=1000  # optional limit on training size
-)
-
-# Get best model and parameters
-best_model = optimizer.get_best_model()
-best_params = optimizer.best_params_
-# use the best model to predict
-y_pred = best_model.predict(X_test)
-# plot the results
-fig, ax = plt.subplots()
-ax.plot(test_data.index, y_test, label='True')
-ax.plot(test_data.index, y_pred, label='Predicted')
-ax.legend()
-
-# calculate the r2 score and mse and label on the plot
-
-r2 = r2_score(y_test, y_pred)
-mse = mean_squared_error(y_test, y_pred)
-ax.set_title(f"R2: {r2:.2f}, MSE: {mse:.2f}")
-plt.show()
-
-# Print results
-print(f"best_params: {best_params}")
-print(f"best_model: {best_model}")
-
-"""
 
 # do optimatization for ML model
 # Define parameter grid
-# for rf model
 param_grid = {
-    'n_estimators': [100, 300, 500],
-    'max_depth': [ 3, 5, 7],
-    'min_samples_split': [ 10],
-    'min_samples_leaf': [1],
-    'max_features': ['sqrt'],
-    'bootstrap': [True]
+    'n_estimators': [500],  # Fewer trees can sometimes help reduce overfitting
+    'max_depth': [7],  # Reduce max_depth to prevent trees from becoming too specific
+    'min_samples_split': [5],  # Higher values prevent creating too many small splits
+    'min_samples_leaf': [2,],  # Higher values ensure terminal nodes aren't too specific
+    'max_features': ['sqrt',],  # Controls feature randomness in tree building
+    'bootstrap': [True],
+    'random_state': [42],
+    'oob_score': [True]  # Enable out-of-bag evaluation for better generalization assessment
 }
 
 optimizer = MLOptimizer( param_grid=param_grid, scoring='r2', model_type='rf', task='regression')
 optimizer.fit(X, y, split_type='temporal')
-"""
 
-param_grid = {
-    # Core Tree Structure
-    'max_depth': [3,  5,  7],
-    'min_child_weight': [1, 3, 5],
-    
-    # Learning Parameters
-    'learning_rate': [0.01, 0.001],
-    'n_estimators': [100, 200, 300, 500],
-    
-    # Sampling Parameters
-    'subsample': [0.6, 0.8, 1.0],
-    'colsample_bytree': [0.6, 0.8, 1.0]
-}
-optimizer = MLOptimizer( param_grid=param_grid, scoring='neg_mean_squared_error', model_type='xgb', task='regression')
-optimizer.fit(X, y, split_type='random')
-"""
 # print results
 print(optimizer.best_params_)
 print(optimizer.best_estimator_)

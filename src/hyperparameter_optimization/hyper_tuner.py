@@ -57,17 +57,24 @@ def setup_logging(log_dir=None):
     return logging.getLogger()
 
 
-def setup_distribution_strategy():
+def setup_distribution_strategy(cpu_num=1):
     """
     Set up the appropriate distribution strategy based on environment.
     
     Returns:
     --------
+    devices : str
+        Type of devices being used ('GPUs', 'CPUs', or 'Nodes')
     strategy : tf.distribute.Strategy
-        Either MirroredStrategy for single-node or MultiWorkerMirroredStrategy for multi-node
+        The appropriate distribution strategy
     is_multi_node : bool
         Whether we're running in a multi-node environment
+    num_devices : int
+        Number of devices available
     """
+    # Clear any existing strategy to avoid mixing
+    tf.distribute.experimental_set_strategy(None)
+    
     # Check if running under SLURM
     if 'SLURM_JOB_NUM_NODES' in os.environ:
         num_nodes = int(os.environ.get('SLURM_JOB_NUM_NODES', '1'))
@@ -79,18 +86,28 @@ def setup_distribution_strategy():
                 implementation=tf.distribute.experimental.CommunicationImplementation.NCCL)
             strategy = tf.distribute.MultiWorkerMirroredStrategy(
                 communication_options=communication_options)
-            return strategy, True, num_nodes
+            return 'Nodes', strategy, True, num_nodes
     
     # Single node setup - use MirroredStrategy if GPUs are available
     gpus = tf.config.list_physical_devices('GPU')
+    print(gpus)
     if gpus:
+        devices = 'GPUs'
         strategy = tf.distribute.MirroredStrategy()
-        return strategy, False, len(gpus)
+        return devices, strategy, False, len(gpus)
     else:
-        # Fall back to default strategy for CPU-only machines
-        strategy = tf.distribute.get_strategy()
-        return strategy, False, 0
-
+        devices = 'CPUs'
+        # For CPU-only machines, explicitly create a MirroredStrategy with CPU devices
+        available_cpus = min(cpu_num, os.cpu_count())
+        if available_cpus > 1:
+            # Use threading for CPU parallelism instead
+            strategy = tf.distribute.OneDeviceStrategy(device="/CPU:0")
+            # Set TensorFlow to use threading
+            tf.config.threading.set_intra_op_parallelism_threads(available_cpus)
+            tf.config.threading.set_inter_op_parallelism_threads(available_cpus)
+        else:
+            strategy = tf.distribute.OneDeviceStrategy(device="/CPU:0")
+        return devices, strategy, False, available_cpus
 
 def setup_tf_config_for_slurm():
     """
@@ -516,7 +533,8 @@ class DLOptimizer(BaseOptimizer):
         use_distribution: bool = True,
         log_dir: Optional[str] = None,
         back_up_dir: Optional[str] = None,
-        save_model_dir: Optional[str] = None
+        save_model_dir: Optional[str] = None,
+        cpu_num: int = 1
 
     ):
         # Set default scoring based on task
@@ -531,6 +549,7 @@ class DLOptimizer(BaseOptimizer):
         self.label_encoder = LabelEncoder() if task == 'classification' else None
         self.best_model_weights = None
         self.use_distribution = use_distribution
+        self.cpu_num = cpu_num
         if back_up_dir is not None:
             self.back_up_dir = Path(back_up_dir)
         else:
@@ -551,15 +570,16 @@ class DLOptimizer(BaseOptimizer):
         
         # Set up distribution strategy if requested
         if self.use_distribution:
-            self.strategy, self.is_multi_node, num_devices = setup_distribution_strategy()
+            device, self.strategy, self.is_multi_node, num_devices = setup_distribution_strategy(self.cpu_num)
             strategy_type = 'MultiWorkerMirroredStrategy' if self.is_multi_node else 'MirroredStrategy'
             self.logger.info(f"Using {strategy_type} with {self.strategy.num_replicas_in_sync} replicas")
             
             if self.is_multi_node:
                 self.logger.info(f"Running on {num_devices} nodes in distributed mode")
             else:
-                device_type = "GPUs" if num_devices > 0 else "CPU"
-                self.logger.info(f"Running on {num_devices} {device_type} in single-node mode")
+                device_type = device 
+                if num_devices > 0 :
+                    self.logger.info(f"Running on {num_devices} {device_type} in single-node mode")
         else:
             self.strategy = None
             self.is_multi_node = False
@@ -643,7 +663,7 @@ class DLOptimizer(BaseOptimizer):
         model.compile(
             optimizer=optimizer,
             loss=loss,
-            metrics=metrics
+            metrics=metrics,
         )
         return model
     
@@ -800,10 +820,14 @@ class DLOptimizer(BaseOptimizer):
             self.logger.info(f"Evaluating {len(param_combinations)} parameter combinations")
             
             for combo_idx, (arch_params, opt_params) in enumerate(param_combinations):
+                # Clear TensorFlow state between iterations
+                keras.backend.clear_session()
+                tf.distribute.experimental_set_strategy(None)
+                
                 self.logger.info(f"Parameter combination {combo_idx+1}/{len(param_combinations)}")
                 
                 if is_cv:
-                    # Original cross-validation logic
+                    # Cross-validation logic
                     fold_scores = []
                     fold_histories = []
                     current_model = None
@@ -811,7 +835,7 @@ class DLOptimizer(BaseOptimizer):
                     for fold, (train_idx, val_idx) in enumerate(cv.split(X, y, groups=kwargs.get('groups'))):
                         self.logger.info(f"Training fold {fold+1}/{self.n_splits}")
                         
-                        # Clear backend to free memory
+                        # Clear backend to free memory between folds
                         keras.backend.clear_session()
                         
                         X_train, X_val_fold = X[train_idx], X[val_idx]
@@ -826,28 +850,38 @@ class DLOptimizer(BaseOptimizer):
                         # Get current batch size
                         batch_size = self.training_params.get('batch_size', 32)
                         
-                        # Create and compile model
-                        model = self._create_model(arch_params)
-                        model = self._compile_model(model, 
-                                                self.optimizer_params.get('name', ['adam'])[0],
-                                                opt_params)
-                        
-                        # Create datasets optimized for distributed training
+                        # Distributed training path
                         if self.strategy:
-                            # For distributed training, we need to handle the dataset differently
-                            train_dataset = self._create_distributed_dataset(X_train, y_train, batch_size)
-                            val_dataset = self._create_distributed_dataset(X_val_fold, y_val_fold, batch_size)
-                            
-                            # When using a distributed dataset, don't pass X and y directly
-                            history = model.fit(
-                                train_dataset,
-                                validation_data=val_dataset,
-                                epochs=self.training_params.get('epochs', 100),
-                                callbacks=self._get_callbacks(fold),
-                                verbose=self.verbose
-                            )
+                            with self.strategy.scope():
+                                # Create and compile model within strategy scope
+                                model = self._create_model(arch_params)
+                                model = self._compile_model(
+                                    model, 
+                                    self.optimizer_params.get('name', ['adam'])[0],
+                                    opt_params
+                                )
+                                
+                                # Create datasets for distributed training
+                                train_dataset = self._create_distributed_dataset(X_train, y_train, batch_size)
+                                val_dataset = self._create_distributed_dataset(X_val_fold, y_val_fold, batch_size)
+                                
+                                # Train model (all within the same strategy scope)
+                                history = model.fit(
+                                    train_dataset,
+                                    validation_data=val_dataset,
+                                    epochs=self.training_params.get('epochs', 100),
+                                    callbacks=self._get_callbacks(fold),
+                                    verbose=self.verbose
+                                )
                         else:
                             # Standard training without distribution
+                            model = self._create_model(arch_params)
+                            model = self._compile_model(
+                                model, 
+                                self.optimizer_params.get('name', ['adam'])[0],
+                                opt_params
+                            )
+                            
                             history = model.fit(
                                 X_train, y_train,
                                 validation_data=(X_val_fold, y_val_fold),
@@ -866,9 +900,9 @@ class DLOptimizer(BaseOptimizer):
                         self.logger.info(f"Fold {fold+1} best score: {best_fold_score:.4f}")
                         
                         # Save model if it's the best so far
-                        if current_model is None or \
-                            (('loss' in self.scoring and best_fold_score < best_score) or \
-                            ('loss' not in self.scoring and best_fold_score > best_score)):
+                        is_better = (('loss' in self.scoring and best_fold_score < best_score) or 
+                                    ('loss' not in self.scoring and best_fold_score > best_score))
+                        if current_model is None or is_better:
                             current_model = model
                     
                     # Calculate mean score across folds
@@ -910,34 +944,44 @@ class DLOptimizer(BaseOptimizer):
                     # Get current batch size
                     batch_size = self.training_params.get('batch_size', 32)
                     
-                    # Create and compile model
-                    model = self._create_model(arch_params)
-                    model = self._compile_model(model, 
-                                            self.optimizer_params.get('name', ['adam'])[0],
-                                            opt_params)
-                    
-                    # Create datasets optimized for distributed training
+                    # Distributed training path
                     if self.strategy:
-                        # For distributed training, we need to handle the dataset differently
-                        train_dataset = self._create_distributed_dataset(X_tensor, y_tensor, batch_size)
-                        val_dataset = self._create_distributed_dataset(X_val_tensor, y_val_tensor, batch_size)
-                        
-                        # When using a distributed dataset, don't pass X and y directly
-                        history = model.fit(
-                            train_dataset,
-                            validation_data=val_dataset,
-                            epochs=self.training_params.get('epochs', 100),
-                            callbacks=self._get_callbacks(0),  # Use 0 as fold number for single validation
-                            verbose=self.verbose
-                        )
+                        with self.strategy.scope():
+                            # Create and compile model within strategy scope
+                            model = self._create_model(arch_params)
+                            model = self._compile_model(
+                                model, 
+                                self.optimizer_params.get('name', ['adam'])[0],
+                                opt_params
+                            )
+                            
+                            # Create datasets for distributed training
+                            train_dataset = self._create_distributed_dataset(X_tensor, y_tensor, batch_size)
+                            val_dataset = self._create_distributed_dataset(X_val_tensor, y_val_tensor, batch_size)
+                            
+                            # Train model (all within the same strategy scope)
+                            history = model.fit(
+                                train_dataset,
+                                validation_data=val_dataset,
+                                epochs=self.training_params.get('epochs', 100),
+                                callbacks=self._get_callbacks(0),  # Use 0 as fold number
+                                verbose=self.verbose
+                            )
                     else:
                         # Standard training without distribution
+                        model = self._create_model(arch_params)
+                        model = self._compile_model(
+                            model, 
+                            self.optimizer_params.get('name', ['adam'])[0],
+                            opt_params
+                        )
+                        
                         history = model.fit(
                             X_tensor, y_tensor,
                             validation_data=(X_val_tensor, y_val_tensor),
                             batch_size=batch_size,
                             epochs=self.training_params.get('epochs', 100),
-                            callbacks=self._get_callbacks(0),  # Use 0 as fold number for single validation
+                            callbacks=self._get_callbacks(0),  # Use 0 as fold number
                             verbose=self.verbose
                         )
                     
@@ -998,6 +1042,8 @@ class DLOptimizer(BaseOptimizer):
         try:
             # Create final best model and set weights
             self.logger.info("Creating final best model")
+            keras.backend.clear_session()
+            
             if self.strategy:
                 with self.strategy.scope():
                     self.best_estimator_ = self._create_model(best_params['architecture'])
@@ -1021,11 +1067,13 @@ class DLOptimizer(BaseOptimizer):
             self.best_params_ = best_params
             self.best_score_ = best_score
             self.cv_results_ = pd.DataFrame(all_results)
+            
             # Save best model weights to disk
             if self.is_multi_node:
                 self.save_best_model_distributed(self.save_model_dir)
             else:
                 self.save_best_model(self.save_model_dir)
+                
             self.logger.info(f"Hyperparameter {'search' if is_cv else 'optimization'} completed. Best score: {best_score:.4f}, best params: {best_params}")
             
             return self

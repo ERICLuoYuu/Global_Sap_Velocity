@@ -1,19 +1,61 @@
-import tensorflow as tf
-from tensorflow.keras import regularizers
-from tensorflow import keras
-import pandas as pd
-import numpy as np
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
+"""
+Modified main script with enhanced deterministic behavior for Transformer models.
+This script implements comprehensive controls to ensure reproducible results
+across multiple runs with the same seed.
+"""
 from pathlib import Path
 import sys
+import os
+
+# Set environment variables for determinism BEFORE importing TensorFlow
+os.environ['TF_DETERMINISTIC_OPS'] = '1'
+os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+os.environ['PYTHONHASHSEED'] = '42'
 
 # Add parent directory to Python path
 parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
+
+# Import the randomization control module first
+from src.utils.random_control import (
+    set_seed, get_seed, get_initializer, deterministic,
+    random_state_manager, test_determinism
+)
+
+# Set the master seed at the very beginning
+set_seed(42)
+
+# Now import all other dependencies
+import tensorflow as tf
+import numpy as np
+import pandas as pd
+from tensorflow import keras
+from tensorflow.keras import regularizers
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+
+# Apply additional TensorFlow determinism settings
+tf.random.set_seed(42)
+np.random.seed(42)
+
+# Force TensorFlow to use deterministic algorithms (TF 2.6+)
+tf.config.experimental.enable_op_determinism()
+
+# Limit TensorFlow to use only one thread for CPU operations
+tf.config.threading.set_inter_op_parallelism_threads(1)
+tf.config.threading.set_intra_op_parallelism_threads(1)
+
+# Configure GPU for determinism if available
+physical_devices = tf.config.list_physical_devices('GPU')
+if physical_devices:
+    for device in physical_devices:
+        tf.config.experimental.set_memory_growth(device, True)
+
+# Import the hyperparameter optimizer
 from src.hyperparameter_optimization.hyper_tuner import DLOptimizer
+
 
 class TimeSeriesSegmenter:
     """
@@ -21,6 +63,7 @@ class TimeSeriesSegmenter:
     """
     
     @staticmethod
+    @deterministic
     def segment_time_series(
         df: pd.DataFrame, 
         gap_threshold: float = 2, 
@@ -114,7 +157,7 @@ class WindowGenerator:
         val_df: pd.DataFrame,
         test_df: pd.DataFrame,
         label_columns=None,
-        batch_size: int = 32,
+        batch_size: int = 64,
         shuffle: bool = True,
         exclude_labels_from_inputs: bool = True
     ):
@@ -199,9 +242,25 @@ class WindowGenerator:
             sequence_length=self.total_window_size,
             sequence_stride=1,
             shuffle=self.shuffle,
-            batch_size=self.batch_size)
+            batch_size=self.batch_size,
+            seed=get_seed())  # Use deterministic seed
 
         ds = ds.map(self.split_window)
+        
+        # Apply deterministic options to dataset in a version-compatible way
+        try:
+            options = tf.data.Options()
+            options.experimental_deterministic = True
+            # Try setting auto shard policy if available
+            try:
+                options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.OFF
+            except:
+                pass
+            ds = ds.with_options(options)
+        except:
+            # If options aren't available, rely on seed for determinism
+            pass
+        
         return ds
     
     @property
@@ -239,6 +298,7 @@ class SegmentedWindowGenerator:
     """
     
     @staticmethod
+    @deterministic
     def create_window_generators_from_segments(
         segments, 
         input_width, 
@@ -331,11 +391,26 @@ class SegmentedWindowGenerator:
             combined['val'] = combined['val'].concatenate(wg.val)
             combined['test'] = combined['test'].concatenate(wg.test)
         
-        # Shuffle training data
-        combined['train'] = combined['train'].shuffle(buffer_size)
+        # Set deterministic options for each dataset in a version-compatible way
+        try:
+            options = tf.data.Options()
+            options.experimental_deterministic = True
+            # Try setting auto shard policy if available
+            try:
+                options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.OFF
+            except:
+                pass
+                
+            # Apply options if available
+            combined['train'] = combined['train'].shuffle(buffer_size, seed=get_seed()).with_options(options)
+            combined['val'] = combined['val'].with_options(options)
+            combined['test'] = combined['test'].with_options(options)
+        except:
+            # If options aren't available, at least use seed for shuffle
+            combined['train'] = combined['train'].shuffle(buffer_size, seed=get_seed())
+            # And continue with datasets as they are
         
         # Optionally rebatch to ensure consistent batch sizes
-        
         batch_size = window_generators[0].batch_size
         combined['train'] = combined['train'].unbatch().batch(batch_size)
         combined['val'] = combined['val'].unbatch().batch(batch_size) 
@@ -344,6 +419,7 @@ class SegmentedWindowGenerator:
         return combined
     
     @staticmethod
+    @deterministic
     def create_complete_dataset_from_segments(
         segments,
         input_width,
@@ -377,7 +453,8 @@ class SegmentedWindowGenerator:
         )
 
 
-# Transformer positional encoding
+# Transformer positional encoding with deterministic behavior
+@deterministic
 def positional_encoding(length, depth):
     """
     Generate positional encoding for transformer models.
@@ -406,27 +483,49 @@ def positional_encoding(length, depth):
     return tf.cast(pos_encoding, dtype=tf.float32)
 
 
-# Custom Transformer Encoder Layer
+# Custom Transformer Encoder Layer with deterministic behavior
 class TransformerEncoderLayer(tf.keras.layers.Layer):
     """
     Custom Transformer encoder layer with MultiHeadAttention and feed-forward network.
     """
-    def __init__(self, d_model, num_heads, dff, dropout_rate=0.1):
+    def __init__(self, d_model, num_heads, dff, dropout_rate=0.1, seed=None):
         super(TransformerEncoderLayer, self).__init__()
         
-        self.mha = tf.keras.layers.MultiHeadAttention(
-            key_dim=d_model // num_heads, num_heads=num_heads, dropout=dropout_rate)
+        # Use seed for initialization if provided, otherwise get from global seed
+        self.seed = seed if seed is not None else get_seed()
         
+        # Create incremental seeds for each component
+        kernel_seeds = [self.seed + i for i in range(10)]
+        
+        self.mha = tf.keras.layers.MultiHeadAttention(
+            key_dim=d_model // num_heads, 
+            num_heads=num_heads, 
+            dropout=dropout_rate,
+            # Use seed for weight initialization if possible
+            # Not all TF versions support this, so using a try/except
+            **({"seed": kernel_seeds[0]} if tf.__version__ >= "2.5.0" else {})
+        )
+        
+        # Use sequential for FFN with deterministic initialization
         self.ffn = tf.keras.Sequential([
-            tf.keras.layers.Dense(dff, activation='relu'),
-            tf.keras.layers.Dense(d_model)
+            tf.keras.layers.Dense(
+                dff, 
+                activation='relu',
+                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[1]),
+                bias_initializer=tf.keras.initializers.Zeros()
+            ),
+            tf.keras.layers.Dense(
+                d_model,
+                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[2]),
+                bias_initializer=tf.keras.initializers.Zeros()
+            )
         ])
         
         self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         
-        self.dropout1 = tf.keras.layers.Dropout(dropout_rate)
-        self.dropout2 = tf.keras.layers.Dropout(dropout_rate)
+        self.dropout1 = tf.keras.layers.Dropout(dropout_rate, seed=kernel_seeds[3])
+        self.dropout2 = tf.keras.layers.Dropout(dropout_rate, seed=kernel_seeds[4])
         
     def call(self, inputs, training=False, mask=None):
         # Multi-head attention with residual connection and layer normalization
@@ -440,10 +539,11 @@ class TransformerEncoderLayer(tf.keras.layers.Layer):
         return self.layernorm2(out1 + ffn_output)
 
 
+@deterministic
 def create_transformer_model(input_shape, output_shape, d_model=128, num_heads=8, 
                             num_encoder_layers=4, dff=512, dropout_rate=0.1):
     """
-    Create a Transformer model for time series prediction.
+    Create a Transformer model for time series prediction with explicit seeds for determinism.
     
     Parameters:
     -----------
@@ -459,37 +559,77 @@ def create_transformer_model(input_shape, output_shape, d_model=128, num_heads=8
     --------
     model: keras.Model, Transformer model for time series prediction
     """
+    # Get master seed for this function
+    seed = get_seed()
+    
+    # Create incremental seeds for each layer to ensure independence
+    kernel_seeds = [seed + i for i in range(100)]
+    seed_idx = 0
+    
     # Input layer
     inputs = tf.keras.layers.Input(shape=input_shape)
     
-    # Project inputs to d_model dimensions
-    x = tf.keras.layers.Dense(d_model, activation=None)(inputs)
+    # Project inputs to d_model dimensions with deterministic initialization
+    x = tf.keras.layers.Dense(
+        d_model, 
+        activation=None,
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
+    )(inputs)
+    seed_idx += 1
     
     # Add positional encoding
     seq_length = input_shape[0]
     pos_encoding = positional_encoding(seq_length, d_model)
     x = x + pos_encoding
     
-    # Dropout
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    # Dropout with explicit seed
+    x = tf.keras.layers.Dropout(
+        dropout_rate,
+        seed=kernel_seeds[seed_idx]
+    )(x)
+    seed_idx += 1
     
-    # Transformer encoder layers
+    # Transformer encoder layers with explicit seeds
     for i in range(num_encoder_layers):
-        x = TransformerEncoderLayer(d_model, num_heads, dff, dropout_rate)(x)
+        # Create a new seed for this encoder layer
+        encoder_seed = kernel_seeds[seed_idx]
+        seed_idx += 1
+        
+        x = TransformerEncoderLayer(
+            d_model, 
+            num_heads, 
+            dff, 
+            dropout_rate,
+            seed=encoder_seed
+        )(x)
     
     # Global average pooling (alternative to using [CLS] token)
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     
-    # Alternatively, you can use the last token's representation
-    # x = x[:, -1, :]
+    # Dense layers for prediction with deterministic initialization
+    x = tf.keras.layers.Dense(
+        d_model // 2, 
+        activation='relu', 
+        kernel_regularizer=regularizers.l2(0.001),
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
+    )(x)
+    seed_idx += 1
     
-    # Dense layers for prediction
-    x = tf.keras.layers.Dense(d_model // 2, activation='relu', 
-                            kernel_regularizer=regularizers.l2(0.001))(x)
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    # Dropout with explicit seed
+    x = tf.keras.layers.Dropout(
+        dropout_rate,
+        seed=kernel_seeds[seed_idx]
+    )(x)
+    seed_idx += 1
     
-    # Output layer
-    outputs = tf.keras.layers.Dense(output_shape)(x)
+    # Output layer with deterministic initialization
+    outputs = tf.keras.layers.Dense(
+        output_shape,
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
+    )(x)
     
     # Create model
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
@@ -497,11 +637,21 @@ def create_transformer_model(input_shape, output_shape, d_model=128, num_heads=8
     return model
 
 
+@deterministic
 def get_predictions(model, dataset, scaler):
     """Get predictions from a windowed dataset and inverse transform them."""
+    # Set evaluation mode to be deterministic - version-compatible approach
+    try:
+        # For newer TensorFlow versions
+        tf.config.run_functions_eagerly(True)
+    except:
+        # For older versions, use an alternative approach
+        pass
+    
     all_predictions = []
     all_labels = []
     
+    # Use a fixed batch size for prediction to ensure consistency
     for features, labels in dataset:
         batch_predictions = model.predict(features, verbose=0)
         
@@ -530,9 +680,16 @@ def get_predictions(model, dataset, scaler):
     all_predictions = all_predictions[:min_length]
     all_labels = all_labels[:min_length]
     
+    try:
+        # Reset eager execution when done for newer TF versions
+        tf.config.run_functions_eagerly(False)
+    except:
+        pass
+    
     return all_predictions.flatten(), all_labels.flatten()
 
 
+@deterministic
 def add_time_features(df, datetime_column=None):
     """
     Create cyclical time features from a datetime column or index.
@@ -581,10 +738,11 @@ def add_time_features(df, datetime_column=None):
     return df
 
 
-# Visualization function for Transformer attention patterns
+# Visualization function for Transformer attention patterns with deterministic rendering
+@deterministic
 def visualize_attention_weights(model, dataset, layer_idx=0, head_idx=0):
     """
-    Visualize attention weights from a Transformer model.
+    Visualize attention weights from a Transformer model with deterministic behavior.
     
     Parameters:
     -----------
@@ -593,6 +751,11 @@ def visualize_attention_weights(model, dataset, layer_idx=0, head_idx=0):
     layer_idx: int, index of the transformer layer to visualize
     head_idx: int, index of the attention head to visualize
     """
+    # Set deterministic rendering for matplotlib
+    import matplotlib as mpl
+    mpl.rcParams['agg.path.chunksize'] = 10000
+    np.random.seed(get_seed())  # Ensure matplotlib's random operations use our seed
+    
     # Get a batch of input data
     for features, _ in dataset.take(1):
         # Create a model that outputs attention weights
@@ -625,14 +788,18 @@ def visualize_attention_weights(model, dataset, layer_idx=0, head_idx=0):
         return
 
 
+@deterministic
 def main():
-    np.random.seed(42)
-    tf.random.set_seed(42)
-     # Set parameters for the model
-    INPUT_WIDTH = 7   # Use 7 time steps as input
+    # Set deterministic rendering for matplotlib
+    import matplotlib as mpl
+    mpl.rcParams['agg.path.chunksize'] = 10000
+    np.random.seed(get_seed())  # Ensure matplotlib's random operations use our seed
+    
+    # Set parameters for the model
+    INPUT_WIDTH = 4     # Use 4 time steps as input
     LABEL_WIDTH = 1    # Predict 1 time step ahead
     SHIFT = 1          # Predict 1 step ahead
-    BATCH_SIZE = 64   # Batch size for training
+    BATCH_SIZE = 32   # Batch size for training
     EXCLUDE_LABEL = True  # Exclude labels in input features
     
     # Load data
@@ -646,10 +813,14 @@ def main():
     
     print(f"Found {len(data_list)} data files")
     
+    # Sort data files for deterministic processing order
+    data_list = sorted(data_list)
+    
     # Process data files
-   # Process data files
     all_segments = []
-    used_cols = ['sap_velocity', 'precip', 'vpd', 'evaporation_from_vegetation_transpiration', 'sw_in', 'ta', 'swc_shallow', 'swc_deep', 'biome', 'ppfd_in', 'u_component_of_wind_10m', 'v_component_of_wind_10m', 'leaf_area_index_high_vegetation', 'leaf_area_index_low_vegetation', 'soil_temperature_level_1', 'soil_temperature_level_2' ] 
+    used_cols = ['sap_velocity','vpd', 'ta','rh','swc_shallow', 'ppfd_in', 'volumetric_soil_water_layer_4', 
+                'leaf_area_index_low_vegetation', 'soil_temperature_level_3', 'volumetric_soil_water_layer_3', 
+                'biome', 'swc_deep', 'u_component_of_wind_10m', 'v_component_of_wind_10m',] 
     all_biome_types = set()  # Will collect all unique biome types
 
     for data_file in data_list:
@@ -677,8 +848,8 @@ def main():
                 # Get non-biome columns 
                 orig_cols = [col for col in used_cols_lower if col != 'biome']
                 
-                # Create dummy variables for biome
-                biome_df = pd.get_dummies(df['biome'], prefix='', prefix_sep='', dtype=float)
+                # Create dummy variables for biome with fixed random state and no dropping of first column
+                biome_df = pd.get_dummies(df['biome'], prefix='', prefix_sep='', dtype=float, drop_first=False)
                 
                 # Join with original data
                 df = df[orig_cols].join(biome_df)
@@ -715,7 +886,10 @@ def main():
     print(f"Total segments collected: {len(all_segments)}")
     print(f"All biome types found: {all_biome_types}")
 
-    # Ensure all segments have all biome types as columns
+    # Sort all biome types for consistent column order
+    all_biome_types = sorted(all_biome_types)
+
+    # Ensure all segments have all biome types as columns in the same order
     for segment in all_segments:
         for biome_type in all_biome_types:
             if biome_type not in segment.columns:
@@ -776,29 +950,7 @@ def main():
     train_ds = datasets['train']
     val_ds = datasets['val']
     test_ds = datasets['test']
-    """
-    # randomly split the training data into training and validation
-    full_ds = train_ds.concatenate(val_ds).concatenate(test_ds)
 
-    # This works but could be memory-intensive for large datasets
-    DATASET_SIZE = len(list(full_ds.as_numpy_iterator()))
-
-    # Your split calculations are good
-    train_size = int(0.7 * DATASET_SIZE)
-    val_size = int(0.15 * DATASET_SIZE)
-
-    # Issue 1: You have 'full_dataset' here but defined 'full_ds' above
-    # Issue 2: The shuffle() method needs a buffer_size parameter
-    full_ds = full_ds.shuffle(buffer_size=DATASET_SIZE)  # Corrected
-
-    # This is correct
-    train_ds = full_ds.take(train_size)
-
-   
-    remaining_dataset = full_ds.skip(train_size)  
-    val_ds = remaining_dataset.take(val_size)
-    test_ds = remaining_dataset.skip(val_size) 
-    """
     # Check dataset properties
     if train_ds is None:
         print("ERROR: Could not create training dataset.")
@@ -807,13 +959,12 @@ def main():
     # Print dataset shapes for debugging
     print("Dataset shapes:")
     
-    
     for features_batch, labels_batch in train_ds.take(1):
         print(f"Features batch shape: {features_batch.shape}")
         print(f"Labels batch shape: {labels_batch.shape}")
         n_features = features_batch.shape[2]
 
-    # Define parameter grid for Transformer
+    # Define parameter grid for Transformer with deterministic settings
     param_grid = {
         'architecture': {
             'd_model': [128],
@@ -824,7 +975,6 @@ def main():
         },
         'optimizer': {
             'name': ['Adam'],
-            
         },
         'training': {
             'batch_size': BATCH_SIZE,
@@ -833,7 +983,7 @@ def main():
         }
     }
     
-    # Create and fit optimizer
+    # Create and fit optimizer with deterministic behavior
     print("Starting hyperparameter optimization...")
     optimizer = DLOptimizer(
         base_architecture=create_transformer_model,
@@ -843,9 +993,12 @@ def main():
         input_shape=(INPUT_WIDTH, n_features),
         output_shape=LABEL_WIDTH,
         scoring='val_loss',
+        # Pass random_state for determinism
+        random_state=get_seed(),
     )
     
-    # Convert TensorFlow dataset to X and y numpy arrays
+    # Convert TensorFlow dataset to X and y numpy arrays with deterministic behavior
+    @deterministic
     def convert_tf_dataset_to_xy(dataset):
         features_list = []
         labels_list = []
@@ -866,10 +1019,20 @@ def main():
         
         return X, y
 
-    # Using the function
+    # Using the function with deterministic behavior
     X_train, y_train = convert_tf_dataset_to_xy(train_ds)
     X_val, y_val = convert_tf_dataset_to_xy(val_ds)
 
+    # Set additional TensorFlow determinism options before fitting
+    # Use version-compatible approach
+    try:
+        # For newer TensorFlow versions
+        tf.keras.utils.set_random_seed(get_seed())
+    except:
+        # For older TensorFlow versions
+        tf.random.set_seed(get_seed())
+        np.random.seed(get_seed())
+    
     # Custom fitting for time series data
     optimizer.fit(
         X_train, 
@@ -883,7 +1046,7 @@ def main():
     # Get the best model
     best_model = optimizer.get_best_model()
     
-    # Get predictions
+    # Get predictions with deterministic settings
     print("Generating predictions...")
     test_predictions, test_labels_actual = get_predictions(best_model, test_ds, label_scaler)
     train_predictions, train_labels_actual = get_predictions(best_model, train_ds, label_scaler)
@@ -972,7 +1135,7 @@ def main():
     print(f"Best parameters: {optimizer.best_params_}")
     print(f"Best validation score: {optimizer.best_score_}")
     
-    # Plot training history if available
+    # Plot training history if available with deterministic rendering
     if hasattr(optimizer, 'history_') and optimizer.history_ is not None:
         plt.figure(figsize=(12, 4))
         plt.subplot(1, 2, 1)
@@ -994,60 +1157,47 @@ def main():
         plt.tight_layout()
         plt.savefig(plot_dir / 'transformer_training_history.png')
         plt.close()
+    
+    return test_rmse
 
-    # Additional analysis - Analyze feature importance using permutation
-    def analyze_feature_importance():
-        print("\nAnalyzing feature importance...")
-        feature_names = [col for col in used_cols if col != 'sap_velocity'] if EXCLUDE_LABEL else used_cols
-        
-        # Get a batch of validation data
-        for X_batch, _ in val_ds.take(1):
-            X_original = X_batch.numpy().copy()
-            baseline_preds = best_model.predict(X_original, verbose=0)
-            
-            # Measure impact of each feature by permuting its values
-            importance_scores = []
-            
-            for i in range(X_original.shape[2]):
-                # Create a copy and shuffle this feature's values
-                X_permuted = X_original.copy()
-                # Shuffle the feature across the batch
-                np.random.shuffle(X_permuted[:, :, i])
-                
-                # Predict with permuted feature
-                permuted_preds = best_model.predict(X_permuted, verbose=0)
-                
-                # Calculate mean absolute difference in predictions
-                importance = np.mean(np.abs(baseline_preds - permuted_preds))
-                importance_scores.append(importance)
-            
-            # Normalize importance scores
-            if max(importance_scores) > 0:
-                importance_scores = [score / max(importance_scores) for score in importance_scores]
-            
-            # Create feature importance plot
-            plt.figure(figsize=(10, 6))
-            plt.barh(feature_names, importance_scores)
-            plt.xlabel('Relative Importance')
-            plt.title('Transformer Model: Approximate Feature Importance')
-            plt.tight_layout()
-            plt.savefig(plot_dir / 'transformer_feature_importance.png')
-            plt.close()
-            
-            # Print feature importance ranking
-            importance_pairs = list(zip(feature_names, importance_scores))
-            importance_pairs.sort(key=lambda x: x[1], reverse=True)
-            
-            print("\nFeature Importance Ranking:")
-            for feature, score in importance_pairs:
-                print(f"{feature}: {score:.4f}")
-            
-            break  # Only need one batch
+
+def verify_determinism():
+    """Test if the pipeline produces deterministic results."""
+    # Save current random state
+    current_seed = get_seed()
     
-    # Run feature importance analysis
-    analyze_feature_importance()
+    # First run with fixed seed
+    set_seed(42)
+    print("\nRunning first determinism test...")
+    result1 = main()
     
+    # Second run with same seed
+    set_seed(42)
+    print("\nRunning second determinism test...")
+    result2 = main()
     
+    # Check if results match
+    print("\nDeterminism Test Results:")
+    print(f"First run RMSE: {result1:.6f}")
+    print(f"Second run RMSE: {result2:.6f}")
+    print(f"Difference: {abs(result1 - result2):.10f}")
+    print(f"Results identical: {np.isclose(result1, result2, rtol=1e-10, atol=1e-10)}")
+    
+    # Restore original seed
+    set_seed(current_seed)
+    
+    return result1, result2
+
 
 if __name__ == "__main__":
+    # Test basic determinism system
+    print("Testing basic randomization system determinism...")
+    test_determinism()
+    
+    # Run the main function with deterministic controls
+    print("\nRunning main function with enhanced determinism...")
     main()
+    
+    # Verify pipeline determinism
+    print("\nVerifying pipeline determinism...")
+    result1, result2 = verify_determinism()

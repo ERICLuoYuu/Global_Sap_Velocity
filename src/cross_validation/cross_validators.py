@@ -145,23 +145,17 @@ class MLCrossValidator(BaseCrossValidator):
         X: Union[np.ndarray, pd.DataFrame],
         y: Union[np.ndarray, pd.Series],
         max_train_size: Optional[int] = None,
-        groups: Union[np.ndarray, List, pd.Series] = None
     ) -> np.ndarray:
         """
         Perform temporal cross-validation using time series split.
         """
-        print(f"Start of temporal_cv - groups type: {type(groups)}")
-        print(f"Start of temporal_cv - groups shape/length: {len(groups) if groups is not None else 'None'}")
-        print(f"Start of temporal_cv - first few groups: {groups[:5] if groups is not None else 'None'}")
-        print(f"groups: {groups}")
-        if groups is None:
-            raise ValueError("The 'groups' parameter should contain timestamp values.")
-        cv = GroupedTimeSeriesSplit(
+        
+        cv = TimeSeriesSplit(
             n_splits=self.n_splits,
             max_train_size=max_train_size
             
         )
-        return self.get_scores(X, y, cv=cv, groups=groups)
+        return self.get_scores(X, y, cv=cv)
     
     def spatial_stratified_cv(
         self,
@@ -300,19 +294,18 @@ class DLCrossValidator(BaseCrossValidator):
         X: Union[np.ndarray, pd.DataFrame],
         y: Union[np.ndarray, pd.Series],
         max_train_size: Optional[int] = None,
-        groups: Union[np.ndarray, List, pd.Series] = None
+        
     ) -> Tuple[np.ndarray, List[Model]]:
         """
         Perform temporal cross-validation using time series split.
         """
-        if groups is None:
-            raise ValueError("The 'groups' parameter should contain timestamp values.")
-        cv = GroupedTimeSeriesSplit(
+        
+        cv = TimeSeriesSplit(
             n_splits=self.n_splits,
             max_train_size=max_train_size,
             
         )
-        return self.get_scores(X, y, cv=cv, groups=groups)
+        return self.get_scores(X, y, cv=cv)
     
     def spatial_stratified_cv(
         self,

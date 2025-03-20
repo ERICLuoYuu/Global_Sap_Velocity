@@ -98,7 +98,7 @@ class GHGASelector:
         feature_penalty: float = 0.01,
         max_stored_solutions: int = 100,
         random_state: Optional[int] = None,
-        cv_method: str = 'random',
+        cv_method: str = 'temporal',
         log_dir: Optional[str] = None,
         groups: Optional[Union[np.ndarray, pd.Series, List]] = None,
         n_jobs: int = -1,
@@ -1087,12 +1087,24 @@ class GHGASelector:
             self.logger.debug("Empty feature set encountered, assigning minimum fitness")
             return float('-inf')
         
+        # Debug: Print selected feature indices
+        feature_names = [self.feature_names_[i] for i in selected] if hasattr(self, 'feature_names_') else selected
+        self.logger.debug(f"Evaluating fitness for {len(selected)} features: {feature_names[:5]}...")
+        
         try:
             # GPU PATH
             if self.use_gpu and self.has_cudf_cuml and hasattr(self, 'X_gpu') and self.X_gpu is not None:
                 try:
+                    # Debug: Log GPU attempt
+                    self.logger.debug("Attempting GPU fitness calculation")
+                    
                     # Extract selected features using cuDF
                     X_selected = self.X_gpu.iloc[:, selected]
+                    
+                    # Debug: Check X_selected for issues
+                    if X_selected.shape[0] == 0 or X_selected.shape[1] == 0:
+                        self.logger.warning(f"Empty GPU selection: shape {X_selected.shape}")
+                        return float('-inf')
                     
                     # Use cuML for RandomForest
                     model = cuRFR(n_estimators=100, random_state=self.random_state)
@@ -1100,10 +1112,21 @@ class GHGASelector:
                     # Convert to pandas for cross-validation
                     X_selected_pd = X_selected.to_pandas()
                     
+                    # Debug: Check for NaN/Inf in X_selected_pd
+                    has_nan = X_selected_pd.isna().any().any()
+                    has_inf = np.isinf(X_selected_pd.values).any()
+                    if has_nan or has_inf:
+                        self.logger.warning(f"GPU data contains NaN: {has_nan}, Inf: {has_inf}")
+                        return float('-inf')
+                    
                     cross_validator = MLCrossValidator(estimator=model, scoring='r2', n_splits=5)
                     
+                    # Debug: Log CV method
+                    self.logger.debug(f"Using {self.cv_method} cross-validation")
+                    
+                    # Perform cross-validation with appropriate method
                     if self.cv_method == 'temporal':
-                        scores = cross_validator.temporal_cv(X_selected_pd, self.y_cpu, groups=self.groups)
+                        scores = cross_validator.temporal_cv(X_selected_pd, self.y_cpu)
                     elif self.cv_method == 'random':
                         scores = cross_validator.random_cv(X_selected_pd, self.y_cpu)
                     elif self.cv_method == 'spatial':
@@ -1111,7 +1134,13 @@ class GHGASelector:
                     else:
                         raise ValueError(f"Unknown CV method: {self.cv_method}")
                     
+                    # Debug: Check scores for NaN/Inf
+                    if np.isnan(scores).any() or np.isinf(scores).any():
+                        self.logger.warning(f"NaN/Inf in CV scores: {scores}")
+                        return float('-inf')
+                    
                     cv_score = np.mean(scores)
+                    self.logger.debug(f"GPU CV score: {cv_score:.4f}")
                     
                     # For correlation penalty, we'll use pandas (CPU)
                     X_selected_corr = self.X_cpu.iloc[:, selected]
@@ -1122,9 +1151,25 @@ class GHGASelector:
             
             # CPU PATH
             else:  # CPU implementation (primary or fallback from GPU exception)
+                # Debug: Log CPU path
+                self.logger.debug("Using CPU fitness calculation")
+                
                 # Extract selected features
                 X_selected = self.X_cpu.iloc[:, selected] if isinstance(self.X_cpu, pd.DataFrame) else self.X_cpu[:, selected]
                 X_selected_corr = X_selected  # For correlation calculation later
+                
+                # Debug: Check X_selected for issues
+                if isinstance(X_selected, pd.DataFrame):
+                    has_nan = X_selected.isna().any().any()
+                    has_inf = np.isinf(X_selected.values).any()
+                    self.logger.debug(f"X_selected shape: {X_selected.shape}, NaN: {has_nan}, Inf: {has_inf}")
+                    if has_nan or has_inf:
+                        self.logger.warning(f"Selected features contain NaN/Inf values")
+                        # Optional: print which features have issues
+                        if has_nan:
+                            nan_cols = X_selected.columns[X_selected.isna().any()].tolist()
+                            self.logger.warning(f"Columns with NaN: {nan_cols}")
+                        return float('-inf')
                 
                 # Perform cross-validation
                 model = RandomForestRegressor(
@@ -1134,35 +1179,75 @@ class GHGASelector:
                 )
                 cross_validator = MLCrossValidator(estimator=model, scoring='r2', n_splits=5)
                 
-                if self.cv_method == 'temporal':
-                    scores = cross_validator.temporal_cv(X_selected, self.y_cpu, groups=self.groups)
-                elif self.cv_method == 'random':
-                    scores = cross_validator.random_cv(X_selected, self.y_cpu)
-                elif self.cv_method == 'spatial':
-                    scores = cross_validator.spatial_cv(X_selected, self.y_cpu, self.groups)
-                else:
-                    raise ValueError(f"Unknown CV method: {self.cv_method}")
+                # Debug: Log CV method details
+                self.logger.debug(f"Using {self.cv_method} cross-validation with {model}")
                 
-                cv_score = np.mean(scores)
+                # Perform cross-validation with try-except
+                try:
+                    if self.cv_method == 'temporal':
+                        scores = cross_validator.temporal_cv(X_selected, self.y_cpu)
+                    elif self.cv_method == 'random':
+                        scores = cross_validator.random_cv(X_selected, self.y_cpu)
+                    elif self.cv_method == 'spatial':
+                        scores = cross_validator.spatial_cv(X_selected, self.y_cpu, self.groups)
+                    else:
+                        raise ValueError(f"Unknown CV method: {self.cv_method}")
+                    
+                    # Debug: Check scores
+                    if len(scores) == 0:
+                        self.logger.warning("Empty scores array from cross-validation")
+                        return float('-inf')
+                    if np.isnan(scores).any() or np.isinf(scores).any():
+                        self.logger.warning(f"NaN/Inf in CV scores: {scores}")
+                        return float('-inf')
+                    
+                    cv_score = np.mean(scores)
+                    self.logger.debug(f"CV scores: {scores}, mean: {cv_score:.4f}")
+                except Exception as e:
+                    self.logger.warning(f"Cross-validation failed: {str(e)}")
+                    return float('-inf')
             
             # CORRELATION PENALTY CALCULATION (after either GPU or CPU path)
+            # Debug: Check CV score for NaN
+            if np.isnan(cv_score):
+                self.logger.warning("NaN cv_score detected after cross-validation")
+                return float('-inf')
+            
             # Basic feature count penalty
             basic_penalty = self.feature_penalty * len(selected) / self.n_features_
+            self.logger.debug(f"Basic penalty: {basic_penalty:.6f}")
             
             # Only calculate correlation penalty if we have multiple features
             correlation_penalty = 0.0
             if len(selected) > 1:
                 try:
+                    # Debug: Log correlation calculation
+                    self.logger.debug("Calculating correlation penalty")
+                    
                     # Ensure we have a DataFrame for correlation calculation
                     if not isinstance(X_selected_corr, pd.DataFrame):
                         X_selected_corr = pd.DataFrame(X_selected_corr)
                     
+                    # Debug: Check X_selected_corr for issues
+                    has_nan = X_selected_corr.isna().any().any()
+                    has_inf = np.isinf(X_selected_corr.values).any()
+                    if has_nan or has_inf:
+                        self.logger.warning(f"Correlation data contains NaN: {has_nan}, Inf: {has_inf}")
+                        return float('-inf')
+                    
                     # Calculate correlation matrix (absolute values)
                     correlation_matrix = np.abs(X_selected_corr.corr().values)
+                    
+                    # Debug: Check correlation matrix for issues
+                    if np.isnan(correlation_matrix).any() or np.isinf(correlation_matrix).any():
+                        self.logger.warning("NaN/Inf in correlation matrix")
+                        return float('-inf')
+                    
                     np.fill_diagonal(correlation_matrix, 0)  # Ignore self-correlations
                     
                     # Calculate average correlation across features
                     mean_correlation = np.mean(correlation_matrix)
+                    self.logger.debug(f"Mean correlation: {mean_correlation:.6f}")
                     
                     # Apply stronger penalties for highly correlated feature sets
                     if mean_correlation > 0.7:
@@ -1173,16 +1258,22 @@ class GHGASelector:
                     # Apply a threshold for minimal correlation
                     if mean_correlation < 0.2:
                         correlation_penalty = 0
+                    
+                    self.logger.debug(f"Correlation penalty: {correlation_penalty:.6f}")
                 except Exception as e:
                     self.logger.warning(f"Correlation calculation failed: {str(e)}. Using only basic penalty.")
                     correlation_penalty = 0.0
             
-            
-                
             # Combine penalties and calculate final fitness
             total_penalty = basic_penalty + correlation_penalty
             fitness = cv_score - total_penalty
             
+            # Debug: Final check for NaN/Inf
+            if np.isnan(fitness) or np.isinf(fitness):
+                self.logger.warning(f"NaN/Inf in final fitness: cv_score={cv_score}, total_penalty={total_penalty}")
+                return float('-inf')
+            
+            self.logger.debug(f"Final fitness: {fitness:.6f} (CV: {cv_score:.6f}, penalty: {total_penalty:.6f})")
             return fitness
             
         except Exception as e:
@@ -1413,66 +1504,130 @@ class GHGASelector:
             Feature name
         top_solutions : List[np.ndarray]
             List of top solutions
-            
+                
         Returns:
         --------
         float
             Feature importance score
         """
+        # Check if top_solutions is empty to avoid division by zero
+        if not top_solutions:
+            selection_freq = 0
+            
         # 1. Selection frequency in top solutions
         selection_freq = sum(solution[index] for solution in top_solutions) / len(top_solutions)
         
         # 2. Correlation with target (if available)
         correlation = 0
         try:
-            # Try GPU correlation if available
+            # First try GPU path if enabled and available
             if self.use_gpu and self.has_cudf_cuml and hasattr(self, 'X_gpu') and self.X_gpu is not None:
                 try:
-                    # Use cuDF for correlation calculation
-                    feature_series = self.X_gpu[feature]
-                    correlation = abs(feature_series.corr(self.y_gpu))
-                    if pd.isna(correlation):
-                        correlation = 0
-                except:
-                    # Fall back to CPU correlation
-                    if isinstance(self.X_cpu, pd.DataFrame) and isinstance(self.y_cpu, pd.Series):
-                        correlation = abs(self.X_cpu[feature].corr(self.y_cpu))
+                    # Get feature data from GPU
+                    feature_data = self.X_gpu[feature]
+                    target_data = self.y_gpu
+                    
+                    # Convert to numeric if needed
+                    try:
+                        if not pd.api.types.is_numeric_dtype(feature_data):
+                            feature_data = feature_data.astype(float)
+                        if not pd.api.types.is_numeric_dtype(target_data):
+                            target_data = target_data.astype(float)
+                        
+                        # Calculate correlation
+                        correlation = abs(feature_data.corr(target_data))
                         if pd.isna(correlation):
                             correlation = 0
-                    else:
-                        correlation = abs(np.corrcoef(self.X_cpu[:, index], self.y_cpu)[0, 1])
-                        if np.isnan(correlation):
-                            correlation = 0
-            else:
-                # CPU correlation
-                if isinstance(self.X_cpu, pd.DataFrame) and isinstance(self.y_cpu, pd.Series):
-                    correlation = abs(self.X_cpu[feature].corr(self.y_cpu))
-                    if pd.isna(correlation):
-                        correlation = 0
+                    except Exception as e:
+                        self.logger.debug(f"GPU data conversion failed for {feature}: {str(e)}")
+                        # Explicitly fall through to CPU path by raising
+                        raise
+                except Exception as e:
+                    self.logger.debug(f"GPU correlation failed for {feature}: {str(e)}. Using CPU.")
+                    # Will continue to CPU path below
+            
+            # CPU path (either primary or fallback)
+            if correlation == 0:  # Only try CPU path if GPU didn't succeed
+                if isinstance(self.X_cpu, pd.DataFrame):
+                    # Get feature data as pandas Series
+                    feature_data = self.X_cpu[feature].copy()
+                    target_data = self.y_cpu.copy()
+                    
+                    # Convert to numeric with proper error handling
+                    try:
+                        feature_data = pd.to_numeric(feature_data, errors='coerce')
+                        target_data = pd.to_numeric(target_data, errors='coerce')
+                        
+                        # Drop NaN values
+                        valid_mask = ~(feature_data.isna() | target_data.isna())
+                        if valid_mask.sum() > 1:  # Need at least 2 points for correlation
+                            correlation = abs(feature_data[valid_mask].corr(target_data[valid_mask]))
+                            if pd.isna(correlation):
+                                correlation = 0
+                    except Exception as e:
+                        self.logger.debug(f"Data conversion failed for {feature}: {str(e)}")
+                        correlation = 0  # Explicit assignment to be safe
                 else:
-                    correlation = abs(np.corrcoef(self.X_cpu[:, index], self.y_cpu)[0, 1])
-                    if np.isnan(correlation):
-                        correlation = 0
+                    # NumPy array approach
+                    try:
+                        feature_data = self.X_cpu[:, index]
+                        target_data = self.y_cpu
+                        
+                        # Ensure both are numeric
+                        feature_data = np.array(feature_data, dtype=np.float64)
+                        target_data = np.array(target_data, dtype=np.float64)
+                        
+                        # Handle NaNs
+                        valid_mask = ~(np.isnan(feature_data) | np.isnan(target_data))
+                        if np.sum(valid_mask) > 1:  # Need at least 2 points
+                            correlation = abs(np.corrcoef(
+                                feature_data[valid_mask], 
+                                target_data[valid_mask]
+                            )[0, 1])
+                            
+                            if np.isnan(correlation):
+                                correlation = 0
+                    except Exception as e:
+                        self.logger.debug(f"NumPy correlation failed for {feature}: {str(e)}")
+                        correlation = 0  # Explicit assignment to be safe
         except Exception as e:
             self.logger.warning(f"Error calculating correlation for feature {feature}: {str(e)}")
-            correlation = 0
-            
-        # 3. Performance impact
-        # Evaluate performance drop when removing the feature
+            correlation = 0  # Ensure correlation is set to 0 if all methods fail
+                    
+        # 3. Performance impact - evaluate impact for both inclusion and exclusion
         performance_impact = 0
         try:
             if self.best_solution_ is not None:
                 base_mask = self.best_solution_.copy()
-                if base_mask[index] == 1:  # If feature is selected in best solution
-                    base_mask[index] = 0  # Remove feature
-                    if np.sum(base_mask) > 0:  # Ensure we still have features
-                        base_fitness = self._evaluate_fitness(tuple(base_mask.tolist()))
-                        performance_impact = self.best_fitness_ - base_fitness
+                original_value = base_mask[index]
+                
+                # Toggle the feature status (try both including and excluding)
+                base_mask[index] = 1 - original_value
+                
+                # Make sure we have at least one feature selected
+                if np.sum(base_mask) > 0:
+                    # Check cache first to avoid expensive fitness calculation
+                    solution_tuple = tuple(base_mask.tolist())
+                    if solution_tuple in self._fitness_cache:
+                        modified_fitness = self._fitness_cache[solution_tuple]
+                    else:
+                        modified_fitness = self._evaluate_fitness(solution_tuple)
+                    
+                    # Calculate impact based on whether we added or removed the feature
+                    if original_value == 1:  # We removed the feature
+                        performance_impact = self.best_fitness_ - modified_fitness
+                    else:  # We added the feature
+                        performance_impact = modified_fitness - self.best_fitness_
+                        
+                    # Normalize performance impact
+                    if abs(self.best_fitness_) > 1e-6:  # Avoid division by zero
+                        performance_impact = performance_impact / abs(self.best_fitness_)
         except Exception as e:
             self.logger.warning(f"Error calculating performance impact for feature {feature}: {str(e)}")
+            performance_impact = 0  # Ensure performance_impact is set if calculation fails
             
         # Combine metrics into final importance score
-        # Weights can be adjusted based on specific needs
+        # Adjust weights based on reliability of each component
         importance = (0.4 * selection_freq + 
                     0.3 * correlation + 
                     0.3 * max(0, performance_impact))

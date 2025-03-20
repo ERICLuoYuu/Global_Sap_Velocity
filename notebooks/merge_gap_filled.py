@@ -100,7 +100,7 @@ def merge_sap_env_data_site(output_file):
             parts = sap_data_file.stem.split("_")
             location_type = '_'.join(parts[:-5])
             # if location_type not in good_sites:
-                #continue
+                # continue
             
             # Load data files
             env_data_file = Path('./outputs/processed_data/env/daily_gap_filled_size1_with_era5') / f"{location_type}_daily_gap_filled_with_era5.csv"
@@ -110,6 +110,8 @@ def merge_sap_env_data_site(output_file):
             try:
                 biome_info = pd.read_csv(biome_data_file)
                 biome_type = biome_info['si_biome'][0]
+                lat = biome_info['si_lat'][0]
+                lon = biome_info['si_long'][0]
                 # Store the biome type for this site
                 site_biome_mapping[location_type] = biome_type
             except Exception as be:
@@ -155,6 +157,8 @@ def merge_sap_env_data_site(output_file):
             # Add biome information to the dataframe
             df['biome'] = biome_type
             df['site'] = location_type
+            df['latitude'] = lat
+            df['longitude'] = lon
             
             # Save individual site data
             df.to_csv(output_file/f'{location_type}_merged.csv')

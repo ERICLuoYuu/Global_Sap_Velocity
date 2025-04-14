@@ -180,8 +180,39 @@ def main():
     'vpd', 'rh', 'leaf_area_index_high_vegetation', 'leaf_area_index_low_vegetation',
     'evaporation_from_vegetation_transpiration', 'ppfd_in',
     
+    # bio-climatic variables
+    'biome', 
+]
+    selected_vars = [
+    # Target variable
+    'sap_velocity',
+    # One from each radiation group
+    'surface_net_solar_radiation', 'sw_in', 'surface_net_thermal_radiation', 'surface_latent_heat_flux',
+    
+    # Temperature variables
+    'ta', 'soil_temperature_level_1', 'soil_temperature_level_2', 'soil_temperature_level_3',# Just one soil level
+    
+    # Water variables
+    'precip', 'swc_shallow', 'swc_deep', 'volumetric_soil_water_layer_3', 'volumetric_soil_water_layer_4',
+    
+    # Wind variables (vector components provide more info than speed)
+    'u_component_of_wind_10m', 'v_component_of_wind_10m',
+    
+    # Other important variables
+    'vpd', 'rh', 'leaf_area_index_high_vegetation', 'leaf_area_index_low_vegetation',
+    'evaporation_from_vegetation_transpiration', 'ppfd_in',
+    
     # Categorical
-    'biome'
+    'biome',
+    # Time features
+    'Year sin', 'Year cos', 'Month sin', 'Month cos', 'Week sin', 'Week cos',
+    # Topographic features
+    'elevation', 'slope', 'aspect',
+    # Water indices
+     'Water availability index', 'Index of water availability',
+    # plant trait
+    'canopy_height',
+
 ]
     all_data = all_data[selected_vars]
     all_data = add_time_features(all_data)

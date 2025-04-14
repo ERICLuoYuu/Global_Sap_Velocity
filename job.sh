@@ -4,8 +4,8 @@ cat > job.sh << 'EOF'
 #SBATCH --job-name=sap_velocity_var_select
 #SBATCH --ntasks-per-node=1
 #SBATCH --output=output_%j.log
-#SBATCH --time=12:00:00
-#SBATCH --mem=32G
+#SBATCH --time=24:00:00
+#SBATCH --mem=16G
 #SBATCH --cpus-per-task=36
 #SBATCH --partition=normal
 #SBATCH --mail-type=ALL

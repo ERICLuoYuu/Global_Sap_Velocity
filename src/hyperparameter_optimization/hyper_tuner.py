@@ -21,6 +21,12 @@ from abc import ABC, abstractmethod
 from sklearn.model_selection import KFold, GroupKFold, TimeSeriesSplit
 from typing import Dict, Union, List, Optional, Tuple, Callable
 import tensorflow as tf
+import os
+
+# Set threading parameters before any other TensorFlow operations
+#cpu_num = 10  # or whatever number you want to use
+#tf.config.threading.set_intra_op_parallelism_threads(cpu_num)
+#tf.config.threading.set_inter_op_parallelism_threads(cpu_num)
 from tensorflow import keras
 from sklearn.preprocessing import LabelEncoder
 import itertools
@@ -57,7 +63,7 @@ def setup_logging(log_dir=None):
     return logging.getLogger()
 
 
-def setup_distribution_strategy(cpu_num=1):
+def setup_distribution_strategy():
     """
     Set up the appropriate distribution strategy based on environment.
     
@@ -97,16 +103,10 @@ def setup_distribution_strategy(cpu_num=1):
         return devices, strategy, False, len(gpus)
     else:
         devices = 'CPUs'
-        # For CPU-only machines, explicitly create a MirroredStrategy with CPU devices
-        available_cpus = min(cpu_num, os.cpu_count())
-        if available_cpus > 1:
-            # Use threading for CPU parallelism instead
-            strategy = tf.distribute.OneDeviceStrategy(device="/CPU:0")
-            # Set TensorFlow to use threading
-            tf.config.threading.set_intra_op_parallelism_threads(available_cpus)
-            tf.config.threading.set_inter_op_parallelism_threads(available_cpus)
-        else:
-            strategy = tf.distribute.OneDeviceStrategy(device="/CPU:0")
+        available_cpus = 1
+        # Don't try to set threading parameters here
+        # Just use a single device strategy instead for CPUs
+        strategy = tf.distribute.get_strategy()
         return devices, strategy, False, available_cpus
 
 def setup_tf_config_for_slurm():
@@ -534,8 +534,6 @@ class DLOptimizer(BaseOptimizer):
         log_dir: Optional[str] = None,
         back_up_dir: Optional[str] = None,
         save_model_dir: Optional[str] = None,
-        cpu_num: int = 1
-
     ):
         # Set default scoring based on task
         if scoring is None:
@@ -549,7 +547,7 @@ class DLOptimizer(BaseOptimizer):
         self.label_encoder = LabelEncoder() if task == 'classification' else None
         self.best_model_weights = None
         self.use_distribution = use_distribution
-        self.cpu_num = cpu_num
+        
         if back_up_dir is not None:
             self.back_up_dir = Path(back_up_dir)
         else:
@@ -570,7 +568,7 @@ class DLOptimizer(BaseOptimizer):
         
         # Set up distribution strategy if requested
         if self.use_distribution:
-            device, self.strategy, self.is_multi_node, num_devices = setup_distribution_strategy(self.cpu_num)
+            device, self.strategy, self.is_multi_node, num_devices = setup_distribution_strategy()
             strategy_type = 'MultiWorkerMirroredStrategy' if self.is_multi_node else 'MirroredStrategy'
             self.logger.info(f"Using {strategy_type} with {self.strategy.num_replicas_in_sync} replicas")
             
@@ -578,7 +576,7 @@ class DLOptimizer(BaseOptimizer):
                 self.logger.info(f"Running on {num_devices} nodes in distributed mode")
             else:
                 device_type = device 
-                if num_devices > 0 :
+                if num_devices > 0:
                     self.logger.info(f"Running on {num_devices} {device_type} in single-node mode")
         else:
             self.strategy = None
@@ -597,11 +595,22 @@ class DLOptimizer(BaseOptimizer):
                 arch_combinations *= len(v)
                 
         opt_combinations = 1
-        for v in self.optimizer_params.values():
-            if hasattr(v, '__len__') and v != 'name':
+        for k, v in self.optimizer_params.items():
+            if k != 'name' and hasattr(v, '__len__'):
                 opt_combinations *= len(v)
-                
-        total_combinations = arch_combinations * opt_combinations
+        
+        # Count optimizer name combinations if it's a list
+        opt_name_combinations = 1
+        if 'name' in self.optimizer_params and hasattr(self.optimizer_params['name'], '__len__'):
+            opt_name_combinations = len(self.optimizer_params['name'])
+        
+        # Count training param combinations
+        train_combinations = 1
+        for v in self.training_params.values():
+            if hasattr(v, '__len__'):
+                train_combinations *= len(v)
+        
+        total_combinations = arch_combinations * opt_combinations * opt_name_combinations * train_combinations
         self.logger.info(f"Parameter grid has {total_combinations} combinations")
     
     def _prepare_data(
@@ -667,12 +676,12 @@ class DLOptimizer(BaseOptimizer):
         )
         return model
     
-    def _get_callbacks(self, fold: int) -> List[keras.callbacks.Callback]:
-        """Get callbacks for training."""
+    def _get_callbacks(self, fold: int, training_params: Dict) -> List[keras.callbacks.Callback]:
+        """Get callbacks for training with specific training parameters."""
         callbacks = [
             keras.callbacks.EarlyStopping(
                 monitor=self.scoring,
-                patience=self.training_params.get('patience', 10),
+                patience=training_params.get('patience', 10),
                 restore_best_weights=True
             ),
             keras.callbacks.ModelCheckpoint(
@@ -709,32 +718,91 @@ class DLOptimizer(BaseOptimizer):
     def _get_param_combinations(self):
         """Generate all parameter combinations for grid search."""
         param_combinations = []
-        arch_keys, arch_values = zip(*self.architecture_params.items()) if self.architecture_params else ([], [])
-        opt_name = self.optimizer_params.get('name', ['adam'])[0]
-        opt_params = {k: v for k, v in self.optimizer_params.items() if k != 'name'}
         
+        # Get keys and values for architecture parameters
+        arch_keys, arch_values = zip(*self.architecture_params.items()) if self.architecture_params else ([], [])
+        
+        # Get optimizer name(s)
+        opt_names = self.optimizer_params.get('name', ['adam'])
+        if not isinstance(opt_names, list):
+            opt_names = [opt_names]
+            
+        # Get remaining optimizer parameters
+        opt_params = {k: v for k, v in self.optimizer_params.items() if k != 'name'}
         if opt_params:
             opt_keys, opt_values = zip(*opt_params.items())
         else:
             opt_keys, opt_values = [], []
-        
-        # Handle case where architecture_params is empty
-        if not arch_keys:
-            if opt_params:
-                for opt_combo in itertools.product(*opt_values):
-                    opt_params = dict(zip(opt_keys, opt_combo))
-                    param_combinations.append(({}, opt_params))
+            
+        # Get training parameters
+        train_params = {}
+        train_keys = []
+        train_values = []
+        for k, v in self.training_params.items():
+            if isinstance(v, list):
+                train_keys.append(k)
+                train_values.append(v)
             else:
-                param_combinations.append(({}, {}))
-        else:
-            for arch_combo in itertools.product(*arch_values):
-                arch_params = dict(zip(arch_keys, arch_combo))
+                train_params[k] = v
+                
+        # Generate all combinations
+        # Empty architecture case
+        if not arch_keys:
+            # Generate all optimizer name combinations
+            for opt_name in opt_names:
+                # Generate all optimizer parameter combinations
                 if opt_params:
                     for opt_combo in itertools.product(*opt_values):
-                        opt_params = dict(zip(opt_keys, opt_combo))
-                        param_combinations.append((arch_params, opt_params))
+                        curr_opt_params = dict(zip(opt_keys, opt_combo))
+                        
+                        # Generate all training parameter combinations
+                        if train_keys:
+                            for train_combo in itertools.product(*train_values):
+                                curr_train_params = dict(zip(train_keys, train_combo))
+                                # Merge with fixed training parameters
+                                curr_train_params.update(train_params)
+                                param_combinations.append(({}, opt_name, curr_opt_params, curr_train_params))
+                        else:
+                            param_combinations.append(({}, opt_name, curr_opt_params, train_params))
                 else:
-                    param_combinations.append((arch_params, {}))
+                    # No optimizer params to grid search
+                    if train_keys:
+                        for train_combo in itertools.product(*train_values):
+                            curr_train_params = dict(zip(train_keys, train_combo))
+                            curr_train_params.update(train_params)
+                            param_combinations.append(({}, opt_name, {}, curr_train_params))
+                    else:
+                        param_combinations.append(({}, opt_name, {}, train_params))
+        else:
+            # Architecture parameters exist
+            for arch_combo in itertools.product(*arch_values):
+                arch_params = dict(zip(arch_keys, arch_combo))
+                
+                # Generate all optimizer name combinations
+                for opt_name in opt_names:
+                    # Generate all optimizer parameter combinations
+                    if opt_params:
+                        for opt_combo in itertools.product(*opt_values):
+                            curr_opt_params = dict(zip(opt_keys, opt_combo))
+                            
+                            # Generate all training parameter combinations
+                            if train_keys:
+                                for train_combo in itertools.product(*train_values):
+                                    curr_train_params = dict(zip(train_keys, train_combo))
+                                    # Merge with fixed training parameters
+                                    curr_train_params.update(train_params)
+                                    param_combinations.append((arch_params, opt_name, curr_opt_params, curr_train_params))
+                            else:
+                                param_combinations.append((arch_params, opt_name, curr_opt_params, train_params))
+                    else:
+                        # No optimizer params to grid search
+                        if train_keys:
+                            for train_combo in itertools.product(*train_values):
+                                curr_train_params = dict(zip(train_keys, train_combo))
+                                curr_train_params.update(train_params)
+                                param_combinations.append((arch_params, opt_name, {}, curr_train_params))
+                        else:
+                            param_combinations.append((arch_params, opt_name, {}, train_params))
                 
         return param_combinations
     
@@ -819,12 +887,15 @@ class DLOptimizer(BaseOptimizer):
             
             self.logger.info(f"Evaluating {len(param_combinations)} parameter combinations")
             
-            for combo_idx, (arch_params, opt_params) in enumerate(param_combinations):
+            for combo_idx, (arch_params, opt_name, opt_params, train_params) in enumerate(param_combinations):
                 # Clear TensorFlow state between iterations
                 keras.backend.clear_session()
                 tf.distribute.experimental_set_strategy(None)
                 
                 self.logger.info(f"Parameter combination {combo_idx+1}/{len(param_combinations)}")
+                self.logger.info(f"Architecture params: {arch_params}")
+                self.logger.info(f"Optimizer: {opt_name} with params: {opt_params}")
+                self.logger.info(f"Training params: {train_params}")
                 
                 if is_cv:
                     # Cross-validation logic
@@ -847,8 +918,8 @@ class DLOptimizer(BaseOptimizer):
                         X_val_fold = tf.convert_to_tensor(X_val_fold, dtype=tf.float32)
                         y_val_fold = tf.convert_to_tensor(y_val_fold, dtype=tf.float32)
                         
-                        # Get current batch size
-                        batch_size = self.training_params.get('batch_size', 32)
+                        # Get current batch size from training parameters
+                        batch_size = train_params.get('batch_size', 32)
                         
                         # Distributed training path
                         if self.strategy:
@@ -857,7 +928,7 @@ class DLOptimizer(BaseOptimizer):
                                 model = self._create_model(arch_params)
                                 model = self._compile_model(
                                     model, 
-                                    self.optimizer_params.get('name', ['adam'])[0],
+                                    opt_name,
                                     opt_params
                                 )
                                 
@@ -869,8 +940,8 @@ class DLOptimizer(BaseOptimizer):
                                 history = model.fit(
                                     train_dataset,
                                     validation_data=val_dataset,
-                                    epochs=self.training_params.get('epochs', 100),
-                                    callbacks=self._get_callbacks(fold),
+                                    epochs=train_params.get('epochs', 100),
+                                    callbacks=self._get_callbacks(fold, train_params),
                                     verbose=self.verbose
                                 )
                         else:
@@ -878,7 +949,7 @@ class DLOptimizer(BaseOptimizer):
                             model = self._create_model(arch_params)
                             model = self._compile_model(
                                 model, 
-                                self.optimizer_params.get('name', ['adam'])[0],
+                                opt_name,
                                 opt_params
                             )
                             
@@ -886,8 +957,8 @@ class DLOptimizer(BaseOptimizer):
                                 X_train, y_train,
                                 validation_data=(X_val_fold, y_val_fold),
                                 batch_size=batch_size,
-                                epochs=self.training_params.get('epochs', 100),
-                                callbacks=self._get_callbacks(fold),
+                                epochs=train_params.get('epochs', 100),
+                                callbacks=self._get_callbacks(fold, train_params),
                                 verbose=self.verbose
                             )
                         
@@ -912,7 +983,12 @@ class DLOptimizer(BaseOptimizer):
                     self.logger.info(f"Combination {combo_idx+1} mean score: {mean_score:.4f} ± {std_score:.4f}")
                     
                     all_results.append({
-                        'params': {'architecture': arch_params, 'optimizer': opt_params},
+                        'params': {
+                            'architecture': arch_params, 
+                            'optimizer_name': opt_name,
+                            'optimizer': opt_params,
+                            'training': train_params
+                        },
                         'mean_score': mean_score,
                         'std_score': std_score,
                         'fold_scores': fold_scores,
@@ -925,7 +1001,12 @@ class DLOptimizer(BaseOptimizer):
                     if is_better:
                         self.logger.info(f"New best score: {mean_score:.4f}")
                         best_score = mean_score
-                        best_params = {'architecture': arch_params, 'optimizer': opt_params}
+                        best_params = {
+                            'architecture': arch_params, 
+                            'optimizer_name': opt_name,
+                            'optimizer': opt_params,
+                            'training': train_params
+                        }
                         self.best_model_weights = current_model.get_weights()
                 
                 else:
@@ -941,8 +1022,8 @@ class DLOptimizer(BaseOptimizer):
                     X_val_tensor = tf.convert_to_tensor(X_val, dtype=tf.float32)
                     y_val_tensor = tf.convert_to_tensor(y_val, dtype=tf.float32)
                     
-                    # Get current batch size
-                    batch_size = self.training_params.get('batch_size', 32)
+                    # Get current batch size from training parameters
+                    batch_size = train_params.get('batch_size', 32)
                     
                     # Distributed training path
                     if self.strategy:
@@ -951,7 +1032,7 @@ class DLOptimizer(BaseOptimizer):
                             model = self._create_model(arch_params)
                             model = self._compile_model(
                                 model, 
-                                self.optimizer_params.get('name', ['adam'])[0],
+                                opt_name,
                                 opt_params
                             )
                             
@@ -963,8 +1044,8 @@ class DLOptimizer(BaseOptimizer):
                             history = model.fit(
                                 train_dataset,
                                 validation_data=val_dataset,
-                                epochs=self.training_params.get('epochs', 100),
-                                callbacks=self._get_callbacks(0),  # Use 0 as fold number
+                                epochs=train_params.get('epochs', 100),
+                                callbacks=self._get_callbacks(0, train_params),  # Use 0 as fold number
                                 verbose=self.verbose
                             )
                     else:
@@ -972,7 +1053,7 @@ class DLOptimizer(BaseOptimizer):
                         model = self._create_model(arch_params)
                         model = self._compile_model(
                             model, 
-                            self.optimizer_params.get('name', ['adam'])[0],
+                            opt_name,
                             opt_params
                         )
                         
@@ -980,8 +1061,8 @@ class DLOptimizer(BaseOptimizer):
                             X_tensor, y_tensor,
                             validation_data=(X_val_tensor, y_val_tensor),
                             batch_size=batch_size,
-                            epochs=self.training_params.get('epochs', 100),
-                            callbacks=self._get_callbacks(0),  # Use 0 as fold number
+                            epochs=train_params.get('epochs', 100),
+                            callbacks=self._get_callbacks(0, train_params),  # Use 0 as fold number
                             verbose=self.verbose
                         )
                     
@@ -992,7 +1073,12 @@ class DLOptimizer(BaseOptimizer):
                     self.logger.info(f"Combination {combo_idx+1} validation score: {best_val_score:.4f}")
                     
                     all_results.append({
-                        'params': {'architecture': arch_params, 'optimizer': opt_params},
+                        'params': {
+                            'architecture': arch_params, 
+                            'optimizer_name': opt_name,
+                            'optimizer': opt_params,
+                            'training': train_params
+                        },
                         'validation_score': best_val_score,
                         'history': history.history
                     })
@@ -1003,7 +1089,12 @@ class DLOptimizer(BaseOptimizer):
                     if is_better:
                         self.logger.info(f"New best score: {best_val_score:.4f}")
                         best_score = best_val_score
-                        best_params = {'architecture': arch_params, 'optimizer': opt_params}
+                        best_params = {
+                            'architecture': arch_params, 
+                            'optimizer_name': opt_name,
+                            'optimizer': opt_params,
+                            'training': train_params
+                        }
                         self.best_model_weights = model.get_weights()
                     
         finally:
@@ -1049,7 +1140,7 @@ class DLOptimizer(BaseOptimizer):
                     self.best_estimator_ = self._create_model(best_params['architecture'])
                     self.best_estimator_ = self._compile_model(
                         self.best_estimator_,
-                        self.optimizer_params.get('name', ['adam'])[0],
+                        best_params['optimizer_name'],
                         best_params['optimizer']
                     )
                     if self.best_model_weights is not None:
@@ -1058,7 +1149,7 @@ class DLOptimizer(BaseOptimizer):
                 self.best_estimator_ = self._create_model(best_params['architecture'])
                 self.best_estimator_ = self._compile_model(
                     self.best_estimator_,
-                    self.optimizer_params.get('name', ['adam'])[0],
+                    best_params['optimizer_name'],
                     best_params['optimizer']
                 )
                 if self.best_model_weights is not None:

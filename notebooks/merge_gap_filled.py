@@ -93,17 +93,17 @@ def merge_sap_env_data_site(output_file):
     count = 0
     site_biome_mapping = {}  # Dictionary to keep track of which biome each site belongs to
     
-    for sap_data_file in Path('./outputs/processed_data/sap/daily_gap_filled_size1').rglob("*.csv"):
+    for sap_data_file in Path('./outputs/processed_data/sap/daily_gap_filled_size1_after_filter').rglob("*.csv"):
         
         try:
             # Parse location and plant type
             parts = sap_data_file.stem.split("_")
-            location_type = '_'.join(parts[:-5])
+            location_type = '_'.join(parts[:-3])
             # if location_type not in good_sites:
                 # continue
             
             # Load data files
-            env_data_file = Path('./outputs/processed_data/env/daily_gap_filled_size1_with_era5') / f"{location_type}_daily_gap_filled_with_era5.csv"
+            env_data_file = Path('./outputs/processed_data/env/daily_gap_filled_size1_after_filter') / f"{location_type}_daily_gap_filled.csv"
             
             # Load the site biome data
             biome_data_file = f'data/raw/0.1.5/0.1.5/csv/sapwood/{location_type}_site_md.csv'
@@ -216,7 +216,7 @@ def merge_sap_env_data_site(output_file):
 
 def main():
     # Merge sap and env data
-    output_file = Path('./outputs/processed_data/merged/site/gap_filled_size1_with_era5') 
+    output_file = Path('./outputs/processed_data/merged/site/gap_filled_size1_after_filter') 
     # merged_data = merge_sap_env_data_plant(output_file)
     merged_data = merge_sap_env_data_site(output_file)
     print(f"Data merged and saved to {output_file}")

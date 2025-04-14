@@ -35,11 +35,7 @@ def process_file(file_path, max_gap=2):
         parts = base_name.split('_')
         
         # Check if the file is already standardized and remove that part from filename
-        if parts[-1] == 'removed':
-            parts.pop()
-        if parts[-1] == 'outlier':
-            parts.pop()
-        output_base_name = '_'.join(parts)
+        output_base_name = '_'.join(parts[:-3])
         
         # Identify columns to process (all except TIMESTAMP)
         process_columns = [col for col in filter_df.columns if col != 'TIMESTAMP']
@@ -68,9 +64,9 @@ def process_file(file_path, max_gap=2):
         result_df = result_df.reset_index()
         
         # Create output directory if it doesn't exist
-        output_dir = Path(f'./outputs/processed_data/sap/gap_filled_size{max_gap - 1}')
+        output_dir = Path(f'./outputs/processed_data/sap/gap_filled_size{max_gap - 1}_after_filter')
         output_dir.mkdir(parents=True, exist_ok=True)
-        resample_dir = Path(f'./outputs/processed_data/sap/daily_gap_filled_size{max_gap - 1}')
+        resample_dir = Path(f'./outputs/processed_data/sap/daily_gap_filled_size{max_gap - 1}_after_filter')
         resample_dir.mkdir(parents=True, exist_ok=True)
         
         # Save to CSV
@@ -90,7 +86,7 @@ def process_file(file_path, max_gap=2):
 def main():
     try:
         # Find all processed CSV files
-        filtered_files = list(Path('./outputs/processed_data/sap/outlier_removed').rglob('*.csv'))
+        filtered_files = list(Path('./outputs/processed_data/sap/filtered').rglob('*sapf_data_filtered.csv'))
         
         if not filtered_files:
             print("No CSV files found in the specified directory.")

@@ -1,95 +1,87 @@
+"""
+Unified implementation of multiple time series prediction models with ensemble capabilities.
+
+This script provides a comprehensive framework for:
+1. ANN with time window approach
+2. Transformer model 
+3. CNN-LSTM model
+4. LSTM model with bidirectional layers
+5. Traditional ML models (XGBoost, SVR, Random Forest)
+6. Ensemble model combining all approaches
+
+All models implement deterministic behavior to ensure reproducible results
+across multiple runs with the same seed.
+"""
+import os
 import sys
 from pathlib import Path
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from sklearn.preprocessing import StandardScaler
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import regularizers
-from xgboost.sklearn import XGBRegressor
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.svm import SVR
 import argparse
 
-# Add parent directory to Python path if needed
+# Set environment variables for determinism BEFORE importing TensorFlow
+os.environ['TF_DETERMINISTIC_OPS'] = '1'
+os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+os.environ['PYTHONHASHSEED'] = '42'
+
+# Add parent directory to Python path
 parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
-# Import required modules
+# Import the randomization control module first
+from src.utils.random_control import (
+    set_seed, get_seed, get_initializer, deterministic,
+    random_state_manager, test_determinism
+)
+
+# Import the time series windowing modules
+from src.hyperparameter_optimization.timeseries_processor import TimeSeriesSegmenter, SegmentedWindowGenerator
+
+# Set the master seed at the very beginning
+set_seed(42)
+
+# Now import all other dependencies
+import tensorflow as tf
+import numpy as np
+import pandas as pd
+from tensorflow import keras
+from tensorflow.keras import regularizers
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
+from datetime import datetime
+
+# ML models
+from src.hyperparameter_optimization.hyper_tuner import MLOptimizer, DLOptimizer
+
+# Apply additional TensorFlow determinism settings
+tf.random.set_seed(42)
+np.random.seed(42)
+
+# Force TensorFlow to use deterministic algorithms (TF 2.6+)
 try:
-    from src.hyperparameter_optimization.hyper_tuner import DLOptimizer, MLOptimizer
-except ImportError:
-    print("Warning: Unable to import hyper_tuner module. Using placeholder implementations.")
-    
-    # Placeholder implementation if modules can't be imported
-    class DLOptimizer:
-        def __init__(self, **kwargs):
-            self.best_params_ = {}
-            self.best_score_ = 0
-            self.history_ = None
-            
-        def fit(self, X, y, **kwargs):
-            pass
-            
-        def get_best_model(self):
-            return None
-    
-    class MLOptimizer:
-        def __init__(self, **kwargs):
-            self.best_params_ = {}
-            self.best_estimator_ = None
-            self.best_score_ = 0
-            
-        def fit(self, X, y, **kwargs):
-            pass
+    tf.config.experimental.enable_op_determinism()
+except:
+    # Fallback for older TF versions
+    print("Warning: Your TensorFlow version doesn't support enable_op_determinism()")
+    # Try alternative approaches
+    os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
-# Set random seeds for reproducibility
-RANDOM_SEED = 42
-np.random.seed(RANDOM_SEED)
-tf.random.set_seed(RANDOM_SEED)
+# Limit TensorFlow to use only one thread for CPU operations
+tf.config.threading.set_inter_op_parallelism_threads(1)
+tf.config.threading.set_intra_op_parallelism_threads(1)
 
-# Global plotting settings
-plt.style.use('seaborn-v0_8-whitegrid')
-PLOT_DPI = 100
-FIGSIZE_STANDARD = (10, 6)
-FIGSIZE_COMPARISON = (12, 8)
-FIGSIZE_SCATTER = (8, 8)
+# Configure GPU for determinism if available
+physical_devices = tf.config.list_physical_devices('GPU')
+if physical_devices:
+    for device in physical_devices:
+        tf.config.experimental.set_memory_growth(device, True)
 
-# Define paths
-PLOT_DIR = Path('./plots')
-DATA_DIR = Path('./outputs/processed_data/merged/site/gap_filled_size1_with_era5')
+#=============================================================================
+# Part 1: Common Utility Functions
+#=============================================================================
 
-# Ensure directories exist
-PLOT_DIR.mkdir(exist_ok=True)
-
-
-# Colors for different models
-MODEL_COLORS = {
-    'XGBoost': '#2C8ECF',
-    'RandomForest': '#7EB26D',
-    'SVM': '#EAB839',
-    'Neural Network': '#E24D42',
-    'LSTM': '#1F78C1',
-    'Transformer': '#BA43A9',
-    'CNN-LSTM': '#705DA0'
-}
-
-# Model results storage
-model_results = {
-    'model_name': [],
-    'train_r2': [],
-    'test_r2': [],
-    'train_rmse': [],
-    'test_rmse': [],
-    'train_mae': [],
-    'test_mae': []
-}
-
-# Utility functions
+@deterministic
 def add_time_features(df, datetime_column=None):
     """
     Create cyclical time features from a datetime column or index.
@@ -149,368 +141,21 @@ def add_time_features(df, datetime_column=None):
     
     return df
 
-class TimeSeriesSegmenter:
-    """
-    Utility class for segmenting time series data with gaps.
-    """
+@deterministic
+def get_predictions(model, dataset, scaler):
+    """Get predictions from a windowed dataset and inverse transform them."""
+    # Set evaluation mode to be deterministic - version-compatible approach
+    try:
+        # For newer TensorFlow versions
+        tf.config.run_functions_eagerly(True)
+    except:
+        # For older versions, use an alternative approach
+        pass
     
-    @staticmethod
-    def segment_time_series(
-        df, 
-        gap_threshold=2, 
-        unit='hours', 
-        min_segment_length=None,
-        timestamp_column=None
-    ):
-        """
-        Segments a time series into continuous blocks based on time gaps.
-        """
-        # Use timestamp column or index
-        if timestamp_column is not None:
-            if timestamp_column not in df.columns:
-                raise ValueError(f"Timestamp column '{timestamp_column}' not found in DataFrame")
-            time_values = pd.to_datetime(df[timestamp_column])
-            df_indexed = df.set_index(time_values)
-        else:
-            # Check if index is datetime
-            if not isinstance(df.index, pd.DatetimeIndex):
-                try:
-                    df_indexed = df.set_index(pd.to_datetime(df.index))
-                except:
-                    raise ValueError("DataFrame index cannot be converted to datetime")
-            else:
-                df_indexed = df
-        
-        # Calculate time differences in the specified unit
-        if unit == 'seconds':
-            time_diffs = df_indexed.index.to_series().diff().dt.total_seconds()
-        elif unit == 'minutes':
-            time_diffs = df_indexed.index.to_series().diff().dt.total_seconds() / 60
-        elif unit == 'hours':
-            time_diffs = df_indexed.index.to_series().diff().dt.total_seconds() / 3600
-        elif unit == 'days':
-            time_diffs = df_indexed.index.to_series().diff().dt.total_seconds() / 86400
-        else:
-            raise ValueError(f"Unsupported time unit: {unit}")
-        
-        # Find indices where gaps exceed threshold
-        gap_indices = np.where(time_diffs > gap_threshold)[0]
-        
-        # Create segment boundaries
-        boundaries = [0] + list(gap_indices) + [len(df)]
-        
-        # Extract segments
-        segments = []
-        for i in range(len(boundaries) - 1):
-            start = boundaries[i]
-            end = boundaries[i + 1]
-            
-            # Use original DataFrame to maintain all columns
-            segment = df.iloc[start:end].copy()
-            
-            # Only include segments that meet minimum length requirement
-            if min_segment_length is None or len(segment) >= min_segment_length:
-                segments.append(segment)
-        
-        return segments
-
-class WindowGenerator:
-    """
-    Generates windowed datasets from time series for machine learning models.
-    Handles input windows and label (target) windows with configurable offsets.
-    """
-    
-    def __init__(
-        self, 
-        input_width, 
-        label_width, 
-        shift,
-        train_df,
-        val_df,
-        test_df,
-        label_columns=None,
-        batch_size=64,
-        shuffle=True,
-        exclude_labels_from_inputs=True
-    ):
-        """
-        Initialize the window generator with the specified parameters.
-        """
-        # Store the raw data
-        self.train_df = train_df
-        self.val_df = val_df
-        self.test_df = test_df
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.exclude_labels_from_inputs = exclude_labels_from_inputs
-
-        # Work out the label column indices
-        self.label_columns = label_columns
-        if label_columns is not None:
-            self.label_columns_indices = {name: i for i, name in
-                                         enumerate(label_columns)}
-        self.column_indices = {name: i for i, name in
-                               enumerate(train_df.columns)}
-
-        # Work out the window parameters
-        self.input_width = input_width
-        self.label_width = label_width
-        self.shift = shift
-
-        self.total_window_size = input_width + shift
-
-        self.input_slice = slice(0, input_width)
-        self.input_indices = np.arange(self.total_window_size)[self.input_slice]
-
-        self.label_start = self.total_window_size - self.label_width
-        self.labels_slice = slice(self.label_start, None)
-        self.label_indices = np.arange(self.total_window_size)[self.labels_slice]
-        
-        # Set example as None initially
-        self._example = None
-
-    def __repr__(self):
-        """String representation of the WindowGenerator."""
-        return '\n'.join([
-            f'Total window size: {self.total_window_size}',
-            f'Input indices: {self.input_indices}',
-            f'Label indices: {self.label_indices}',
-            f'Label column name(s): {self.label_columns}'
-        ])
-    
-    def split_window(self, features):
-        """
-        Split a window of features into inputs and labels.
-        """
-        inputs = features[:, self.input_slice, :]
-        labels = features[:, self.labels_slice, :]
-        
-        if self.label_columns is not None:
-            # Extract the label columns
-            labels = tf.stack(
-                [labels[:, :, self.column_indices[name]] for name in self.label_columns],
-                axis=-1)
-                
-            # Remove label columns from inputs if requested
-            if hasattr(self, 'exclude_labels_from_inputs') and self.exclude_labels_from_inputs:
-                feature_indices = [i for i, name in enumerate(self.train_df.columns) 
-                                if name not in self.label_columns]
-                inputs = tf.gather(inputs, feature_indices, axis=2)
-
-        # Slicing doesn't preserve static shape information, so set the shapes manually
-        inputs.set_shape([None, self.input_width, None])
-        labels.set_shape([None, self.label_width, None if self.label_columns is None else len(self.label_columns)])
-
-        return inputs, labels
-    
-    def make_dataset(self, data):
-        """
-        Create a windowed tf.data.Dataset from a pandas DataFrame.
-        """
-        data = np.array(data, dtype=np.float32)
-        ds = tf.keras.utils.timeseries_dataset_from_array(
-            data=data,
-            targets=None,
-            sequence_length=self.total_window_size,
-            sequence_stride=1,
-            shuffle=self.shuffle,
-            batch_size=self.batch_size,
-            seed=RANDOM_SEED)
-
-        ds = ds.map(self.split_window)
-        return ds
-    
-    @property
-    def train(self):
-        """Get the training dataset."""
-        return self.make_dataset(self.train_df)
-
-    @property
-    def val(self):
-        """Get the validation dataset."""
-        return self.make_dataset(self.val_df)
-
-    @property
-    def test(self):
-        """Get the test dataset."""
-        return self.make_dataset(self.test_df)
-
-    @property
-    def example(self):
-        """
-        Get and cache an example batch of `inputs, labels` for plotting.
-        """
-        result = getattr(self, '_example', None)
-        if result is None:
-            # No example batch was found, so get one from the `.train` dataset
-            result = next(iter(self.train))
-            # And cache it for next time
-            self._example = result
-        return result
-
-class SegmentedWindowGenerator:
-    """
-    Handles creating and combining WindowGenerator objects from segmented time series data.
-    """
-    
-    @staticmethod
-    def create_window_generators_from_segments(
-        segments, 
-        input_width, 
-        label_width, 
-        shift,
-        train_val_test_split=(0.7, 0.15, 0.15),
-        label_columns=None,
-        batch_size=32,
-        min_segment_length=None,
-        exclude_labels_from_inputs=True
-    ):
-        """
-        Creates WindowGenerator objects for each valid segment.
-        """
-        window_generators = []
-        min_required_length = input_width + shift
-        
-        # Calculate minimum samples needed for each split to create valid windows
-        min_train_samples = min_required_length
-        min_val_samples = min_required_length
-        min_test_samples = min_required_length
-        
-        # Calculate total minimum segment length based on split ratios
-        min_total_length = max(
-            min_required_length,
-            int(min_train_samples / train_val_test_split[0]),
-            int(min_val_samples / train_val_test_split[1]),
-            int(min_test_samples / train_val_test_split[2])
-        )
-        
-        # Ensure min_segment_length is at least min_total_length
-        if min_segment_length is None or min_segment_length < min_total_length:
-            min_segment_length = min_total_length
-        
-        print(f"Minimum segment length required: {min_segment_length}")
-        
-        for segment in segments:
-            # Skip segments that are too short
-            if len(segment) < min_segment_length:
-                continue
-                
-            # Split the segment into train, validation, and test sets
-            segment_len = len(segment)
-            train_len = int(segment_len * train_val_test_split[0])
-            val_len = int(segment_len * train_val_test_split[1])
-            
-            train_df = segment.iloc[:train_len]
-            val_df = segment.iloc[train_len:train_len+val_len]
-            test_df = segment.iloc[train_len+val_len:]
-            
-            # Double-check that each split has minimum required length
-            if len(train_df) < min_train_samples or len(val_df) < min_val_samples or len(test_df) < min_test_samples:
-                continue
-            
-            # Create a WindowGenerator for this segment
-            window_gen = WindowGenerator(
-                input_width=input_width,
-                label_width=label_width,
-                shift=shift,
-                train_df=train_df,
-                val_df=val_df,
-                test_df=test_df,
-                label_columns=label_columns,
-                batch_size=batch_size,
-                exclude_labels_from_inputs=exclude_labels_from_inputs
-            )
-            
-            window_generators.append(window_gen)
-        
-        return window_generators
-
-    @staticmethod
-    def combine_datasets(window_generators, buffer_size=1000):
-        """
-        Combines datasets from multiple WindowGenerator objects.
-        """
-        if not window_generators:
-            raise ValueError("No valid window generators found. All segments might be too small for the chosen parameters.")
-        
-        # Initialize with first window generator's datasets
-        combined = {
-            'train': window_generators[0].train,
-            'val': window_generators[0].val,
-            'test': window_generators[0].test
-        }
-        
-        # Add datasets from remaining window generators
-        for wg in window_generators[1:]:
-            combined['train'] = combined['train'].concatenate(wg.train)
-            combined['val'] = combined['val'].concatenate(wg.val)
-            combined['test'] = combined['test'].concatenate(wg.test)
-        
-        # Shuffle training data
-        combined['train'] = combined['train'].shuffle(buffer_size, seed=RANDOM_SEED)
-        
-        # Optionally rebatch to ensure consistent batch sizes
-        batch_size = window_generators[0].batch_size
-        combined['train'] = combined['train'].unbatch().batch(batch_size)
-        combined['val'] = combined['val'].unbatch().batch(batch_size) 
-        combined['test'] = combined['test'].unbatch().batch(batch_size)
-        
-        return combined
-    
-    @staticmethod
-    def create_complete_dataset_from_segments(
-        segments,
-        input_width,
-        label_width,
-        shift,
-        train_val_test_split=(0.7, 0.15, 0.15),
-        label_columns=None,
-        batch_size=32,
-        buffer_size=1000,
-        exclude_labels_from_inputs=True
-    ):
-        """
-        Creates a complete set of datasets from segmented time series.
-        """
-        # Create window generators for each segment
-        window_generators = SegmentedWindowGenerator.create_window_generators_from_segments(
-            segments=segments,
-            input_width=input_width,
-            label_width=label_width,
-            shift=shift,
-            train_val_test_split=train_val_test_split,
-            label_columns=label_columns,
-            batch_size=batch_size,
-            exclude_labels_from_inputs=exclude_labels_from_inputs
-        )
-        
-        # Combine the datasets
-        return SegmentedWindowGenerator.combine_datasets(
-            window_generators=window_generators,
-            buffer_size=buffer_size
-        )
-
-def get_predictions(model, dataset, scaler=None):
-    """
-    Get predictions from a windowed dataset and inverse transform them.
-    
-    Parameters:
-    -----------
-    model : tf.keras.Model
-        The trained model to make predictions
-    dataset : tf.data.Dataset
-        The windowed dataset with features and labels
-    scaler : sklearn.preprocessing.StandardScaler, optional
-        Scaler to inverse transform the predictions and labels
-        
-    Returns:
-    --------
-    tuple
-        (predictions, actual_values) both as flattened numpy arrays
-    """
     all_predictions = []
     all_labels = []
     
+    # Use a fixed batch size for prediction to ensure consistency
     for features, labels in dataset:
         batch_predictions = model.predict(features, verbose=0)
         
@@ -531,415 +176,274 @@ def get_predictions(model, dataset, scaler=None):
     all_labels = np.array(all_labels).reshape(-1, 1)
     
     # Inverse transform to get original scale
-    if scaler is not None:
-        all_predictions = scaler.inverse_transform(all_predictions)
-        all_labels = scaler.inverse_transform(all_labels)
+    all_predictions = scaler.inverse_transform(all_predictions)
+    all_labels = scaler.inverse_transform(all_labels)
     
     # Ensure both arrays have the same length
     min_length = min(len(all_predictions), len(all_labels))
     all_predictions = all_predictions[:min_length]
     all_labels = all_labels[:min_length]
     
+    try:
+        # Reset eager execution when done for newer TF versions
+        tf.config.run_functions_eagerly(False)
+    except:
+        pass
+    
     return all_predictions.flatten(), all_labels.flatten()
 
-def load_and_preprocess_data(file_path=None, biome_column='biome', target_column='sap_velocity', training_portion=0.8):
+@deterministic
+def convert_tf_dataset_to_xy(dataset):
     """
-    Load and preprocess the data for modeling.
+    Convert TensorFlow dataset to X and y numpy arrays with deterministic behavior.
+    """
+    features_list = []
+    labels_list = []
     
-    Parameters:
-    -----------
-    file_path : str or Path, optional
-        Path to the data file. If None, uses default path
-    biome_column : str
-        Name of the categorical biome column
-    target_column : str
-        Name of the target column to predict
-    training_portion : float
-        Portion of data to use for training (0-1)
+    # Iterate through all batches in the dataset
+    for features_batch, labels_batch in dataset:
+        # Convert TensorFlow tensors to numpy arrays
+        features_list.append(features_batch.numpy())
+        labels_list.append(labels_batch.numpy())
+    
+    # Concatenate batches
+    X = np.concatenate(features_list, axis=0)
+    y = np.concatenate(labels_list, axis=0)
+    
+    # If labels are shape (batch, seq_len, features) and you need (batch, features)
+    if y.ndim > 2:
+        y = y.reshape(y.shape[0], -1)
+    
+    return X, y
+
+def convert_tf_dataset_to_xy_flat(dataset):
+    """
+    Convert TensorFlow dataset to flattened X and y arrays for traditional ML models.
+    """
+    X, y = convert_tf_dataset_to_xy(dataset)
+    
+    # Reshape for traditional ML (flatten window dimension)
+    X_reshaped = X.reshape(X.shape[0], -1)
+    
+    return X_reshaped, y.flatten()
+
+#=============================================================================
+# Part 2: Model Implementations
+#=============================================================================
+
+# 1. ANN Model
+@deterministic
+def create_windowed_nn(input_shape, output_shape, n_layers, units, dropout_rate):
+    """
+    Create a neural network model that takes a time window as input,
+    with explicit seeds for all random operations.
+    """
+    # Force deterministic behavior by setting seed
+    seed = get_seed()
+    
+    # Create incrementing seeds for each layer to ensure independence
+    kernel_seeds = [seed + i for i in range(100)]
+    seed_idx = 0
+    
+    # Input layer with deterministic settings
+    inputs = keras.layers.Input(shape=input_shape)
+    
+    # Flatten the time window for the ANN
+    x = keras.layers.Flatten()(inputs)
+    
+    # Hidden layers with explicit seeds for weight initialization
+    for i in range(n_layers):
+        x = keras.layers.Dense(
+            units,
+            activation='relu',
+            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+            bias_initializer=tf.keras.initializers.Zeros(),
+            kernel_regularizer=tf.keras.regularizers.l2(0.001)
+        )(x)
+        seed_idx += 1
         
-    Returns:
-    --------
-    tuple
-        (X_train, y_train, X_test, y_test, train_data_orig, test_data_orig)
-    """
-    if file_path is None:
-        file_path = DATA_DIR / 'all_biomes_merged_data.csv'
+        # Add dropout with explicit seed
+        if dropout_rate > 0:
+            x = keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx])(x)
+            seed_idx += 1
     
-    # Load data
-    data = pd.read_csv(file_path).set_index('TIMESTAMP').sort_index().dropna()
+    # Output layer with explicit seed
+    outputs = keras.layers.Dense(
+        output_shape,
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
+    )(x)
     
-    # Select relevant columns - using a standardized set across all models
-    data = data[['sap_velocity', 'vpd', 'ta', 'swc_shallow', 'ppfd_in', 
-                 'volumetric_soil_water_layer_4', 'leaf_area_index_low_vegetation', 
-                 'soil_temperature_level_3', 'volumetric_soil_water_layer_3', 'biome', 
-                 'swc_deep', 'u_component_of_wind_10m', 'v_component_of_wind_10m']]
-    
-    # Convert biome to categorical and create dummy variables
-    if biome_column in data.columns:
-        data[biome_column] = data[biome_column].astype('category')
-        data = pd.get_dummies(data, columns=[biome_column])
-    
-    # Add time features
-    data = add_time_features(data)
-    
-    # Split into training and test sets
-    training_data = data.iloc[:int(len(data)*training_portion)]
-    test_data = data.iloc[int(len(data)*training_portion):]
-    
-    # Separate features and target
-    X_train = training_data.drop(columns=[target_column])
-    y_train = training_data[target_column].values
-    X_test = test_data.drop(columns=[target_column])
-    y_test = test_data[target_column].values
-    
-    return X_train, y_train, X_test, y_test, training_data, test_data
+    # Create and return the model
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    return model
 
-def plot_results(y_true, y_pred, model_name, set_name, plot_dir=PLOT_DIR, figsize=FIGSIZE_STANDARD):
-    """
-    Create standard plots for model evaluation.
+# 2. Transformer Model
+@deterministic
+def positional_encoding(length, depth):
+    """Generate positional encoding for transformer models."""
+    depth = depth / 2
+    positions = np.arange(length)[:, np.newaxis]    # (seq, 1)
+    depths = np.arange(depth)[np.newaxis, :] / depth  # (1, depth)
     
-    Parameters:
-    -----------
-    y_true : array-like
-        Actual values
-    y_pred : array-like
-        Predicted values
-    model_name : str
-        Name of the model
-    set_name : str
-        Name of the dataset ('train' or 'test')
-    plot_dir : Path
-        Directory to save plots
-    figsize : tuple
-        Figure size (width, height)
-    """
-    # Create directory for this model if it doesn't exist
-    model_plot_dir = plot_dir / model_name.lower().replace(' ', '_')
-    model_plot_dir.mkdir(exist_ok=True)
+    angle_rates = 1 / (10000**depths)               # (1, depth)
+    angle_rads = positions * angle_rates            # (seq, depth)
     
-    # Calculate metrics
-    r2 = r2_score(y_true, y_pred)
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
-    mae = mean_absolute_error(y_true, y_pred)
+    # Apply sin to even indices, cos to odd indices
+    pos_encoding = np.zeros((length, int(depth) * 2))
+    pos_encoding[:, 0::2] = np.sin(angle_rads)
+    pos_encoding[:, 1::2] = np.cos(angle_rads)
     
-    # 1. Time Series Plot
-    if hasattr(y_true, 'index'):
-        plt.figure(figsize=figsize)
-        plt.plot(y_true.index, y_true, label='Actual', color='blue', alpha=0.7)
-        plt.plot(y_true.index, y_pred, label='Predicted', color='red', alpha=0.7)
-        plt.title(f'{model_name}: Actual vs Predicted Sap Velocity ({set_name})')
-        plt.xlabel('Time')
-        plt.ylabel('Sap Velocity')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(model_plot_dir / f'{set_name}_timeseries.png', dpi=PLOT_DPI)
-        plt.close()
-    
-    # 2. Scatter Plot
-    plt.figure(figsize=FIGSIZE_SCATTER)
-    plt.scatter(y_true, y_pred, alpha=0.5)
-    
-    # Add perfect prediction line
-    min_val = min(np.min(y_true), np.min(y_pred))
-    max_val = max(np.max(y_true), np.max(y_pred))
-    plt.plot([min_val, max_val], [min_val, max_val], 'k--', lw=2)
-    
-    # Add regression line
-    m, b = np.polyfit(y_true, y_pred, 1)
-    plt.plot(y_true, m*y_true + b, color='red', lw=2)
-    
-    plt.xlabel('Actual Values')
-    plt.ylabel('Predicted Values')
-    plt.title(f'{model_name}: Predicted vs Actual ({set_name})')
-    plt.axis('equal')
-    plt.axis('square')
-    
-    # Add metrics text
-    plt.text(0.05, 0.95, f'R² = {r2:.3f}\nRMSE = {rmse:.3f}\nMAE = {mae:.3f}',
-             transform=plt.gca().transAxes, bbox=dict(facecolor='white', alpha=0.8))
-    
-    plt.tight_layout()
-    plt.savefig(model_plot_dir / f'{set_name}_scatter.png', dpi=PLOT_DPI)
-    plt.close()
-    
-    # 3. Error Distribution
-    errors = y_pred - y_true
-    plt.figure(figsize=figsize)
-    plt.hist(errors, bins=30, alpha=0.7, color=MODEL_COLORS.get(model_name, 'blue'))
-    plt.axvline(x=0, color='r', linestyle='--', alpha=0.7)
-    plt.xlabel('Prediction Error')
-    plt.ylabel('Frequency')
-    plt.title(f'{model_name}: Error Distribution ({set_name})')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(model_plot_dir / f'{set_name}_error_distribution.png', dpi=PLOT_DPI)
-    plt.close()
-    
-    return r2, rmse, mae
+    return tf.cast(pos_encoding, dtype=tf.float32)
 
-def store_model_results(model_name, train_results, test_results):
-    """
-    Store model evaluation results for later comparison.
-    
-    Parameters:
-    -----------
-    model_name : str
-        Name of the model
-    train_results : tuple
-        (r2, rmse, mae) for training data
-    test_results : tuple
-        (r2, rmse, mae) for test data
-    """
-    train_r2, train_rmse, train_mae = train_results
-    test_r2, test_rmse, test_mae = test_results
-    
-    model_results['model_name'].append(model_name)
-    model_results['train_r2'].append(train_r2)
-    model_results['test_r2'].append(test_r2)
-    model_results['train_rmse'].append(train_rmse)
-    model_results['test_rmse'].append(test_rmse)
-    model_results['train_mae'].append(train_mae)
-    model_results['test_mae'].append(test_mae)
-    
-    # Print results
-    print(f"\n{model_name} Results:")
-    print(f"Training - R²: {train_r2:.4f}, RMSE: {train_rmse:.4f}, MAE: {train_mae:.4f}")
-    print(f"Test     - R²: {test_r2:.4f}, RMSE: {test_rmse:.4f}, MAE: {test_mae:.4f}")
+class TransformerEncoderLayer(tf.keras.layers.Layer):
+    """Custom Transformer encoder layer with MultiHeadAttention and feed-forward network."""
+    def __init__(self, d_model, num_heads, dff, dropout_rate=0.1, seed=None):
+        super(TransformerEncoderLayer, self).__init__()
+        
+        # Use seed for initialization if provided, otherwise get from global seed
+        self.seed = seed if seed is not None else get_seed()
+        
+        # Create incremental seeds for each component
+        kernel_seeds = [self.seed + i for i in range(10)]
+        
+        self.mha = tf.keras.layers.MultiHeadAttention(
+            key_dim=d_model // num_heads, 
+            num_heads=num_heads, 
+            dropout=dropout_rate,
+            # Use seed for weight initialization if possible
+            **({"seed": kernel_seeds[0]} if tf.__version__ >= "2.5.0" else {})
+        )
+        
+        # Use sequential for FFN with deterministic initialization
+        self.ffn = tf.keras.Sequential([
+            tf.keras.layers.Dense(
+                dff, 
+                activation='relu',
+                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[1]),
+                bias_initializer=tf.keras.initializers.Zeros()
+            ),
+            tf.keras.layers.Dense(
+                d_model,
+                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[2]),
+                bias_initializer=tf.keras.initializers.Zeros()
+            )
+        ])
+        
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        
+        self.dropout1 = tf.keras.layers.Dropout(dropout_rate, seed=kernel_seeds[3])
+        self.dropout2 = tf.keras.layers.Dropout(dropout_rate, seed=kernel_seeds[4])
+        
+    def call(self, inputs, training=False, mask=None):
+        # Multi-head attention with residual connection and layer normalization
+        attn_output = self.mha(inputs, inputs, attention_mask=mask)
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = self.layernorm1(inputs + attn_output)
+        
+        # Feed forward network with residual connection and layer normalization
+        ffn_output = self.ffn(out1)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        return self.layernorm2(out1 + ffn_output)
 
-def plot_model_comparison():
-    """
-    Create comparison plots for all models.
-    """
-    # Convert results to DataFrame for easier plotting
-    results_df = pd.DataFrame(model_results)
-    
-    # Sort by test R²
-    results_df = results_df.sort_values(by='test_r2', ascending=False)
-    
-    # 1. R² Comparison
-    plt.figure(figsize=FIGSIZE_COMPARISON)
-    bar_width = 0.35
-    index = np.arange(len(results_df))
-    
-    plt.bar(index, results_df['train_r2'], bar_width, label='Training', alpha=0.7, color='blue')
-    plt.bar(index + bar_width, results_df['test_r2'], bar_width, label='Test', alpha=0.7, color='red')
-    
-    plt.xlabel('Model')
-    plt.ylabel('R² Score')
-    plt.title('Model Comparison: R² Score')
-    plt.xticks(index + bar_width/2, results_df['model_name'], rotation=45, ha='right')
-    plt.legend()
-    plt.grid(True, axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(PLOT_DIR / 'model_comparison_r2.png', dpi=PLOT_DPI)
-    plt.close()
-    
-    # 2. RMSE Comparison
-    plt.figure(figsize=FIGSIZE_COMPARISON)
-    plt.bar(index, results_df['train_rmse'], bar_width, label='Training', alpha=0.7, color='blue')
-    plt.bar(index + bar_width, results_df['test_rmse'], bar_width, label='Test', alpha=0.7, color='red')
-    
-    plt.xlabel('Model')
-    plt.ylabel('RMSE')
-    plt.title('Model Comparison: RMSE')
-    plt.xticks(index + bar_width/2, results_df['model_name'], rotation=45, ha='right')
-    plt.legend()
-    plt.grid(True, axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(PLOT_DIR / 'model_comparison_rmse.png', dpi=PLOT_DPI)
-    plt.close()
-    
-    # 3. Combined Metric Plot with Seaborn
-    plt.figure(figsize=FIGSIZE_COMPARISON)
-    
-    # Reshape data for seaborn
-    r2_data = pd.melt(results_df, 
-                      id_vars=['model_name'], 
-                      value_vars=['train_r2', 'test_r2'],
-                      var_name='Dataset', 
-                      value_name='R²')
-    r2_data['Dataset'] = r2_data['Dataset'].map({'train_r2': 'Training', 'test_r2': 'Test'})
-    
-    # Create plot
-    sns.barplot(x='model_name', y='R²', hue='Dataset', data=r2_data)
-    plt.xlabel('Model')
-    plt.ylabel('R² Score')
-    plt.title('Model Performance Comparison')
-    plt.xticks(rotation=45, ha='right')
-    plt.grid(True, axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(PLOT_DIR / 'model_comparison_combined.png', dpi=PLOT_DPI)
-    plt.close()
-    
-    # 4. Create a summary table
-    fig, ax = plt.subplots(figsize=(12, len(results_df)*0.5 + 2))
-    ax.axis('tight')
-    ax.axis('off')
-    
-    # Create table data
-    table_data = results_df[['model_name', 'train_r2', 'test_r2', 'train_rmse', 'test_rmse']]
-    table_data.columns = ['Model', 'Train R²', 'Test R²', 'Train RMSE', 'Test RMSE']
-    
-    # Format values
-    for col in table_data.columns[1:]:
-        table_data[col] = table_data[col].map(lambda x: f"{x:.4f}")
-    
-    # Create table
-    table = ax.table(cellText=table_data.values, colLabels=table_data.columns, loc='center', cellLoc='center')
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 1.5)
-    
-    # Header styling
-    for i, key in enumerate(table._cells):
-        cell = table._cells[key]
-        if key[0] == 0:  # Header row
-            cell.set_text_props(weight='bold', color='white')
-            cell.set_facecolor('#4472C4')
-        else:  # Data rows
-            if i % 2 == 0:
-                cell.set_facecolor('#D9E1F2')
-            if key[1] == 0:  # Model name column
-                cell.set_text_props(weight='bold')
-    
-    plt.title('Model Performance Summary', pad=20)
-    plt.tight_layout()
-    plt.savefig(PLOT_DIR / 'model_performance_table.png', dpi=PLOT_DPI)
-    plt.close()
-    
-    # Save results to CSV
-    results_df.to_csv(PLOT_DIR / 'model_results.csv', index=False)
-    
-    print("\nModel comparison plots saved to:", PLOT_DIR)
-
-# Model definition functions
+@deterministic
 def create_transformer_model(input_shape, output_shape, d_model=128, num_heads=8, 
                             num_encoder_layers=4, dff=512, dropout_rate=0.1):
     """
-    Create a Transformer model for time series prediction.
+    Create a Transformer model for time series prediction with explicit seeds for determinism.
     """
-    def positional_encoding(length, depth):
-        """Generate positional encoding for transformer."""
-        depth = depth / 2
-        positions = np.arange(length)[:, np.newaxis]
-        depths = np.arange(depth)[np.newaxis, :] / depth
-        
-        angle_rates = 1 / (10000**depths)
-        angle_rads = positions * angle_rates
-        
-        pos_encoding = np.zeros((length, int(depth) * 2))
-        pos_encoding[:, 0::2] = np.sin(angle_rads)
-        pos_encoding[:, 1::2] = np.cos(angle_rads)
-        
-        return tf.cast(pos_encoding, dtype=tf.float32)
+    # Get master seed for this function
+    seed = get_seed()
     
-    class TransformerEncoderLayer(tf.keras.layers.Layer):
-        """Custom Transformer encoder layer."""
-        def __init__(self, d_model, num_heads, dff, dropout_rate=0.1):
-            super(TransformerEncoderLayer, self).__init__()
-            
-            self.mha = tf.keras.layers.MultiHeadAttention(
-                key_dim=d_model // num_heads, num_heads=num_heads, dropout=dropout_rate)
-            
-            self.ffn = tf.keras.Sequential([
-                tf.keras.layers.Dense(dff, activation='relu'),
-                tf.keras.layers.Dense(d_model)
-            ])
-            
-            self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-            self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-            
-            self.dropout1 = tf.keras.layers.Dropout(dropout_rate)
-            self.dropout2 = tf.keras.layers.Dropout(dropout_rate)
-            
-        def call(self, inputs, training=False, mask=None):
-            # Multi-head attention with residual connection and layer normalization
-            attn_output = self.mha(inputs, inputs, attention_mask=mask)
-            attn_output = self.dropout1(attn_output, training=training)
-            out1 = self.layernorm1(inputs + attn_output)
-            
-            # Feed forward network with residual connection and layer normalization
-            ffn_output = self.ffn(out1)
-            ffn_output = self.dropout2(ffn_output, training=training)
-            return self.layernorm2(out1 + ffn_output)
+    # Create incremental seeds for each layer to ensure independence
+    kernel_seeds = [seed + i for i in range(100)]
+    seed_idx = 0
     
     # Input layer
     inputs = tf.keras.layers.Input(shape=input_shape)
     
-    # Project inputs to d_model dimensions
-    x = tf.keras.layers.Dense(d_model, activation=None)(inputs)
+    # Project inputs to d_model dimensions with deterministic initialization
+    x = tf.keras.layers.Dense(
+        d_model, 
+        activation=None,
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
+    )(inputs)
+    seed_idx += 1
     
     # Add positional encoding
     seq_length = input_shape[0]
     pos_encoding = positional_encoding(seq_length, d_model)
     x = x + pos_encoding
     
-    # Dropout
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    # Dropout with explicit seed
+    x = tf.keras.layers.Dropout(
+        dropout_rate,
+        seed=kernel_seeds[seed_idx]
+    )(x)
+    seed_idx += 1
     
-    # Transformer encoder layers
+    # Transformer encoder layers with explicit seeds
     for i in range(num_encoder_layers):
-        x = TransformerEncoderLayer(d_model, num_heads, dff, dropout_rate)(x)
+        # Create a new seed for this encoder layer
+        encoder_seed = kernel_seeds[seed_idx]
+        seed_idx += 1
+        
+        x = TransformerEncoderLayer(
+            d_model, 
+            num_heads, 
+            dff, 
+            dropout_rate,
+            seed=encoder_seed
+        )(x)
     
-    # Global average pooling
+    # Global average pooling (alternative to using [CLS] token)
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     
-    # Dense layers for prediction
-    x = tf.keras.layers.Dense(d_model // 2, activation='relu', 
-                            kernel_regularizer=regularizers.l2(0.001))(x)
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    # Dense layers for prediction with deterministic initialization
+    x = tf.keras.layers.Dense(
+        d_model // 2, 
+        activation='relu', 
+        kernel_regularizer=regularizers.l2(0.001),
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
+    )(x)
+    seed_idx += 1
     
-    # Output layer
-    outputs = tf.keras.layers.Dense(output_shape)(x)
+    # Dropout with explicit seed
+    x = tf.keras.layers.Dropout(
+        dropout_rate,
+        seed=kernel_seeds[seed_idx]
+    )(x)
+    seed_idx += 1
+    
+    # Output layer with deterministic initialization
+    outputs = tf.keras.layers.Dense(
+        output_shape,
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
+    )(x)
     
     # Create model
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     
     return model
 
-def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
-    """Create an LSTM model for time series prediction."""
-    model = keras.Sequential()
-    
-    # Input layer
-    model.add(keras.layers.Input(shape=input_shape))
-    
-    # LSTM layers
-    for i in range(n_layers):
-        return_sequences = i < n_layers - 1
-        
-        model.add(keras.layers.Bidirectional(
-            keras.layers.LSTM(
-                units,
-                return_sequences=return_sequences,
-                activation='tanh',
-                recurrent_activation='sigmoid',
-                dropout=0.0,
-                recurrent_dropout=0.2,
-                kernel_regularizer=regularizers.l2(0.001),
-                recurrent_regularizer=regularizers.l2(0.001),
-                bias_regularizer=regularizers.l2(0.001)
-            )
-        ))
-        model.add(keras.layers.Dropout(dropout_rate))
-    
-    # Dense layer before output
-    model.add(keras.layers.Dense(
-        units=max(units // 2, output_shape * 2),
-        activation='relu',
-        kernel_regularizer=regularizers.l2(0.001)
-    ))
-    
-    # Output layer
-    model.add(keras.layers.Dense(output_shape))
-    
-    return model
-
+# 3. CNN-LSTM Model
+@deterministic
 def create_cnn_lstm_model(input_shape, output_shape, cnn_layers=2, lstm_layers=2, 
                          cnn_filters=64, lstm_units=128, dropout_rate=0.3):
-    """Create a hybrid CNN-LSTM model for time series prediction."""
+    """
+    Create a hybrid CNN-LSTM model with explicit seeds for all random operations.
+    """
+    # Force deterministic behavior for this function
+    seed = get_seed()
+    
+    # Create incrementing seeds for each layer to ensure independence
+    kernel_seeds = [seed + i for i in range(100)]
+    seed_idx = 0
+    
     # Input layer
     inputs = tf.keras.layers.Input(shape=input_shape)
     
@@ -950,13 +454,17 @@ def create_cnn_lstm_model(input_shape, output_shape, cnn_layers=2, lstm_layers=2
     for i in range(cnn_layers):
         kernel_size = 5 if i == 0 else 3
         
+        # Use explicit seed for each layer
         x = tf.keras.layers.Conv2D(
             filters=cnn_filters * (2**i),
             kernel_size=(kernel_size, 1),
             padding='same',
             activation='relu',
-            kernel_regularizer=tf.keras.regularizers.l2(0.001)
+            kernel_regularizer=tf.keras.regularizers.l2(0.001),
+            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+            bias_initializer=tf.keras.initializers.Zeros()
         )(x)
+        seed_idx += 1
         
         x = tf.keras.layers.BatchNormalization()(x)
         
@@ -970,208 +478,694 @@ def create_cnn_lstm_model(input_shape, output_shape, cnn_layers=2, lstm_layers=2
     # Reshape for LSTM
     x = tf.keras.layers.Reshape((new_timesteps, new_features * input_shape[1]))(x)
     
-    # LSTM Block
+    # LSTM Block with explicit seeds
     for i in range(lstm_layers):
         return_sequences = i < lstm_layers - 1
         
+        # Use explicit seed for each LSTM layer
         x = tf.keras.layers.Bidirectional(
             tf.keras.layers.LSTM(
                 lstm_units,
                 return_sequences=return_sequences,
                 dropout=0.0,
                 recurrent_dropout=0.2,
-                kernel_regularizer=tf.keras.regularizers.l2(0.001)
+                kernel_regularizer=tf.keras.regularizers.l2(0.001),
+                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+                recurrent_initializer=tf.keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+                bias_initializer=tf.keras.initializers.Zeros()
             )
         )(x)
+        seed_idx += 2
         
-        x = tf.keras.layers.Dropout(dropout_rate)(x)
+        # Dropout with explicit seed
+        x = tf.keras.layers.Dropout(
+            dropout_rate, 
+            seed=kernel_seeds[seed_idx]
+        )(x)
+        seed_idx += 1
     
-    # Dense layer
+    # Dense layer with explicit seed
     x = tf.keras.layers.Dense(
         lstm_units // 2,
         activation='relu',
-        kernel_regularizer=tf.keras.regularizers.l2(0.001)
+        kernel_regularizer=tf.keras.regularizers.l2(0.001),
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
     )(x)
+    seed_idx += 1
     
-    # Output layer
-    outputs = tf.keras.layers.Dense(output_shape)(x)
+    # Output layer with explicit seed
+    outputs = tf.keras.layers.Dense(
+        output_shape,
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=tf.keras.initializers.Zeros()
+    )(x)
     
     # Create model
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     
     return model
 
-def create_nn(input_shape, output_shape, n_layers, units, dropout_rate):
-    """Create a neural network for time series prediction."""
+# 4. LSTM Model
+@deterministic
+def create_lstm_model(input_shape, output_shape, n_layers, units, dropout_rate):
+    """
+    Create an improved LSTM model with regularization and bidirectional layers.
+    """
+    # Create a deterministic model with seeds for all random operations
+    seed = get_seed()
+    
+    # Create incrementing seeds for each layer to ensure independence
+    kernel_seeds = [seed + i for i in range(100)]
+    seed_idx = 0
+    
     model = keras.Sequential()
+    
+    # Input layer
     model.add(keras.layers.Input(shape=input_shape))
     
-    for i in range(n_layers):
-        model.add(keras.layers.Dense(
-            units,
-            activation='relu',
-            kernel_initializer='glorot_uniform',
-            kernel_regularizer=regularizers.l2(0.001)
+    # Add a time-distributed attention mechanism (optional)
+    if n_layers > 1:
+        # First layer can be bidirectional with deterministic seed
+        model.add(keras.layers.Bidirectional(
+            keras.layers.LSTM(
+                units,
+                return_sequences=True,
+                activation='tanh',
+                recurrent_activation='sigmoid',
+                dropout=0.0,  # Dropout on input units
+                recurrent_dropout=0.2,  # Dropout on recurrent units
+                kernel_regularizer=regularizers.l2(0.001),
+                recurrent_regularizer=regularizers.l2(0.001),
+                bias_regularizer=regularizers.l2(0.001),
+                unroll=False,
+                use_bias=True,
+                # Add deterministic initializers
+                kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+                recurrent_initializer=keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+                bias_initializer=keras.initializers.Zeros()
+            )
         ))
-        if dropout_rate > 0:
-            model.add(keras.layers.Dropout(dropout_rate))
+        seed_idx += 2
+        
+        # Add seeded dropout
+        model.add(keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx]))
+        seed_idx += 1
+        
+        # Middle layers
+        for i in range(1, n_layers - 1):
+            return_sequences = True
+            model.add(keras.layers.Bidirectional(keras.layers.LSTM(
+                units,
+                return_sequences=return_sequences,
+                activation='tanh',
+                recurrent_activation='sigmoid',
+                dropout=0.0,
+                recurrent_dropout=0.1,
+                kernel_regularizer=regularizers.l2(0.001),
+                recurrent_regularizer=regularizers.l2(0.001),
+                bias_regularizer=regularizers.l2(0.001),
+                unroll=False,
+                use_bias=True,
+                # Add deterministic initializers
+                kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+                recurrent_initializer=keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+                bias_initializer=keras.initializers.Zeros()
+            )))
+            seed_idx += 2
+            
+            # Add seeded dropout
+            model.add(keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx]))
+            seed_idx += 1
+        
+        # Final LSTM layer
+        model.add(keras.layers.Bidirectional(keras.layers.LSTM(
+            units,
+            return_sequences=False,
+            activation='tanh',
+            recurrent_activation='sigmoid',
+            dropout=0.0,
+            recurrent_dropout=0.1,
+            kernel_regularizer=regularizers.l2(0.001),
+            recurrent_regularizer=regularizers.l2(0.001),
+            bias_regularizer=regularizers.l2(0.001),
+            unroll=False,
+            use_bias=True,
+            # Add deterministic initializers
+            kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+            recurrent_initializer=keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+            bias_initializer=keras.initializers.Zeros()
+        )))
+        seed_idx += 2
+        
+        # Add seeded dropout
+        model.add(keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx]))
+        seed_idx += 1
+    else:
+        # If only one layer, make it bidirectional for better performance
+        model.add(keras.layers.Bidirectional(
+            keras.layers.LSTM(
+                units,
+                return_sequences=False,
+                activation='tanh',
+                recurrent_activation='sigmoid',
+                dropout=0.0,
+                recurrent_dropout=0.1,
+                kernel_regularizer=regularizers.l2(0.001),
+                recurrent_regularizer=regularizers.l2(0.001),
+                bias_regularizer=regularizers.l2(0.001),
+                unroll=False,
+                use_bias=True,
+                # Add deterministic initializers
+                kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+                recurrent_initializer=keras.initializers.Orthogonal(seed=kernel_seeds[seed_idx+1]),
+                bias_initializer=keras.initializers.Zeros()
+            )
+        ))
+        seed_idx += 2
+        
+        # Add seeded dropout
+        model.add(keras.layers.Dropout(dropout_rate, seed=kernel_seeds[seed_idx]))
+        seed_idx += 1
     
-    model.add(keras.layers.Dense(output_shape))
+    # Add a dense layer before the output for better representation
+    model.add(keras.layers.Dense(
+        units=max(units // 2, output_shape * 2),
+        activation='relu',
+        kernel_regularizer=regularizers.l2(0.001),
+        # Add deterministic initializers
+        kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=keras.initializers.Zeros()
+    ))
+    seed_idx += 1
+    
+    # Output layer
+    model.add(keras.layers.Dense(
+        output_shape,
+        # Add deterministic initializers
+        kernel_initializer=keras.initializers.GlorotUniform(seed=kernel_seeds[seed_idx]),
+        bias_initializer=keras.initializers.Zeros()
+    ))
+    
     return model
 
-# Model training functions
-def train_xgboost_model(X_train, y_train, X_test, y_test):
+#=============================================================================
+# Part 3: Training and Evaluation Functions
+#=============================================================================
+
+def load_and_prepare_data(input_width=8, label_width=1, shift=1, batch_size=32, exclude_label=True):
     """
-    Train an XGBoost model for sap velocity prediction.
-    
-    Parameters:
-    -----------
-    X_train, y_train : training data
-    X_test, y_test : test data
+    Load and prepare data for time series prediction.
     
     Returns:
     --------
-    tuple
-        (model, train_predictions, test_predictions)
+    dict
+        Dictionary containing datasets, scalers, and other info needed for training and evaluation
     """
-    print("\nTraining XGBoost model...")
+    # Set seed for reproducibility
+    np.random.seed(get_seed())
     
-    # Define parameter grid
-    param_grid = {
-        'reg_alpha': [1.0],
-        'reg_lambda': [1.0],
-        'max_depth': [9],
-        'min_child_weight': [1],
-        'gamma': [0.1],
-        'subsample': [0.5],
-        'colsample_bytree': [0.6],
-        'colsample_bylevel': [0.9],
-        'learning_rate': [0.01],
-        'n_estimators': [500],
-        'enable_categorical': [True]
+    # Load data
+    print("Loading data...")
+    data_dir = Path('./outputs/processed_data/merged/site/gap_filled_size1_hourly_after_filter')
+    data_list = list(data_dir.glob('*merged.csv'))
+    
+    if not data_list:
+        print(f"No CSV files found in {data_dir}")
+        try:
+            # Fallback to single file if no directory is found
+            data = pd.read_csv('./outputs/processed_data/merged/site/gap_filled_size1_with_era5/test.csv')
+            print("Using fallback test.csv file")
+        except:
+            print("ERROR: Could not find any data files")
+            return None
+    else:
+        print(f"Found {len(data_list)} data files")
+    
+    # Define the columns we want to use
+    used_cols = ['sap_velocity', 'ext_rad', 'ta', 'ws', 'vpd', 'ppfd_in', 'sw_in', 'biome', 'Day sin', 'Week sin', 'Month sin', 'Year sin']
+    all_biome_types = set()  # Will collect all unique biome types
+
+    # Sort data files for deterministic processing order
+    data_list = sorted(data_list)
+    
+    # Process each data file
+    all_segments = []
+    for data_file in data_list:
+        print(f"Processing {data_file.name}")
+        try:
+            df = pd.read_csv(data_file, parse_dates=['TIMESTAMP'])
+            df.set_index('TIMESTAMP', inplace=True)
+            df = add_time_features(df)
+            
+            # Verify columns exist
+            missing_cols = [col for col in used_cols if col not in df.columns]
+            if missing_cols:
+                print(f"Warning: Missing columns in {data_file.name}: {missing_cols}")
+                continue
+                
+            # Fix potential case/whitespace issues
+            df.columns = [col.strip().lower() for col in df.columns]
+            used_cols_lower = [col.lower() for col in used_cols]
+            
+            # Select only the columns we need
+            available_cols = [col for col in used_cols_lower if col in df.columns]
+            df = df[available_cols]
+            
+            # Process biome column
+            if 'biome' in available_cols:
+                # Store biome values to collect all types
+                all_biome_types.update(df['biome'].unique())
+                
+                # Get non-biome columns 
+                orig_cols = [col for col in available_cols if col != 'biome']
+                
+                # Create dummy variables for biome with fixed random state and no dropping of first column
+                biome_df = pd.get_dummies(df['biome'], prefix='', prefix_sep='', dtype=float, drop_first=False)
+                
+                # Join with original data
+                df = df[orig_cols].join(biome_df)
+            
+            # Clean data (only once)
+            df = df.replace([np.inf, -np.inf], np.nan)
+            df = df.dropna()
+            
+            if len(df) < input_width + shift:
+                print(f"Warning: {data_file.name} has too few records after cleaning: {len(df)}")
+                continue
+            
+            # Segment the data
+            segments = TimeSeriesSegmenter.segment_time_series(
+                df, 
+                gap_threshold=2, 
+                unit='hours', 
+                min_segment_length=input_width + shift
+            )
+            
+            print(f"  Created {len(segments)} segments")
+            all_segments.extend(segments)
+            
+        except Exception as e:
+            print(f"Error processing {data_file.name}: {e}")
+
+    if not all_segments:
+        print("No valid segments found. Falling back to single file mode.")
+        try:
+            # Fallback to single file processing
+            data = pd.read_csv('./outputs/processed_data/merged/site/gap_filled_size1_with_era5/test.csv')
+            data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
+            data = data.sort_values('TIMESTAMP').set_index('TIMESTAMP')
+            data = add_time_features(data)
+            
+            # Select only needed columns
+            columns = ['sap_velocity', 'sw_in', 'ext_rad', 'ta', 'ws', 'vpd', 'rh', 'ppfd_in']
+            # Use available columns
+            columns = [col for col in columns if col in data.columns]
+            data = data[columns].dropna()
+            
+            # Create a single segment
+            all_segments = [data]
+        except:
+            print("ERROR: Could not process any data.")
+            return None
+
+    print(f"Total segments collected: {len(all_segments)}")
+    
+    if 'biome' in used_cols:
+        print(f"All biome types found: {all_biome_types}")
+        # Sort all biome types for consistent column order
+        all_biome_types = sorted(all_biome_types)
+        
+        # Ensure all segments have all biome types as columns in the same order
+        for segment in all_segments:
+            for biome_type in all_biome_types:
+                if biome_type not in segment.columns:
+                    segment[biome_type] = 0.0
+
+    # Now standardize the data
+    all_data = pd.concat(all_segments)
+
+    # Create scalers
+    feature_scaler = StandardScaler()
+    label_scaler = StandardScaler()
+
+    # Get feature columns (excluding target)
+    if 'biome' in used_cols:
+        base_feature_columns = [col for col in all_data.columns if col != 'biome' and col != 'sap_velocity']
+        biome_columns = list(all_biome_types)
+        feature_columns = base_feature_columns + biome_columns
+    else:
+        feature_columns = [col for col in all_data.columns if col != 'sap_velocity']
+    
+    feature_scaler.fit(all_data[feature_columns])
+    label_scaler.fit(all_data[['sap_velocity']])
+    
+    # Apply scaling to each segment
+    scaled_segments = []
+    for segment in all_segments:
+        segment_copy = segment.copy()
+        segment_copy[feature_columns] = feature_scaler.transform(segment[feature_columns])
+        segment_copy['sap_velocity'] = label_scaler.transform(segment[['sap_velocity']])
+        scaled_segments.append(segment_copy)
+    
+    # Create windowed datasets with deterministic options
+    print("Creating windowed datasets...")
+    try:
+        # First attempt with regular split
+        datasets = SegmentedWindowGenerator.create_complete_dataset_from_segments(
+            segments=scaled_segments,
+            input_width=input_width,
+            label_width=label_width,
+            shift=shift,
+            label_columns=['sap_velocity'],
+            train_val_test_split=(0.8, 0.1, 0.1),
+            batch_size=batch_size,
+            exclude_labels_from_inputs=exclude_label
+        )
+    except ValueError as e:
+        print(f"Error with default split ratio: {e}")
+        print("Trying with an alternative split ratio...")
+        
+        # Second attempt with more balanced split
+        datasets = SegmentedWindowGenerator.create_complete_dataset_from_segments(
+            segments=scaled_segments,
+            input_width=input_width,
+            label_width=label_width,
+            shift=shift,
+            label_columns=['sap_velocity'],
+            train_val_test_split=(0.8, 0.1, 0.1),
+            batch_size=batch_size,
+            exclude_labels_from_inputs=False  # Include labels in inputs as a fallback
+        )
+    
+    train_ds = datasets['train']
+    val_ds = datasets['val']
+    test_ds = datasets['test']
+
+    # Check dataset properties
+    if train_ds is None:
+        print("ERROR: Could not create training dataset.")
+        return None
+    
+    # Print dataset shapes for debugging
+    print("Dataset shapes:")
+    for features_batch, labels_batch in train_ds.take(1):
+        print(f"Features batch shape: {features_batch.shape}")
+        print(f"Labels batch shape: {labels_batch.shape}")
+        input_shape = (features_batch.shape[1], features_batch.shape[2])
+        n_features = features_batch.shape[2]
+        break
+        
+    # Prepare traditional ML datasets (flattened)
+    X_train_flat, y_train_flat = convert_tf_dataset_to_xy_flat(train_ds)
+    X_val_flat, y_val_flat = convert_tf_dataset_to_xy_flat(val_ds)
+    X_test_flat, y_test_flat = convert_tf_dataset_to_xy_flat(test_ds)
+    
+    print(f"Traditional ML shapes: X_train={X_train_flat.shape}, y_train={y_train_flat.shape}")
+        
+    # Return as a dictionary for easy reference
+    return {
+        'train_ds': train_ds,
+        'val_ds': val_ds,
+        'test_ds': test_ds,
+        'feature_scaler': feature_scaler,
+        'label_scaler': label_scaler,
+        'input_shape': input_shape,
+        'n_features': n_features,
+        'X_train_flat': X_train_flat,
+        'y_train_flat': y_train_flat,
+        'X_val_flat': X_val_flat, 
+        'y_val_flat': y_val_flat,
+        'X_test_flat': X_test_flat,
+        'y_test_flat': y_test_flat,
+        'feature_columns': feature_columns,
+        'all_biome_types': all_biome_types
     }
+
+def train_dl_model(model_type, data_dict, output_shape=1, run_id="default", model_dir=None):
+    """
+    Train a deep learning model with the specified architecture.
     
-    # Create and train optimizer
-    optimizer = MLOptimizer(
-        param_grid=param_grid, 
-        scoring='neg_mean_squared_error', 
-        model_type='xgb', 
-        task='regression'
+    Parameters:
+    -----------
+    model_type : str
+        Type of model to train ('ann', 'transformer', 'cnn_lstm', 'lstm')
+    data_dict : dict
+        Dictionary containing datasets and other info returned by load_and_prepare_data()
+    output_shape : int
+        Number of output values to predict
+    run_id : str
+        Identifier for the run
+    model_dir : Path, optional
+        Directory to save the trained model
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing the trained model, predictions, and evaluation metrics
+    """
+    # Set random seed for reproducibility
+    set_seed(42)
+    RANDOM_SEED = get_seed()
+    
+    # Extract necessary data from data_dict
+    train_ds = data_dict['train_ds']
+    val_ds = data_dict['val_ds']
+    test_ds = data_dict['test_ds']
+    feature_scaler = data_dict['feature_scaler']
+    label_scaler = data_dict['label_scaler']
+    input_shape = data_dict['input_shape']
+    
+    # Convert TensorFlow datasets to numpy arrays for optimizer
+    X_train, y_train = convert_tf_dataset_to_xy(train_ds)
+    X_val, y_val = convert_tf_dataset_to_xy(val_ds)
+    
+    # Model-specific batch sizes
+    if model_type == 'transformer':
+        BATCH_SIZE = 64
+    else:
+        BATCH_SIZE = 32
+    
+    # Setup model-specific parameter grid and architecture function
+    if model_type == 'ann':
+        # ANN parameters
+        param_grid = {
+            'architecture': {
+                'n_layers': [2, 3],
+                'units': [32, 64],
+                'dropout_rate': [0.2] 
+            },
+            'optimizer': {   
+                'name': ['Adam'],
+                'learning_rate': [0.001]
+            },
+            'training': {
+                'batch_size': BATCH_SIZE,
+                'epochs': 100,
+                'patience': 10
+            }
+        }
+        model_architecture = create_windowed_nn
+        model_type_name = 'windowed_nn'
+        
+    elif model_type == 'transformer':
+        # Transformer parameters
+        param_grid = {
+        'architecture': {
+            'd_model': [16, 32],
+            'num_heads': [2, 4, 8],
+            'num_encoder_layers': [4],
+            'dff': [32, 64],
+            'dropout_rate': [0.3]
+        },
+        'optimizer': {
+            'name': ['Adam'],
+        },
+        'training': {
+            'batch_size': [BATCH_SIZE],
+            'epochs': 100, 
+            'patience': [20]
+        }
+        }
+        model_architecture = create_transformer_model
+        model_type_name = 'Transformer'
+        
+    elif model_type == 'cnn_lstm':
+        # CNN-LSTM parameters
+        param_grid = {
+            'architecture': {
+                'cnn_layers': [1],
+                'lstm_layers': [1],
+                'cnn_filters': [10],
+                'lstm_units': [10],
+                'dropout_rate': [0.3],
+            },
+            'optimizer': {
+                'name': ['Adam'],
+            },
+            'training': {
+                'batch_size': [BATCH_SIZE],
+                'epochs': 100,
+                'patience': [10]
+            }
+        }
+        model_architecture = create_cnn_lstm_model
+        model_type_name = 'CNN-LSTM'
+        
+    elif model_type == 'lstm':
+        # LSTM parameters
+        param_grid = {
+            'architecture': {
+                'n_layers': [2],
+                'units': [16],
+                'dropout_rate': [0.2]
+            },
+            'optimizer': {
+                'name': ['Adam'],
+                'learning_rate': [0.001]
+            },
+            'training': {
+                'batch_size': [BATCH_SIZE],
+                'epochs': 100,
+                'patience': [20]
+            }
+        }
+        model_architecture = create_lstm_model
+        model_type_name = 'LSTM'
+        
+    else:
+        print(f"ERROR: Unknown model type '{model_type}'")
+        return None
+    
+    print(f"Training {model_type.upper()} model...")
+    
+    # Create and fit optimizer with deterministic settings
+    optimizer = DLOptimizer(
+        base_architecture=model_architecture,
+        task='regression',
+        model_type=model_type_name,
+        param_grid=param_grid,
+        input_shape=input_shape,
+        output_shape=output_shape,
+        scoring='val_loss',
+        random_state=RANDOM_SEED,
+        use_distribution=False  # Use deterministic behavior
     )
     
-    optimizer.fit(X_train, y_train, split_type='temporal', is_shuffle=False)
-    
-    # Print results
-    print(f"Best parameters: {optimizer.best_params_}")
-    print(f"Best score: {optimizer.best_score_}")
-    
-    # Make predictions
-    model = optimizer.best_estimator_
-    train_preds = model.predict(X_train)
-    test_preds = model.predict(X_test)
-    
-    # Feature importance analysis
-    feature_importance = model.feature_importances_
-    feature_names = X_train.columns
-    sorted_idx = np.argsort(feature_importance)
-    
-    plt.figure(figsize=FIGSIZE_STANDARD)
-    plt.barh(range(len(sorted_idx)), feature_importance[sorted_idx])
-    plt.yticks(range(len(sorted_idx)), [feature_names[i] for i in sorted_idx])
-    plt.xlabel('Feature Importance')
-    plt.title('XGBoost Feature Importance')
-    plt.tight_layout()
-    plt.savefig(PLOT_DIR / 'xgboost_feature_importance.png', dpi=PLOT_DPI)
-    plt.close()
-    
-    
-    
-    return model, train_preds, test_preds
-
-def train_random_forest_model(X_train, y_train, X_test, y_test):
-    """
-    Train a Random Forest model for sap velocity prediction.
-    
-    Parameters:
-    -----------
-    X_train, y_train : training data
-    X_test, y_test : test data
-    
-    Returns:
-    --------
-    tuple
-        (model, train_predictions, test_predictions)
-    """
-    print("\nTraining Random Forest model...")
-    
-    # Define parameter grid
-    param_grid = {
-        'n_estimators': [500],
-        'max_depth': [7],
-        'min_samples_split': [5],
-        'min_samples_leaf': [2],
-        'max_features': ['sqrt'],
-        'bootstrap': [True],
-        'random_state': [RANDOM_SEED],
-        'oob_score': [True]
-    }
-    
-    # Create and train optimizer
-    optimizer = MLOptimizer(
-        param_grid=param_grid, 
-        scoring='r2', 
-        model_type='rf', 
-        task='regression'
+    # Fit the optimizer with time series data
+    optimizer.fit(
+        X_train, 
+        y_train,
+        is_cv=False,  # We're not using cross-validation
+        X_val=X_val,  # Validation data
+        y_val=y_val,  # Validation labels
+        split_type='temporal'  # We've already created our datasets
     )
     
-    optimizer.fit(X_train, y_train, split_type='temporal')
+    # Get the best model
+    best_model = optimizer.get_best_model()
     
-    # Print results
-    print(f"Best parameters: {optimizer.best_params_}")
-    print(f"Best score: {optimizer.best_score_}")
+    # Get predictions using the same function for all models
+    print("Generating predictions...")
+    test_predictions, test_labels_actual = get_predictions(best_model, test_ds, label_scaler)
+    train_predictions, train_labels_actual = get_predictions(best_model, train_ds, label_scaler)
     
-    # Make predictions
-    model = optimizer.best_estimator_
-    train_preds = model.predict(X_train)
-    test_preds = model.predict(X_test)
+    # Calculate metrics
+    r2 = r2_score(test_labels_actual, test_predictions)
+    r2_train = r2_score(train_labels_actual, train_predictions)
     
-    # Feature importance analysis
-    feature_importance = model.feature_importances_
-    feature_names = X_train.columns
-    sorted_idx = np.argsort(feature_importance)
+    test_mse = mean_squared_error(test_labels_actual, test_predictions)
+    test_rmse = np.sqrt(test_mse)
+    test_mae = mean_absolute_error(test_labels_actual, test_predictions)
     
-    plt.figure(figsize=FIGSIZE_STANDARD)
-    plt.barh(range(len(sorted_idx)), feature_importance[sorted_idx])
-    plt.yticks(range(len(sorted_idx)), [feature_names[i] for i in sorted_idx])
-    plt.xlabel('Feature Importance')
-    plt.title('Random Forest Feature Importance')
-    plt.tight_layout()
-    plt.savefig(PLOT_DIR / 'random_forest_feature_importance.png', dpi=PLOT_DPI)
-    plt.close()
+    train_mse = mean_squared_error(train_labels_actual, train_predictions)
+    train_rmse = np.sqrt(train_mse)
+    train_mae = mean_absolute_error(train_labels_actual, train_predictions)
     
+    # Print metrics
+    print("\nModel Evaluation:")
+    print("=================")
+    print(f"R² Score (test): {r2:.6f}")
+    print(f"R² Score (train): {r2_train:.6f}")
+    
+    print("\nTest Metrics:")
+    print(f"MSE: {test_mse:.6f}")
+    print(f"RMSE: {test_rmse:.6f}")
+    print(f"MAE: {test_mae:.6f}")
+    
+    # Save the model if directory is provided
+    if model_dir is not None:
+        model_dir.mkdir(exist_ok=True)
+        best_model.save(model_dir / f'{model_type}_model_seed_{RANDOM_SEED}_{run_id}.h5')
+    
+    # Return results
+    return {
+        'model': best_model,
+        'model_type': model_type,
+        'test_predictions': test_predictions,
+        'test_labels': test_labels_actual,
+        'train_predictions': train_predictions,
+        'train_labels': train_labels_actual,
+        'metrics': {
+            'r2_test': r2,
+            'r2_train': r2_train,
+            'rmse_test': test_rmse,
+            'rmse_train': train_rmse,
+            'mae_test': test_mae,
+            'mae_train': train_mae
+        },
+        'best_params': optimizer.best_params_,
+        'history': optimizer.history_ if hasattr(optimizer, 'history_') else None
+    }
 
-    
-    return model, train_preds, test_preds
-
-def train_svm_model(X_train, y_train, X_test, y_test):
+def train_ml_model(model_type, data_dict, run_id="default"):
     """
-    Train an SVM model for sap velocity prediction.
+    Train a traditional machine learning model.
     
     Parameters:
     -----------
-    X_train, y_train : training data
-    X_test, y_test : test data
-    
+    model_type : str
+        Type of model to train ('xgboost', 'svr')
+    data_dict : dict
+        Dictionary containing datasets and other info returned by load_and_prepare_data()
+    run_id : str
+        Identifier for the run
+        
     Returns:
     --------
-    tuple
-        (model, train_predictions, test_predictions)
+    dict
+        Dictionary containing the trained model, predictions, and evaluation metrics
     """
-    print("\nTraining SVM model...")
+    # Set random seed for reproducibility
+    np.random.seed(42)
     
-    # Define parameter grid
-    param_grid = [
-        {
+    # Extract necessary data from data_dict
+    X_train = data_dict['X_train_flat']
+    y_train = data_dict['y_train_flat']
+    X_val = data_dict['X_val_flat']
+    y_val = data_dict['y_val_flat']
+    X_test = data_dict['X_test_flat']
+    y_test = data_dict['y_test_flat']
+    label_scaler = data_dict['label_scaler']
+    
+    # Define parameter grid based on model type
+    if model_type == 'xgb':
+        param_grid = {
+            'reg_alpha': [1.0],
+            'reg_lambda': [1.0],
+            'max_depth': [7],
+            'min_child_weight': [1],
+            'gamma': [0.1],
+            'subsample': [0.5],
+            'colsample_bytree': [0.6],
+            'colsample_bylevel': [0.9],
+            'learning_rate': [0.01],
+            'n_estimators': [800],
+        }
+        score_metric = 'neg_mean_squared_error'
+        
+    elif model_type == 'svr':
+        param_grid = {
             'kernel': ['poly'],
             'C': [10],
             'gamma': ['scale'],
@@ -1179,694 +1173,544 @@ def train_svm_model(X_train, y_train, X_test, y_test):
             'coef0': [1],
             'epsilon': [0.5]
         }
-    ]
+        score_metric = 'r2'
+        
+    elif model_type == 'rf':
+        param_grid = {
+        'n_estimators': [500],  # Fewer trees can sometimes help reduce overfitting
+        'max_depth': [7],  # Reduce max_depth to prevent trees from becoming too specific
+        'min_samples_split': [5],  # Higher values prevent creating too many small splits
+        'min_samples_leaf': [2,],  # Higher values ensure terminal nodes aren't too specific
+        'max_features': ['sqrt',],  # Controls feature randomness in tree building
+        'bootstrap': [True],
+        'random_state': [42],
+        'oob_score': [True]  # Enable out-of-bag evaluation for better generalization assessment
+    }
+        score_metric = 'neg_mean_squared_error'
+        
+    else:
+        print(f"ERROR: Unknown model type '{model_type}'")
+        return None
     
-    # Create and train optimizer
+    print(f"Training {model_type.upper()} model...")
+    
+    # Create and fit optimizer
     optimizer = MLOptimizer(
         param_grid=param_grid, 
-        scoring='r2', 
-        model_type='svm', 
-        task='regression'
+        scoring=score_metric, 
+        model_type=model_type, 
+        task='regression',
+        random_state=42
     )
     
-    optimizer.fit(X_train, y_train, split_type='temporal')
+    # Fit with validation data
+    optimizer.fit(
+        X_train, 
+        y_train,
+        X_val=X_val,
+        y_val=y_val,
+        split_type='predefined',
+        is_shuffle=False  # Don't shuffle time series data
+    )
     
-    # Print results
+    # Get best model
+    best_model = optimizer.best_estimator_
     print(f"Best parameters: {optimizer.best_params_}")
-    print(f"Best score: {optimizer.best_score_}")
     
-    # Make predictions
-    model = optimizer.best_estimator_
-    train_preds = model.predict(X_train)
-    test_preds = model.predict(X_test)
+    # Predict on test and train data
+    y_pred_scaled = best_model.predict(X_test)
+    y_train_pred_scaled = best_model.predict(X_train)
     
-
+    # Inverse transform predictions to original scale
+    y_pred = label_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+    y_train_pred = label_scaler.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
     
-    return model, train_preds, test_preds
-
-def train_neural_network_model(X_train, y_train, X_test, y_test):
-    """
-    Train a Neural Network model for sap velocity prediction.
+    # Inverse transform labels to original scale for evaluation
+    y_test_actual = label_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+    y_train_actual = label_scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
     
-    Parameters:
-    -----------
-    X_train, y_train : training data
-    X_test, y_test : test data
+    # Calculate metrics
+    r2 = r2_score(y_test_actual, y_pred)
+    r2_train = r2_score(y_train_actual, y_train_pred)
     
-    Returns:
-    --------
-    tuple
-        (model, train_predictions, test_predictions)
-    """
-    print("\nTraining Neural Network model...")
+    test_mse = mean_squared_error(y_test_actual, y_pred)
+    test_rmse = np.sqrt(test_mse)
+    test_mae = mean_absolute_error(y_test_actual, y_pred)
     
-    # Scale data
-    scaler_x = StandardScaler()
-    scaler_y = StandardScaler()
+    train_mse = mean_squared_error(y_train_actual, y_train_pred)
+    train_rmse = np.sqrt(train_mse)
+    train_mae = mean_absolute_error(y_train_actual, y_train_pred)
     
-    X_train_scaled = scaler_x.fit_transform(X_train)
-    y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+    # Print metrics
+    print("\nModel Evaluation:")
+    print("=================")
+    print(f"R² Score (test): {r2:.6f}")
+    print(f"R² Score (train): {r2_train:.6f}")
     
-    X_test_scaled = scaler_x.transform(X_test)
-    y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
+    print("\nTest Metrics:")
+    print(f"MSE: {test_mse:.6f}")
+    print(f"RMSE: {test_rmse:.6f}")
+    print(f"MAE: {test_mae:.6f}")
     
-    # Define parameter grid
-    param_grid = {
-        'architecture': {
-            'n_layers': [2],
-            'units': [64],
-            'dropout_rate': [0.2] 
+    # Return results
+    return {
+        'model': best_model,
+        'model_type': model_type,
+        'test_predictions': y_pred,
+        'test_labels': y_test_actual,
+        'train_predictions': y_train_pred,
+        'train_labels': y_train_actual,
+        'metrics': {
+            'r2_test': r2,
+            'r2_train': r2_train,
+            'rmse_test': test_rmse,
+            'rmse_train': train_rmse,
+            'mae_test': test_mae,
+            'mae_train': train_mae
         },
-        'optimizer': {   
-            'name': ['Adam'],
-            'learning_rate': [0.001]
-        },
-        'training': {
-            'batch_size': 64,
-            'epochs': 100,
-            'patience': 20
-        }
+        'best_params': optimizer.best_params_
     }
-    
-    # Create and train optimizer
-    optimizer = DLOptimizer(
-        base_architecture=create_nn,
-        task='regression',
-        model_type='nn',
-        param_grid=param_grid,
-        input_shape=(X_train_scaled.shape[1],),
-        output_shape=1,
-        scoring='val_loss'
-    )
-    
-    optimizer.fit(
-        X_train_scaled,
-        y_train_scaled,
-        split_type='random',
-        groups=None
-    )
-    
-    # Get the best model
-    model = optimizer.get_best_model()
-    
-    # Make predictions
-    train_preds_scaled = model.predict(X_train_scaled).flatten()
-    test_preds_scaled = model.predict(X_test_scaled).flatten()
-    
-    # Inverse transform predictions
-    train_preds = scaler_y.inverse_transform(train_preds_scaled.reshape(-1, 1)).flatten()
-    test_preds = scaler_y.inverse_transform(test_preds_scaled.reshape(-1, 1)).flatten()
-    
-    # Plot training history if available
-    if hasattr(optimizer, 'history_') and optimizer.history_ is not None:
-        plt.figure(figsize=FIGSIZE_STANDARD)
-        plt.subplot(1, 2, 1)
-        plt.plot(optimizer.history_['loss'])
-        plt.plot(optimizer.history_['val_loss'])
-        plt.title('Model Loss')
-        plt.ylabel('Loss')
-        plt.xlabel('Epoch')
-        plt.legend(['Train', 'Validation'], loc='upper right')
-        
-        plt.subplot(1, 2, 2)
-        if 'mae' in optimizer.history_:
-            plt.plot(optimizer.history_['mae'])
-            plt.plot(optimizer.history_['val_mae'])
-            plt.title('Model MAE')
-            plt.ylabel('MAE')
-            plt.xlabel('Epoch')
-            plt.legend(['Train', 'Validation'], loc='upper right')
-        
-        plt.tight_layout()
-        plt.savefig(PLOT_DIR / 'neural_network_training_history.png', dpi=PLOT_DPI)
-        plt.close()
-    
-    
-    
-    
-    return model, train_preds, test_preds
 
-def prepare_time_series_data(X_train, y_train, X_test, y_test, scaled=True, input_width=4, label_width=1, shift=1):
+def create_ensemble_predictions(model_results_list):
     """
-    Prepare data for time series models (LSTM, Transformer, CNN-LSTM).
+    Create ensemble predictions by taking the median of individual model predictions.
     
     Parameters:
     -----------
-    X_train, y_train : training data
-    X_test, y_test : test data
-    scaled : bool
-        Whether to scale the data
-    input_width : int
-        Number of time steps to use as input
-    label_width : int
-        Number of time steps to predict
-    shift : int
-        Offset between input and label windows
+    model_results_list : list
+        List of dictionaries containing model results
         
     Returns:
     --------
-    tuple
-        (window_generator, label_scaler)
+    dict
+        Dictionary containing ensemble predictions and evaluation metrics
     """
-    # Create segments for time series models
-    # First, reconstruct DataFrames
-    train_df = pd.DataFrame(X_train.copy())
-    train_df['sap_velocity'] = y_train
+    # Check if we have any models
+    if not model_results_list:
+        print("No models to ensemble.")
+        return None
     
-    test_df = pd.DataFrame(X_test.copy())
-    test_df['sap_velocity'] = y_test
+    # Extract predictions
+    test_predictions = []
+    train_predictions = []
     
-    # Split for validation
-    val_size = int(len(train_df) * 0.2)
-    val_df = train_df.iloc[-val_size:].copy()
-    train_df = train_df.iloc[:-val_size].copy()
+    # Reference labels (should be the same for all models)
+    test_labels = model_results_list[0]['test_labels']
+    train_labels = model_results_list[0]['train_labels']
     
-    if scaled:
-        # Scale data
-        feature_scaler = StandardScaler()
-        label_scaler = StandardScaler()
+    # Collect predictions from all models
+    for result in model_results_list:
+        test_predictions.append(result['test_predictions'])
+        train_predictions.append(result['train_predictions'])
+    
+    # Convert to numpy arrays
+    test_predictions = np.array(test_predictions)
+    train_predictions = np.array(train_predictions)
+    
+    # Create ensemble predictions (median)
+    ensemble_test_pred = np.median(test_predictions, axis=0)
+    ensemble_train_pred = np.median(train_predictions, axis=0)
+    
+    # Calculate metrics
+    r2 = r2_score(test_labels, ensemble_test_pred)
+    r2_train = r2_score(train_labels, ensemble_train_pred)
+    
+    test_mse = mean_squared_error(test_labels, ensemble_test_pred)
+    test_rmse = np.sqrt(test_mse)
+    test_mae = mean_absolute_error(test_labels, ensemble_test_pred)
+    
+    train_mse = mean_squared_error(train_labels, ensemble_train_pred)
+    train_rmse = np.sqrt(train_mse)
+    train_mae = mean_absolute_error(train_labels, ensemble_train_pred)
+    
+    # Print metrics
+    print("\nEnsemble Model Evaluation:")
+    print("=========================")
+    print(f"R² Score (test): {r2:.6f}")
+    print(f"R² Score (train): {r2_train:.6f}")
+    
+    print("\nTest Metrics:")
+    print(f"MSE: {test_mse:.6f}")
+    print(f"RMSE: {test_rmse:.6f}")
+    print(f"MAE: {test_mae:.6f}")
+    
+    # Return results
+    return {
+        'model_type': 'ensemble',
+        'test_predictions': ensemble_test_pred,
+        'test_labels': test_labels,
+        'train_predictions': ensemble_train_pred,
+        'train_labels': train_labels,
+        'metrics': {
+            'r2_test': r2,
+            'r2_train': r2_train,
+            'rmse_test': test_rmse,
+            'rmse_train': train_rmse,
+            'mae_test': test_mae,
+            'mae_train': train_mae
+        },
+        'component_models': [result['model_type'] for result in model_results_list]
+    }
+
+#=============================================================================
+# Part 4: Visualization Functions
+#=============================================================================
+
+def plot_predictions(result, plot_dir=None, run_id="default"):
+    """
+    Plot predictions vs actual values for a model.
+    
+    Parameters:
+    -----------
+    result : dict
+        Dictionary containing model results
+    plot_dir : Path, optional
+        Directory to save the plots
+    run_id : str
+        Identifier for the run
+    """
+    model_type = result['model_type']
+    test_predictions = result['test_predictions']
+    test_labels = result['test_labels']
+    train_predictions = result['train_predictions']
+    train_labels = result['train_labels']
+    
+    # Set deterministic plotting
+    plt.rcParams['agg.path.chunksize'] = 10000
+    np.random.seed(42)
+    
+    # Create plot directory if it doesn't exist
+    if plot_dir is not None:
+        plot_dir.mkdir(exist_ok=True)
+    
+    # Plot predictions vs actual for test data
+    plt.figure(figsize=(10, 10))
+    plt.scatter(test_labels, test_predictions, alpha=0.5)
+    plt.xlabel('True Values [Sap Velocity]')
+    plt.ylabel('Predictions [Sap Velocity]')
+    plt.title(f'{model_type.upper()} Model: Test Predictions vs Actual')
+    plt.axis('equal')
+    plt.axis('square')
+    plt.xlim([0, plt.xlim()[1]])
+    plt.ylim([0, plt.ylim()[1]])
+    plt.plot([-100, 100], [-100, 100])
+    if plot_dir is not None:
+        plt.savefig(plot_dir / f'{model_type}_test_predictions_{run_id}.png')
+    plt.close()
+    
+    # Plot predictions vs actual for training data
+    plt.figure(figsize=(10, 10))
+    plt.scatter(train_labels, train_predictions, alpha=0.5)
+    plt.xlabel('True Values [Sap Velocity]')
+    plt.ylabel('Predictions [Sap Velocity]')
+    plt.title(f'{model_type.upper()} Model: Training Predictions vs Actual')
+    plt.axis('equal')
+    plt.axis('square')
+    plt.xlim([0, plt.xlim()[1]])
+    plt.ylim([0, plt.ylim()[1]])
+    plt.plot([-100, 100], [-100, 100])
+    if plot_dir is not None:
+        plt.savefig(plot_dir / f'{model_type}_train_predictions_{run_id}.png')
+    plt.close()
+    
+    # Plot error distribution for test data
+    error = test_predictions - test_labels
+    plt.figure(figsize=(10, 7))
+    plt.hist(error, bins=25)
+    plt.xlabel('Prediction Error [Sap Velocity]')
+    plt.ylabel('Count')
+    plt.title(f'{model_type.upper()} Model: Test Error Distribution')
+    if plot_dir is not None:
+        plt.savefig(plot_dir / f'{model_type}_test_error_distribution_{run_id}.png')
+    plt.close()
+    
+    # Plot error distribution for training data
+    error_train = train_predictions - train_labels
+    plt.figure(figsize=(10, 7))
+    plt.hist(error_train, bins=25)
+    plt.xlabel('Prediction Error [Sap Velocity]')
+    plt.ylabel('Count')
+    plt.title(f'{model_type.upper()} Model: Training Error Distribution')
+    if plot_dir is not None:
+        plt.savefig(plot_dir / f'{model_type}_train_error_distribution_{run_id}.png')
+    plt.close()
+    
+def plot_model_comparison(results_list, plot_dir=None, run_id="default"):
+    """
+    Create comparative plots of model performance.
+    
+    Parameters:
+    -----------
+    results_list : list
+        List of dictionaries containing model results
+    plot_dir : Path, optional
+        Directory to save the plots
+    run_id : str
+        Identifier for the run
+    """
+    # Create plot directory if it doesn't exist
+    if plot_dir is not None:
+        plot_dir.mkdir(exist_ok=True)
+    
+    # Extract model names and metrics
+    model_names = []
+    r2_test_values = []
+    r2_train_values = []
+    rmse_test_values = []
+    rmse_train_values = []
+    mae_test_values = []
+    mae_train_values = []
+    
+    for result in results_list:
+        model_names.append(result['model_type'].upper())
+        r2_test_values.append(result['metrics']['r2_test'])
+        r2_train_values.append(result['metrics']['r2_train'])
+        rmse_test_values.append(result['metrics']['rmse_test'])
+        rmse_train_values.append(result['metrics']['rmse_train'])
+        mae_test_values.append(result['metrics']['mae_test'])
+        mae_train_values.append(result['metrics']['mae_train'])
+    
+    # Set a consistent style
+    sns.set(style="whitegrid")
+    
+    # Create a DataFrame for easier plotting
+    df = pd.DataFrame({
+        'Model': model_names,
+        'R² (Test)': r2_test_values,
+        'R² (Train)': r2_train_values,
+        'RMSE (Test)': rmse_test_values,
+        'RMSE (Train)': rmse_train_values,
+        'MAE (Test)': mae_test_values,
+        'MAE (Train)': mae_train_values
+    })
+    
+    # Create a timestamp for the plots
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # 1. Plot R² values
+    plt.figure(figsize=(14, 8))
+    ax = sns.barplot(x='Model', y='value', hue='variable', 
+                    data=pd.melt(df, id_vars=['Model'], value_vars=['R² (Test)', 'R² (Train)']))
+    plt.title('Model Comparison: R² Scores', fontsize=16)
+    plt.xlabel('Model', fontsize=14)
+    plt.ylabel('R² Score', fontsize=14)
+    plt.xticks(rotation=45)
+    plt.legend(title='Metric')
+    plt.tight_layout()
+    if plot_dir is not None:
+        plt.savefig(plot_dir / f'model_comparison_r2_{run_id}_{timestamp}.png')
+    plt.close()
+    
+    # 2. Plot RMSE values
+    plt.figure(figsize=(14, 8))
+    ax = sns.barplot(x='Model', y='value', hue='variable', 
+                    data=pd.melt(df, id_vars=['Model'], value_vars=['RMSE (Test)', 'RMSE (Train)']))
+    plt.title('Model Comparison: RMSE', fontsize=16)
+    plt.xlabel('Model', fontsize=14)
+    plt.ylabel('RMSE', fontsize=14)
+    plt.xticks(rotation=45)
+    plt.legend(title='Metric')
+    plt.tight_layout()
+    if plot_dir is not None:
+        plt.savefig(plot_dir / f'model_comparison_rmse_{run_id}_{timestamp}.png')
+    plt.close()
+    
+    # 3. Plot MAE values
+    plt.figure(figsize=(14, 8))
+    ax = sns.barplot(x='Model', y='value', hue='variable', 
+                    data=pd.melt(df, id_vars=['Model'], value_vars=['MAE (Test)', 'MAE (Train)']))
+    plt.title('Model Comparison: MAE', fontsize=16)
+    plt.xlabel('Model', fontsize=14)
+    plt.ylabel('MAE', fontsize=14)
+    plt.xticks(rotation=45)
+    plt.legend(title='Metric')
+    plt.tight_layout()
+    if plot_dir is not None:
+        plt.savefig(plot_dir / f'model_comparison_mae_{run_id}_{timestamp}.png')
+    plt.close()
+    
+    # 4. Comprehensive comparison chart with all test metrics
+    plt.figure(figsize=(16, 10))
+    
+    # Normalize metrics to make them comparable on the same scale
+    max_rmse = max(df['RMSE (Test)'])
+    max_mae = max(df['MAE (Test)'])
+    
+    df['RMSE (Test) Normalized'] = df['RMSE (Test)'] / max_rmse
+    df['MAE (Test) Normalized'] = df['MAE (Test)'] / max_mae
+    
+    # For R², higher is better, so we invert it for visualization (1 - R²)
+    # This way, lower values are better for all metrics
+    df['R² (Test) Inverted'] = 1 - df['R² (Test)']
+    
+    # Plot comprehensive comparison
+    ax = sns.barplot(x='Model', y='value', hue='variable', 
+                    data=pd.melt(df, id_vars=['Model'], 
+                                value_vars=['R² (Test) Inverted', 'RMSE (Test) Normalized', 'MAE (Test) Normalized']))
+    
+    plt.title('Comprehensive Model Comparison (Test Set Metrics)', fontsize=16)
+    plt.xlabel('Model', fontsize=14)
+    plt.ylabel('Normalized Metric (Lower is Better)', fontsize=14)
+    plt.xticks(rotation=45)
+    plt.legend(title='Metric', labels=['1 - R²', 'RMSE (Normalized)', 'MAE (Normalized)'])
+    plt.tight_layout()
+    if plot_dir is not None:
+        plt.savefig(plot_dir / f'model_comparison_comprehensive_{run_id}_{timestamp}.png')
+    plt.close()
+    
+    # Create and save a summary table
+    summary_df = df[['Model', 'R² (Test)', 'RMSE (Test)', 'MAE (Test)']]
+    summary_df = summary_df.sort_values('R² (Test)', ascending=False)
+    
+    if plot_dir is not None:
+        summary_df.to_csv(plot_dir / f'model_comparison_summary_{run_id}_{timestamp}.csv', index=False)
+    
+    print("\nModel Comparison Summary:")
+    print("========================")
+    print(summary_df.to_string(index=False))
+    
+    return summary_df
+
+#=============================================================================
+# Part 5: Main Execution Functions
+#=============================================================================
+
+def train_all_models(run_id="default", output_dir=None):
+    """
+    Train and evaluate all models, including ensemble.
+    
+    Parameters:
+    -----------
+    run_id : str
+        Identifier for the run
+    output_dir : Path, optional
+        Directory to save models and plots
         
-        # Get feature and label columns
-        feature_cols = [col for col in train_df.columns if col != 'sap_velocity']
-        
-        # Fit scalers on training data
-        feature_scaler.fit(train_df[feature_cols])
-        label_scaler.fit(train_df[['sap_velocity']])
-        
-        # Transform data
-        for df in [train_df, val_df, test_df]:
-            df[feature_cols] = feature_scaler.transform(df[feature_cols])
-            df['sap_velocity'] = label_scaler.transform(df[['sap_velocity']])
+    Returns:
+    --------
+    list
+        List of dictionaries containing results for all models
+    """
+    # Set up directories
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        model_dir = output_dir / "models"
+        plot_dir = output_dir / "plots"
+        model_dir.mkdir(exist_ok=True, parents=True)
+        plot_dir.mkdir(exist_ok=True, parents=True)
     else:
-        label_scaler = None
+        model_dir = None
+        plot_dir = None
     
-    # Create window generator
-    window_generator = WindowGenerator(
-        input_width=input_width,
-        label_width=label_width,
-        shift=shift,
-        train_df=train_df,
-        val_df=val_df,
-        test_df=test_df,
-        label_columns=['sap_velocity'],
-        batch_size=64,
-        exclude_labels_from_inputs=True
-    )
+    # Load and prepare data
+    data_dict = load_and_prepare_data()
+    if data_dict is None:
+        print("Error loading data.")
+        return None
     
-    return window_generator, label_scaler
+    # Train all models
+    model_results = []
+    
+    # Deep learning models
+    dl_models = ['ann', 'transformer', 'cnn_lstm', 'lstm']
+    for model_type in dl_models:
+        print(f"\n{'='*50}")
+        print(f"Training {model_type.upper()} model")
+        print(f"{'='*50}")
+        
+        set_seed(42)  # Reset seed for each model
+        result = train_dl_model(model_type, data_dict, run_id=run_id, model_dir=model_dir)
+        
+        if result is not None:
+            model_results.append(result)
+            # Plot individual model results
+            plot_predictions(result, plot_dir=plot_dir, run_id=run_id)
+    
+    # ML models
+    ml_models = ['xgboost', 'svr', 'random_forest']
+    for model_type in ml_models:
+        print(f"\n{'='*50}")
+        print(f"Training {model_type.upper()} model")
+        print(f"{'='*50}")
+        
+        np.random.seed(42)  # Reset seed for each model
+        result = train_ml_model(model_type, data_dict, run_id=run_id)
+        
+        if result is not None:
+            model_results.append(result)
+            # Plot individual model results
+            plot_predictions(result, plot_dir=plot_dir, run_id=run_id)
+    
+    # Create ensemble model
+    print(f"\n{'='*50}")
+    print(f"Creating ensemble model")
+    print(f"{'='*50}")
+    
+    ensemble_result = create_ensemble_predictions(model_results)
+    
+    if ensemble_result is not None:
+        model_results.append(ensemble_result)
+        # Plot ensemble model results
+        plot_predictions(ensemble_result, plot_dir=plot_dir, run_id=run_id)
+    
+    # Plot model comparison
+    summary_df = plot_model_comparison(model_results, plot_dir=plot_dir, run_id=run_id)
+    
+    return model_results, summary_df
 
-def train_lstm_model(X_train, y_train, X_test, y_test):
-    """
-    Train an LSTM model for sap velocity prediction.
-    
-    Parameters:
-    -----------
-    X_train, y_train : training data
-    X_test, y_test : test data
-    
-    Returns:
-    --------
-    tuple
-        (model, train_predictions, test_predictions)
-    """
-    print("\nTraining LSTM model...")
-    
-    # Prepare windowed data
-    window_generator, label_scaler = prepare_time_series_data(
-        X_train, y_train, X_test, y_test, 
-        scaled=True, input_width=3, label_width=1, shift=1
-    )
-    
-    # Get feature dimensions from a batch
-    for features_batch, _ in window_generator.train.take(1):
-        n_features = features_batch.shape[2]
-        break
-    
-    # Define parameter grid
-    param_grid = {
-        'architecture': {
-            'n_layers': [1],
-            'units': [64],
-            'dropout_rate': [0.2]
-        },
-        'optimizer': {
-            'name': ['Adam'],
-            'learning_rate': [0.001]
-        },
-        'training': {
-            'batch_size': 64,
-            'epochs': 100,
-            'patience': 50
-        }
-    }
-    
-    # Convert TensorFlow dataset to X and y numpy arrays
-    def convert_tf_dataset_to_xy(dataset):
-        features_list = []
-        labels_list = []
-        
-        for features_batch, labels_batch in dataset:
-            features_list.append(features_batch.numpy())
-            labels_list.append(labels_batch.numpy())
-        
-        # Concatenate batches
-        X = np.concatenate(features_list, axis=0)
-        y = np.concatenate(labels_list, axis=0)
-        
-        # If labels are shape (batch, seq_len, features) and you need (batch, features)
-        if y.ndim > 2:
-            y = y.reshape(y.shape[0], -1)
-        
-        return X, y
-    
-    # Prepare data for optimizer
-    X_train_lstm, y_train_lstm = convert_tf_dataset_to_xy(window_generator.train)
-    X_val_lstm, y_val_lstm = convert_tf_dataset_to_xy(window_generator.val)
-    
-    # Create and train optimizer
-    optimizer = DLOptimizer(
-        base_architecture=create_lstm_model,
-        task='regression',
-        model_type='LSTM',
-        param_grid=param_grid,
-        input_shape=(3, n_features),  # (timesteps, features)
-        output_shape=1,  # Output prediction length
-        scoring='val_loss'
-    )
-    
-    optimizer.fit(
-        X_train_lstm, 
-        y_train_lstm,
-        is_cv=False,
-        X_val=X_val_lstm,
-        y_val=y_val_lstm,
-        split_type='temporal'
-    )
-    
-    # Get the best model
-    model = optimizer.get_best_model()
-    
-    # Get predictions
-    train_preds, train_y = get_predictions(model, window_generator.train, label_scaler)
-    test_preds, test_y = get_predictions(model, window_generator.test, label_scaler)
-    
-    # Plot training history
-    if hasattr(optimizer, 'history_') and optimizer.history_ is not None:
-        plt.figure(figsize=FIGSIZE_STANDARD)
-        plt.subplot(1, 2, 1)
-        plt.plot(optimizer.history_['loss'])
-        plt.plot(optimizer.history_['val_loss'])
-        plt.title('LSTM Model Loss')
-        plt.ylabel('Loss')
-        plt.xlabel('Epoch')
-        plt.legend(['Train', 'Validation'], loc='upper right')
-        
-        plt.subplot(1, 2, 2)
-        if 'mae' in optimizer.history_:
-            plt.plot(optimizer.history_['mae'])
-            plt.plot(optimizer.history_['val_mae'])
-            plt.title('LSTM Model MAE')
-            plt.ylabel('MAE')
-            plt.xlabel('Epoch')
-            plt.legend(['Train', 'Validation'], loc='upper right')
-        
-        plt.tight_layout()
-        plt.savefig(PLOT_DIR / 'lstm_training_history.png', dpi=PLOT_DPI)
-        plt.close()
-    
-  
-    
-    return model, train_preds, test_y
-
-def train_transformer_model(X_train, y_train, X_test, y_test):
-    """
-    Train a Transformer model for sap velocity prediction.
-    
-    Parameters:
-    -----------
-    X_train, y_train : training data
-    X_test, y_test : test data
-    
-    Returns:
-    --------
-    tuple
-        (model, train_predictions, test_predictions)
-    """
-    print("\nTraining Transformer model...")
-    
-    # Prepare windowed data
-    window_generator, label_scaler = prepare_time_series_data(
-        X_train, y_train, X_test, y_test, 
-        scaled=True, input_width=4, label_width=1, shift=1
-    )
-    
-    # Get feature dimensions from a batch
-    for features_batch, _ in window_generator.train.take(1):
-        n_features = features_batch.shape[2]
-        break
-    
-    # Define parameter grid
-    param_grid = {
-        'architecture': {
-            'd_model': [128],
-            'num_heads': [8],
-            'num_encoder_layers': [6],
-            'dff': [256],
-            'dropout_rate': [0.3]
-        },
-        'optimizer': {
-            'name': ['Adam'],
-        },
-        'training': {
-            'batch_size': 64,
-            'epochs': 100,
-            'patience': 15
-        }
-    }
-    
-    # Convert TensorFlow dataset to X and y numpy arrays
-    def convert_tf_dataset_to_xy(dataset):
-        features_list = []
-        labels_list = []
-        
-        for features_batch, labels_batch in dataset:
-            features_list.append(features_batch.numpy())
-            labels_list.append(labels_batch.numpy())
-        
-        # Concatenate batches
-        X = np.concatenate(features_list, axis=0)
-        y = np.concatenate(labels_list, axis=0)
-        
-        # If labels are shape (batch, seq_len, features) and you need (batch, features)
-        if y.ndim > 2:
-            y = y.reshape(y.shape[0], -1)
-        
-        return X, y
-    
-    # Prepare data for optimizer
-    X_train_tf, y_train_tf = convert_tf_dataset_to_xy(window_generator.train)
-    X_val_tf, y_val_tf = convert_tf_dataset_to_xy(window_generator.val)
-    
-    # Create and train optimizer
-    optimizer = DLOptimizer(
-        base_architecture=create_transformer_model,
-        task='regression',
-        model_type='Transformer',
-        param_grid=param_grid,
-        input_shape=(4, n_features),
-        output_shape=1,
-        scoring='val_loss',
-    )
-    
-    optimizer.fit(
-        X_train_tf, 
-        y_train_tf,
-        is_cv=False,
-        X_val=X_val_tf,
-        y_val=y_val_tf,
-        split_type='temporal'
-    )
-    
-    # Get the best model
-    model = optimizer.get_best_model()
-    
-    # Get predictions
-    train_preds, train_y = get_predictions(model, window_generator.train, label_scaler)
-    test_preds, test_y = get_predictions(model, window_generator.test, label_scaler)
-    
-    # Plot training history
-    if hasattr(optimizer, 'history_') and optimizer.history_ is not None:
-        plt.figure(figsize=FIGSIZE_STANDARD)
-        plt.subplot(1, 2, 1)
-        plt.plot(optimizer.history_['loss'])
-        plt.plot(optimizer.history_['val_loss'])
-        plt.title('Transformer Model Loss')
-        plt.ylabel('Loss')
-        plt.xlabel('Epoch')
-        plt.legend(['Train', 'Validation'], loc='upper right')
-        
-        plt.subplot(1, 2, 2)
-        if 'mae' in optimizer.history_:
-            plt.plot(optimizer.history_['mae'])
-            plt.plot(optimizer.history_['val_mae'])
-            plt.title('Transformer Model MAE')
-            plt.ylabel('MAE')
-            plt.xlabel('Epoch')
-            plt.legend(['Train', 'Validation'], loc='upper right')
-        
-        plt.tight_layout()
-        plt.savefig(PLOT_DIR / 'transformer_training_history.png', dpi=PLOT_DPI)
-        plt.close()
-    
-    
-    
-    return model, train_preds, test_y
-
-def train_cnn_lstm_model(X_train, y_train, X_test, y_test):
-    """
-    Train a CNN-LSTM model for sap velocity prediction.
-    
-    Parameters:
-    -----------
-    X_train, y_train : training data
-    X_test, y_test : test data
-    
-    Returns:
-    --------
-    tuple
-        (model, train_predictions, test_predictions)
-    """
-    print("\nTraining CNN-LSTM model...")
-    
-    # Prepare windowed data
-    window_generator, label_scaler = prepare_time_series_data(
-        X_train, y_train, X_test, y_test, 
-        scaled=True, input_width=4, label_width=1, shift=1
-    )
-    
-    # Get feature dimensions from a batch
-    for features_batch, _ in window_generator.train.take(1):
-        n_features = features_batch.shape[2]
-        break
-    
-    # Define parameter grid
-    param_grid = {
-        'architecture': {
-            'cnn_layers': [1],
-            'lstm_layers': [1],
-            'cnn_filters': [8],
-            'lstm_units': [6],
-            'dropout_rate': [0.3]
-        },
-        'optimizer': {
-            'name': ['Adam'],
-        },
-        'training': {
-            'batch_size': 64,
-            'epochs': 100,
-            'patience': 10
-        }
-    }
-    
-    # Convert TensorFlow dataset to X and y numpy arrays
-    def convert_tf_dataset_to_xy(dataset):
-        features_list = []
-        labels_list = []
-        
-        for features_batch, labels_batch in dataset:
-            features_list.append(features_batch.numpy())
-            labels_list.append(labels_batch.numpy())
-        
-        # Concatenate batches
-        X = np.concatenate(features_list, axis=0)
-        y = np.concatenate(labels_list, axis=0)
-        
-        # If labels are shape (batch, seq_len, features) and you need (batch, features)
-        if y.ndim > 2:
-            y = y.reshape(y.shape[0], -1)
-        
-        return X, y
-    
-    # Prepare data for optimizer
-    X_train_cnn, y_train_cnn = convert_tf_dataset_to_xy(window_generator.train)
-    X_val_cnn, y_val_cnn = convert_tf_dataset_to_xy(window_generator.val)
-    
-    # Create and train optimizer
-    optimizer = DLOptimizer(
-        base_architecture=create_cnn_lstm_model,
-        task='regression',
-        model_type='CNN-LSTM',
-        param_grid=param_grid,
-        input_shape=(4, n_features),
-        output_shape=1,
-        scoring='val_loss',
-    )
-    
-    optimizer.fit(
-        X_train_cnn, 
-        y_train_cnn,
-        is_cv=False,
-        X_val=X_val_cnn,
-        y_val=y_val_cnn,
-        split_type='temporal'
-    )
-    
-    # Get the best model
-    model = optimizer.get_best_model()
-    
-    # Get predictions
-    train_preds, train_y = get_predictions(model, window_generator.train, label_scaler)
-    test_preds, test_y = get_predictions(model, window_generator.test, label_scaler)
-    
-    # Plot training history
-    if hasattr(optimizer, 'history_') and optimizer.history_ is not None:
-        plt.figure(figsize=FIGSIZE_STANDARD)
-        plt.subplot(1, 2, 1)
-        plt.plot(optimizer.history_['loss'])
-        plt.plot(optimizer.history_['val_loss'])
-        plt.title('CNN-LSTM Model Loss')
-        plt.ylabel('Loss')
-        plt.xlabel('Epoch')
-        plt.legend(['Train', 'Validation'], loc='upper right')
-        
-        plt.subplot(1, 2, 2)
-        if 'mae' in optimizer.history_:
-            plt.plot(optimizer.history_['mae'])
-            plt.plot(optimizer.history_['val_mae'])
-            plt.title('CNN-LSTM Model MAE')
-            plt.ylabel('MAE')
-            plt.xlabel('Epoch')
-            plt.legend(['Train', 'Validation'], loc='upper right')
-        
-        plt.tight_layout()
-        plt.savefig(PLOT_DIR / 'cnn_lstm_training_history.png', dpi=PLOT_DPI)
-        plt.close()
-    
-   
-    
-    return model, train_preds, test_y
-
-def main(args):
-    """
-    Main function to run the model comparison.
-    
-    Parameters:
-    -----------
-    args : argparse.Namespace
-        Command line arguments
-    """
-    print(f"Loading data from {args.data_path}")
-    X_train, y_train, X_test, y_test, train_df, test_df = load_and_preprocess_data(
-        file_path=args.data_path,
-        training_portion=args.train_portion
-    )
-    
-    # Dictionary to store all model results
-    all_models = {}
-    
-    # Train models based on command line arguments
-    if args.all or args.xgboost:
-        model, train_preds, test_preds = train_xgboost_model(X_train, y_train, X_test, y_test)
-        all_models['XGBoost'] = (model, train_preds, test_preds)
-        
-        # Plot and store results
-        train_results = plot_results(y_train, train_preds, 'XGBoost', 'train')
-        test_results = plot_results(y_test, test_preds, 'XGBoost', 'test')
-        store_model_results('XGBoost', train_results, test_results)
-    
-    if args.all or args.random_forest:
-        model, train_preds, test_preds = train_random_forest_model(X_train, y_train, X_test, y_test)
-        all_models['RandomForest'] = (model, train_preds, test_preds)
-        
-        # Plot and store results
-        train_results = plot_results(y_train, train_preds, 'RandomForest', 'train')
-        test_results = plot_results(y_test, test_preds, 'RandomForest', 'test')
-        store_model_results('RandomForest', train_results, test_results)
-    
-    if args.all or args.svm:
-        model, train_preds, test_preds = train_svm_model(X_train, y_train, X_test, y_test)
-        all_models['SVM'] = (model, train_preds, test_preds)
-        
-        # Plot and store results
-        train_results = plot_results(y_train, train_preds, 'SVM', 'train')
-        test_results = plot_results(y_test, test_preds, 'SVM', 'test')
-        store_model_results('SVM', train_results, test_results)
-    
-    if args.all or args.neural_network:
-        model, train_preds, test_preds = train_neural_network_model(X_train, y_train, X_test, y_test)
-        all_models['Neural Network'] = (model, train_preds, test_preds)
-        
-        # Plot and store results
-        train_results = plot_results(y_train, train_preds, 'Neural Network', 'train')
-        test_results = plot_results(y_test, test_preds, 'Neural Network', 'test')
-        store_model_results('Neural Network', train_results, test_results)
-    
-    if args.all or args.lstm:
-        model, train_preds, test_y = train_lstm_model(X_train, y_train, X_test, y_test)
-        all_models['LSTM'] = (model, train_preds, test_y)
-        
-        # Plot and store results
-        train_results = plot_results(train_preds, train_preds, 'LSTM', 'train')  # Using predictions for both since original y is lost in windowing
-        test_results = plot_results(test_y, test_y, 'LSTM', 'test')
-        store_model_results('LSTM', train_results, test_results)
-    
-    if args.all or args.transformer:
-        model, train_preds, test_y = train_transformer_model(X_train, y_train, X_test, y_test)
-        all_models['Transformer'] = (model, train_preds, test_y)
-        
-        # Plot and store results
-        train_results = plot_results(train_preds, train_preds, 'Transformer', 'train')
-        test_results = plot_results(test_y, test_y, 'Transformer', 'test')
-        store_model_results('Transformer', train_results, test_results)
-    
-    if args.all or args.cnn_lstm:
-        model, train_preds, test_y = train_cnn_lstm_model(X_train, y_train, X_test, y_test)
-        all_models['CNN-LSTM'] = (model, train_preds, test_y)
-        
-        # Plot and store results
-        train_results = plot_results(train_preds, train_preds, 'CNN-LSTM', 'train')
-        test_results = plot_results(test_y, test_y, 'CNN-LSTM', 'test')
-        store_model_results('CNN-LSTM', train_results, test_results)
-    
-    # Create comparison plots
-    if len(model_results['model_name']) > 1:
-        plot_model_comparison()
-    
-    print("Model comparison completed!")
-    return all_models
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Sap Velocity Prediction Model Comparison')
-    
-    # Data options
-    parser.add_argument('--data_path', type=str, default=None, 
-                        help='Path to the data file (CSV)')
-    parser.add_argument('--train_portion', type=float, default=0.8,
-                        help='Portion of data to use for training (0-1)')
-    
-    # Model selection options
-    parser.add_argument('--all', action='store_true',
-                        help='Train all models')
-    parser.add_argument('--xgboost', action='store_true',
-                        help='Train XGBoost model')
-    parser.add_argument('--random_forest', action='store_true',
-                        help='Train Random Forest model')
-    parser.add_argument('--svm', action='store_true',
-                        help='Train SVM model')
-    parser.add_argument('--neural_network', action='store_true',
-                        help='Train Neural Network model')
-    parser.add_argument('--lstm', action='store_true',
-                        help='Train LSTM model')
-    parser.add_argument('--transformer', action='store_true',
-                        help='Train Transformer model')
-    parser.add_argument('--cnn_lstm', action='store_true',
-                        help='Train CNN-LSTM model')
+def main():
+    """Main function to run the time series prediction framework."""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Train and evaluate time series prediction models.')
+    parser.add_argument('--model', type=str, default='ensemble', 
+                        choices=['ann', 'transformer', 'cnn_lstm', 'lstm', 'xgboost', 'svr', 'random_forest', 'ensemble', 'all'],
+                        help='Model type to train or "all" for all models')
+    parser.add_argument('--run-id', type=str, default=datetime.now().strftime("%Y%m%d_%H%M%S"),
+                        help='Identifier for the run')
+    parser.add_argument('--output-dir', type=str, default='./outputs',
+                        help='Directory to save models and plots')
     
     args = parser.parse_args()
     
-    # If no model is specified, train all models
-    if not (args.all or args.xgboost or args.random_forest or args.svm or 
-            args.neural_network or args.lstm or args.transformer or args.cnn_lstm):
-        args.all = True
+    # Create output directory
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
     
-    main(args)
+    # Train models based on argument
+    if args.model == 'all' or args.model == 'ensemble':
+        # Train all models and create ensemble
+        results, summary = train_all_models(run_id=args.run_id, output_dir=output_dir)
+    else:
+        # Train a single model
+        data_dict = load_and_prepare_data()
+        if data_dict is None:
+            print("Error loading data.")
+            return
+        
+        # Set up directories
+        model_dir = output_dir / "models"
+        plot_dir = output_dir / "plots"
+        model_dir.mkdir(exist_ok=True, parents=True)
+        plot_dir.mkdir(exist_ok=True, parents=True)
+        
+        if args.model in ['ann', 'transformer', 'cnn_lstm', 'lstm']:
+            # Train a deep learning model
+            set_seed(42)
+            result = train_dl_model(args.model, data_dict, run_id=args.run_id, model_dir=model_dir)
+        else:
+            # Train a traditional ML model
+            np.random.seed(42)
+            result = train_ml_model(args.model, data_dict, run_id=args.run_id)
+        
+        if result is not None:
+            # Plot individual model results
+            plot_predictions(result, plot_dir=plot_dir, run_id=args.run_id)
+            
+            # Create a list with a single result for summary
+            results = [result]
+            summary = plot_model_comparison(results, plot_dir=plot_dir, run_id=args.run_id)
+    
+    print("\nTraining and evaluation complete.")
+
+if __name__ == "__main__":
+    main()

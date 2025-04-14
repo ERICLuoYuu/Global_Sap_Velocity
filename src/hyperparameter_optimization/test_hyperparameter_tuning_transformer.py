@@ -6,6 +6,7 @@ across multiple runs with the same seed.
 from pathlib import Path
 import sys
 import os
+import joblib
 
 # Set environment variables for determinism BEFORE importing TensorFlow
 os.environ['TF_DETERMINISTIC_OPS'] = '1'
@@ -19,10 +20,9 @@ if parent_dir not in sys.path:
 
 # Import the randomization control module first
 from src.utils.random_control import (
-    set_seed, get_seed, get_initializer, deterministic,
-    random_state_manager, test_determinism
+    set_seed, get_seed, deterministic,
 )
-
+from src.hyperparameter_optimization.timeseries_processor import TimeSeriesSegmenter, SegmentedWindowGenerator
 # Set the master seed at the very beginning
 set_seed(42)
 
@@ -44,8 +44,8 @@ np.random.seed(42)
 tf.config.experimental.enable_op_determinism()
 
 # Limit TensorFlow to use only one thread for CPU operations
-tf.config.threading.set_inter_op_parallelism_threads(1)
-tf.config.threading.set_intra_op_parallelism_threads(1)
+# tf.config.threading.set_inter_op_parallelism_threads(1)
+# tf.config.threading.set_intra_op_parallelism_threads(1)
 
 # Configure GPU for determinism if available
 physical_devices = tf.config.list_physical_devices('GPU')
@@ -56,401 +56,6 @@ if physical_devices:
 # Import the hyperparameter optimizer
 from src.hyperparameter_optimization.hyper_tuner import DLOptimizer
 
-
-class TimeSeriesSegmenter:
-    """
-    Utility class for segmenting time series data with gaps.
-    """
-    
-    @staticmethod
-    @deterministic
-    def segment_time_series(
-        df: pd.DataFrame, 
-        gap_threshold: float = 2, 
-        unit: str = 'hours', 
-        min_segment_length: int = None,
-        timestamp_column: str = None
-    ):
-        """
-        Segments a time series into continuous blocks based on time gaps.
-        
-        Parameters:
-        ----------
-        df : pandas.DataFrame
-            Time series data with datetime index or timestamp column
-        gap_threshold : float
-            Size of gap that defines a new segment
-        unit : str
-            Time unit for gap_threshold ('seconds', 'minutes', 'hours', 'days')
-        min_segment_length : int, optional
-            Minimum number of points required for a valid segment
-        timestamp_column : str, optional
-            The name of the timestamp column. If None, assumes the DataFrame is indexed by timestamp
-            
-        Returns:
-        -------
-        list of pandas.DataFrame
-            List of continuous segments
-        """
-        # Use timestamp column or index
-        if timestamp_column is not None:
-            if timestamp_column not in df.columns:
-                raise ValueError(f"Timestamp column '{timestamp_column}' not found in DataFrame")
-            time_values = pd.to_datetime(df[timestamp_column])
-            df_indexed = df.set_index(time_values)
-        else:
-            # Check if index is datetime
-            if not isinstance(df.index, pd.DatetimeIndex):
-                try:
-                    df_indexed = df.set_index(pd.to_datetime(df.index))
-                except:
-                    raise ValueError("DataFrame index cannot be converted to datetime")
-            else:
-                df_indexed = df
-        
-        # Calculate time differences in the specified unit
-        if unit == 'seconds':
-            time_diffs = df_indexed.index.to_series().diff().dt.total_seconds()
-        elif unit == 'minutes':
-            time_diffs = df_indexed.index.to_series().diff().dt.total_seconds() / 60
-        elif unit == 'hours':
-            time_diffs = df_indexed.index.to_series().diff().dt.total_seconds() / 3600
-        elif unit == 'days':
-            time_diffs = df_indexed.index.to_series().diff().dt.total_seconds() / 86400
-        else:
-            raise ValueError(f"Unsupported time unit: {unit}")
-        
-        # Find indices where gaps exceed threshold
-        gap_indices = np.where(time_diffs > gap_threshold)[0]
-        
-        # Create segment boundaries
-        boundaries = [0] + list(gap_indices) + [len(df)]
-        
-        # Extract segments
-        segments = []
-        for i in range(len(boundaries) - 1):
-            start = boundaries[i]
-            end = boundaries[i + 1]
-            
-            # Use original DataFrame to maintain all columns
-            segment = df.iloc[start:end].copy()
-            
-            # Only include segments that meet minimum length requirement
-            if min_segment_length is None or len(segment) >= min_segment_length:
-                segments.append(segment)
-        
-        return segments
-
-
-class WindowGenerator:
-    """
-    Generates windowed datasets from time series for machine learning models.
-    Handles input windows and label (target) windows with configurable offsets.
-    """
-    
-    def __init__(
-        self, 
-        input_width: int, 
-        label_width: int, 
-        shift: int,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-        test_df: pd.DataFrame,
-        label_columns=None,
-        batch_size: int = 64,
-        shuffle: bool = True,
-        exclude_labels_from_inputs: bool = True
-    ):
-        """
-        Initialize the window generator with the specified parameters.
-        """
-        # Store the raw data
-        self.train_df = train_df
-        self.val_df = val_df
-        self.test_df = test_df
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.exclude_labels_from_inputs = exclude_labels_from_inputs
-
-        # Work out the label column indices
-        self.label_columns = label_columns
-        if label_columns is not None:
-            self.label_columns_indices = {name: i for i, name in
-                                         enumerate(label_columns)}
-        self.column_indices = {name: i for i, name in
-                               enumerate(train_df.columns)}
-
-        # Work out the window parameters
-        self.input_width = input_width
-        self.label_width = label_width
-        self.shift = shift
-
-        self.total_window_size = input_width + shift
-
-        self.input_slice = slice(0, input_width)
-        self.input_indices = np.arange(self.total_window_size)[self.input_slice]
-
-        self.label_start = self.total_window_size - self.label_width
-        self.labels_slice = slice(self.label_start, None)
-        self.label_indices = np.arange(self.total_window_size)[self.labels_slice]
-        
-        # Set example as None initially
-        self._example = None
-
-    def __repr__(self):
-        """String representation of the WindowGenerator."""
-        return '\n'.join([
-            f'Total window size: {self.total_window_size}',
-            f'Input indices: {self.input_indices}',
-            f'Label indices: {self.label_indices}',
-            f'Label column name(s): {self.label_columns}'
-        ])
-    
-    def split_window(self, features):
-        """
-        Split a window of features into inputs and labels.
-        """
-        inputs = features[:, self.input_slice, :]
-        labels = features[:, self.labels_slice, :]
-        
-        if self.label_columns is not None:
-            # Extract the label columns
-            labels = tf.stack(
-                [labels[:, :, self.column_indices[name]] for name in self.label_columns],
-                axis=-1)
-                
-            # Remove label columns from inputs if requested
-            if hasattr(self, 'exclude_labels_from_inputs') and self.exclude_labels_from_inputs:
-                feature_indices = [i for i, name in enumerate(self.train_df.columns) 
-                                if name not in self.label_columns]
-                inputs = tf.gather(inputs, feature_indices, axis=2)
-
-        # Slicing doesn't preserve static shape information, so set the shapes manually
-        inputs.set_shape([None, self.input_width, None])
-        labels.set_shape([None, self.label_width, None if self.label_columns is None else len(self.label_columns)])
-
-        return inputs, labels
-    
-    def make_dataset(self, data):
-        """
-        Create a windowed tf.data.Dataset from a pandas DataFrame.
-        """
-        data = np.array(data, dtype=np.float32)
-        ds = tf.keras.utils.timeseries_dataset_from_array(
-            data=data,
-            targets=None,
-            sequence_length=self.total_window_size,
-            sequence_stride=1,
-            shuffle=self.shuffle,
-            batch_size=self.batch_size,
-            seed=get_seed())  # Use deterministic seed
-
-        ds = ds.map(self.split_window)
-        
-        # Apply deterministic options to dataset in a version-compatible way
-        try:
-            options = tf.data.Options()
-            options.experimental_deterministic = True
-            # Try setting auto shard policy if available
-            try:
-                options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.OFF
-            except:
-                pass
-            ds = ds.with_options(options)
-        except:
-            # If options aren't available, rely on seed for determinism
-            pass
-        
-        return ds
-    
-    @property
-    def train(self):
-        """Get the training dataset."""
-        return self.make_dataset(self.train_df)
-
-    @property
-    def val(self):
-        """Get the validation dataset."""
-        return self.make_dataset(self.val_df)
-
-    @property
-    def test(self):
-        """Get the test dataset."""
-        return self.make_dataset(self.test_df)
-
-    @property
-    def example(self):
-        """
-        Get and cache an example batch of `inputs, labels` for plotting.
-        """
-        result = getattr(self, '_example', None)
-        if result is None:
-            # No example batch was found, so get one from the `.train` dataset
-            result = next(iter(self.train))
-            # And cache it for next time
-            self._example = result
-        return result
-
-
-class SegmentedWindowGenerator:
-    """
-    Handles creating and combining WindowGenerator objects from segmented time series data.
-    """
-    
-    @staticmethod
-    @deterministic
-    def create_window_generators_from_segments(
-        segments, 
-        input_width, 
-        label_width, 
-        shift,
-        train_val_test_split=(0.7, 0.15, 0.15),
-        label_columns=None,
-        batch_size=32,
-        min_segment_length=None,
-        exclude_labels_from_inputs=True
-    ):
-        """
-        Creates WindowGenerator objects for each valid segment.
-        """
-        window_generators = []
-        min_required_length = input_width + shift
-        
-        # Calculate minimum samples needed for each split to create valid windows
-        min_train_samples = min_required_length
-        min_val_samples = min_required_length
-        min_test_samples = min_required_length
-        
-        # Calculate total minimum segment length based on split ratios
-        min_total_length = max(
-            min_required_length,
-            int(min_train_samples / train_val_test_split[0]),
-            int(min_val_samples / train_val_test_split[1]),
-            int(min_test_samples / train_val_test_split[2])
-        )
-        
-        # Ensure min_segment_length is at least min_total_length
-        if min_segment_length is None or min_segment_length < min_total_length:
-            min_segment_length = min_total_length
-        
-        print(f"Minimum segment length required: {min_segment_length}")
-        
-        for segment in segments:
-            # Skip segments that are too short
-            if len(segment) < min_segment_length:
-                continue
-                
-            # Split the segment into train, validation, and test sets
-            segment_len = len(segment)
-            train_len = int(segment_len * train_val_test_split[0])
-            val_len = int(segment_len * train_val_test_split[1])
-            
-            train_df = segment.iloc[:train_len]
-            val_df = segment.iloc[train_len:train_len+val_len]
-            test_df = segment.iloc[train_len+val_len:]
-            
-            # Double-check that each split has minimum required length
-            if len(train_df) < min_train_samples or len(val_df) < min_val_samples or len(test_df) < min_test_samples:
-                continue
-            
-            # Create a WindowGenerator for this segment
-            window_gen = WindowGenerator(
-                input_width=input_width,
-                label_width=label_width,
-                shift=shift,
-                train_df=train_df,
-                val_df=val_df,
-                test_df=test_df,
-                label_columns=label_columns,
-                batch_size=batch_size,
-                exclude_labels_from_inputs=exclude_labels_from_inputs
-            )
-            
-            window_generators.append(window_gen)
-        
-        return window_generators
-
-    @staticmethod
-    def combine_datasets(window_generators, buffer_size=1000):
-        """
-        Combines datasets from multiple WindowGenerator objects.
-        """
-        if not window_generators:
-            raise ValueError("No valid window generators found. All segments might be too small for the chosen parameters.")
-        
-        # Initialize with first window generator's datasets
-        combined = {
-            'train': window_generators[0].train,
-            'val': window_generators[0].val,
-            'test': window_generators[0].test
-        }
-        
-        # Add datasets from remaining window generators
-        for wg in window_generators[1:]:
-            combined['train'] = combined['train'].concatenate(wg.train)
-            combined['val'] = combined['val'].concatenate(wg.val)
-            combined['test'] = combined['test'].concatenate(wg.test)
-        
-        # Set deterministic options for each dataset in a version-compatible way
-        try:
-            options = tf.data.Options()
-            options.experimental_deterministic = True
-            # Try setting auto shard policy if available
-            try:
-                options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.OFF
-            except:
-                pass
-                
-            # Apply options if available
-            combined['train'] = combined['train'].shuffle(buffer_size, seed=get_seed()).with_options(options)
-            combined['val'] = combined['val'].with_options(options)
-            combined['test'] = combined['test'].with_options(options)
-        except:
-            # If options aren't available, at least use seed for shuffle
-            combined['train'] = combined['train'].shuffle(buffer_size, seed=get_seed())
-            # And continue with datasets as they are
-        
-        # Optionally rebatch to ensure consistent batch sizes
-        batch_size = window_generators[0].batch_size
-        combined['train'] = combined['train'].unbatch().batch(batch_size)
-        combined['val'] = combined['val'].unbatch().batch(batch_size) 
-        combined['test'] = combined['test'].unbatch().batch(batch_size)
-        
-        return combined
-    
-    @staticmethod
-    @deterministic
-    def create_complete_dataset_from_segments(
-        segments,
-        input_width,
-        label_width,
-        shift,
-        train_val_test_split=(0.7, 0.15, 0.15),
-        label_columns=None,
-        batch_size=32,
-        buffer_size=1000,
-        exclude_labels_from_inputs=True
-    ):
-        """
-        Creates a complete set of datasets from segmented time series.
-        """
-        # Create window generators for each segment
-        window_generators = SegmentedWindowGenerator.create_window_generators_from_segments(
-            segments=segments,
-            input_width=input_width,
-            label_width=label_width,
-            shift=shift,
-            train_val_test_split=train_val_test_split,
-            label_columns=label_columns,
-            batch_size=batch_size,
-            exclude_labels_from_inputs=exclude_labels_from_inputs
-        )
-        
-        # Combine the datasets
-        return SegmentedWindowGenerator.combine_datasets(
-            window_generators=window_generators,
-            buffer_size=buffer_size
-        )
 
 
 # Transformer positional encoding with deterministic behavior
@@ -790,39 +395,63 @@ def visualize_attention_weights(model, dataset, layer_idx=0, head_idx=0):
 
 @deterministic
 def main():
+    """
+    Main function to train and evaluate the ANN model with deterministic behavior.
+    Modified to use time windows for prediction similar to CNN-LSTM.
+    
+    Parameters:
+    -----------
+    run_id : str
+        Identifier for the run, used for saving models and plots
+        
+    Returns:
+    --------
+    tuple
+        R² scores (test, train) and RMSE scores (test, train)
+    """
+    # Set parameters
+    RANDOM_SEED = get_seed()
+    BATCH_SIZE = 32
+    
+    # Define window parameters (matching CNN-LSTM implementation)
+    INPUT_WIDTH = 8   # Use 8 time steps as input
+    LABEL_WIDTH = 1   # Predict 1 time step ahead
+    SHIFT = 1         # Predict 1 step ahead
+    EXCLUDE_LABEL = True  # Exclude labels in input features
+    
     # Set deterministic rendering for matplotlib
     import matplotlib as mpl
     mpl.rcParams['agg.path.chunksize'] = 10000
-    np.random.seed(get_seed())  # Ensure matplotlib's random operations use our seed
+    np.random.seed(RANDOM_SEED)  # Ensure matplotlib's random operations use our seed
     
-    # Set parameters for the model
-    INPUT_WIDTH = 4     # Use 4 time steps as input
-    LABEL_WIDTH = 1    # Predict 1 time step ahead
-    SHIFT = 1          # Predict 1 step ahead
-    BATCH_SIZE = 32   # Batch size for training
-    EXCLUDE_LABEL = True  # Exclude labels in input features
+    print(f"Starting windowed ANN model training with seed {RANDOM_SEED} (run_id: {run_id})")
     
-    # Load data
-    print("Loading data...")
-    data_dir = Path('./outputs/processed_data/merged/site/gap_filled_size1_with_era5')
-    data_list = list(data_dir.glob('*_merged.csv'))
+    # Load and preprocess data in a deterministic manner
+    data_dir = Path('./outputs/processed_data/merged/site/gap_filled_size1_hourly_after_filter')
+    data_list = list(data_dir.glob('*merged.csv'))
     
     if not data_list:
         print(f"No CSV files found in {data_dir}")
-        sys.exit(1)
+        try:
+            # Fallback to single file if no directory is found
+            data = pd.read_csv('./outputs/processed_data/merged/site/gap_filled_size1_with_era5/test.csv')
+            print("Using fallback test.csv file")
+        except:
+            print("ERROR: Could not find any data files")
+            return (0, 0), (0, 0)  # Return dummy values
+    else:
+        print(f"Found {len(data_list)} data files")
     
-    print(f"Found {len(data_list)} data files")
-    
+    # Process data files (similar to CNN-LSTM implementation)
+    all_segments = []
+    # Define the columns we want to use
+    used_cols = ['sap_velocity', 'ext_rad', 'sw_in', 'ta', 'ws', 'vpd','ppfd_in', 'biome', 'Day sin', 'Week sin', 'Month sin', 'Year sin']
+    all_biome_types = set()  # Will collect all unique biome types
+    all_possible_biome_types = ['Boreal forest', 'Subtropical desert', 'Temperate forest', 'Temperate grassland desert', 'Temperate rain forest', 'Tropical forest savanna', 'Tropical rain forest', 'Tundra', 'Woodland/Shrubland']
     # Sort data files for deterministic processing order
     data_list = sorted(data_list)
-    
-    # Process data files
-    all_segments = []
-    used_cols = ['sap_velocity','vpd', 'ta','rh','swc_shallow', 'ppfd_in', 'volumetric_soil_water_layer_4', 
-                'leaf_area_index_low_vegetation', 'soil_temperature_level_3', 'volumetric_soil_water_layer_3', 
-                'biome', 'swc_deep', 'u_component_of_wind_10m', 'v_component_of_wind_10m',] 
-    all_biome_types = set()  # Will collect all unique biome types
 
+    # Process each data file
     for data_file in data_list:
         print(f"Processing {data_file.name}")
         try:
@@ -840,22 +469,34 @@ def main():
             df.columns = [col.strip().lower() for col in df.columns]
             used_cols_lower = [col.lower() for col in used_cols]
             
-            # Process biome column
-            if 'biome' in df.columns:
-                # Store biome values to collect all types
-                all_biome_types.update(df['biome'].unique())
-                
-                # Get non-biome columns 
-                orig_cols = [col for col in used_cols_lower if col != 'biome']
-                
-                # Create dummy variables for biome with fixed random state and no dropping of first column
-                biome_df = pd.get_dummies(df['biome'], prefix='', prefix_sep='', dtype=float, drop_first=False)
-                
-                # Join with original data
-                df = df[orig_cols].join(biome_df)
-            else:
-                print(f"Warning: Missing biome column in {data_file.name}")
-                continue
+            # Select only the columns we need
+            available_cols = [col for col in used_cols_lower if col in df.columns]
+            df = df[available_cols]
+            
+            if 'biome' in used_cols_lower:
+                if 'biome' in df.columns:
+                    # Get non-biome columns 
+                    orig_cols = [col for col in used_cols_lower if col != 'biome']
+                    
+                    # Track which biome types are found in the data
+                    all_biome_types.update(df['biome'].unique())
+                    
+                    # Create a temporary biome column Series
+                    biome_series = df['biome']
+                    
+                    # Initialize a DataFrame with zeros for all possible biomes
+                    biome_df = pd.DataFrame(0.0, index=df.index, columns=all_possible_biome_types)
+                    
+                    # For each row, set the corresponding biome column to 1.0
+                    for idx, biome in biome_series.items():
+                        if biome in all_possible_biome_types:
+                            biome_df.loc[idx, biome] = 1.0
+                    
+                    # Join with original data
+                    df = df[orig_cols].join(biome_df)
+                else:
+                    print(f"Warning: Missing biome column in {data_file.name}")
+                    continue
             
             # Clean data (only once)
             df = df.replace([np.inf, -np.inf], np.nan)
@@ -865,12 +506,12 @@ def main():
                 print(f"Warning: {data_file.name} has too few records after cleaning: {len(df)}")
                 continue
             
-            # Segment the data
+            # Segment the data (just like in CNN-LSTM)
             segments = TimeSeriesSegmenter.segment_time_series(
                 df, 
                 gap_threshold=2, 
-                unit='days', 
-                min_segment_length=INPUT_WIDTH + SHIFT + 7
+                unit='hours', 
+                min_segment_length=INPUT_WIDTH + SHIFT
             )
             
             print(f"  Created {len(segments)} segments")
@@ -880,41 +521,73 @@ def main():
             print(f"Error processing {data_file.name}: {e}")
 
     if not all_segments:
-        print("No valid segments found. Check your data files.")
-        sys.exit(1)
+        print("No valid segments found. Falling back to single file mode.")
+        try:
+            # Fallback to single file processing
+            data = pd.read_csv('./outputs/processed_data/merged/site/gap_filled_size1_with_era5/test.csv')
+            data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
+            data = data.sort_values('TIMESTAMP').set_index('TIMESTAMP')
+            data = add_time_features(data)
+            
+            # Select only needed columns
+            columns = ['sap_velocity', 'sw_in', 'ext_rad', 'ta', 'ws', 'vpd', 'rh', 'ppfd_in']
+            # Use available columns
+            columns = [col for col in columns if col in data.columns]
+            data = data[columns].dropna()
+            
+            # Create a single segment
+            all_segments = [data]
+        except:
+            print("ERROR: Could not process any data.")
+            return (0, 0), (0, 0)  # Return dummy values
 
     print(f"Total segments collected: {len(all_segments)}")
-    print(f"All biome types found: {all_biome_types}")
-
-    # Sort all biome types for consistent column order
-    all_biome_types = sorted(all_biome_types)
-
-    # Ensure all segments have all biome types as columns in the same order
-    for segment in all_segments:
-        for biome_type in all_biome_types:
-            if biome_type not in segment.columns:
-                segment[biome_type] = 0.0
-     
-    # Standardize the data before windowing
-    all_data = pd.concat(all_segments)
     
+    if 'biome' in used_cols:
+        # Sort all biome types for consistent column order
+        all_biome_types = sorted(all_biome_types)
+        
+        # Log what biome types were actually found in the data
+        print(f"Biome types found in data: {all_biome_types}")
+        print(f"Missing biome types: {set(all_possible_biome_types) - all_biome_types}")
+
+    # Now standardize the data
+    all_data = pd.concat(all_segments)
+
     # Create scalers
     feature_scaler = StandardScaler()
     label_scaler = StandardScaler()
-    
-    # Get feature columns (excluding biome dummy columns and target)
-    base_feature_columns = [col for col in used_cols_lower if col != 'biome' and col != 'sap_velocity']
-    biome_columns = list(all_biome_types)
-    feature_columns = base_feature_columns + biome_columns
-    feature_scaler.fit(all_data[feature_columns])
+
+     # Get numerical and categorical feature columns
+    if 'biome' in used_cols:
+        numerical_features = [col for col in all_data.columns 
+                            if col != 'sap_velocity' and col not in all_possible_biome_types]
+        categorical_features = [col for col in all_possible_biome_types if col in all_data.columns]
+    else:
+        numerical_features = [col for col in all_data.columns if col != 'sap_velocity']
+        categorical_features = []
+
+    # Only fit scaler on numerical features
+    feature_scaler.fit(all_data[numerical_features])
     label_scaler.fit(all_data[['sap_velocity']])
-    
+    # save the scalers for later use
+    feature_scaler_path = Path('./outputs/scalers/feature_scaler.pkl')
+    label_scaler_path = Path('./outputs/scalers/label_scaler.pkl')
+    # Create directory if it doesn't exist
+    Path('./outputs/scalers').mkdir(parents=True, exist_ok=True)
+
+
+    joblib.dump(feature_scaler, feature_scaler_path)
+    joblib.dump(label_scaler, label_scaler_path)
     # Apply scaling to each segment
     scaled_segments = []
     for segment in all_segments:
         segment_copy = segment.copy()
-        segment_copy[feature_columns] = feature_scaler.transform(segment[feature_columns])
+        # Only transform numerical features
+        segment_copy[numerical_features] = feature_scaler.transform(segment[numerical_features])
+        # Leave categorical features as is
         segment_copy['sap_velocity'] = label_scaler.transform(segment[['sap_velocity']])
+        print(segment_copy.columns)
         scaled_segments.append(segment_copy)
     
     # Create windowed datasets
@@ -967,19 +640,19 @@ def main():
     # Define parameter grid for Transformer with deterministic settings
     param_grid = {
         'architecture': {
-            'd_model': [128],
-            'num_heads': [8],
-            'num_encoder_layers': [6],
-            'dff': [256],
+            'd_model': [32, 64],
+            'num_heads': [4, 8],
+            'num_encoder_layers': [2, 4],
+            'dff': [64],
             'dropout_rate': [0.3]
         },
         'optimizer': {
             'name': ['Adam'],
         },
         'training': {
-            'batch_size': BATCH_SIZE,
-            'epochs': 100,
-            'patience': 15
+            'batch_size': [BATCH_SIZE],
+            'epochs': 100, 
+            'patience': [20]
         }
     }
     
@@ -988,7 +661,7 @@ def main():
     optimizer = DLOptimizer(
         base_architecture=create_transformer_model,
         task='regression',
-        model_type='Transformer',
+        model_type='transformer',
         param_grid=param_grid,
         input_shape=(INPUT_WIDTH, n_features),
         output_shape=LABEL_WIDTH,
@@ -1190,14 +863,6 @@ def verify_determinism():
 
 
 if __name__ == "__main__":
-    # Test basic determinism system
-    print("Testing basic randomization system determinism...")
-    test_determinism()
-    
-    # Run the main function with deterministic controls
-    print("\nRunning main function with enhanced determinism...")
+    # Run the main function
     main()
     
-    # Verify pipeline determinism
-    print("\nVerifying pipeline determinism...")
-    result1, result2 = verify_determinism()

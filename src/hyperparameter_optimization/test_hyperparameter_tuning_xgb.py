@@ -2,15 +2,24 @@ import sys
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import numpy as np
-from xgboost.sklearn import XGBRegressor
+from sklearn.preprocessing import StandardScaler
+# Save the scalers
+import joblib
+
 # Add parent directory to Python path
 parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
+
 from src.hyperparameter_optimization.hyper_tuner import MLOptimizer
 from src.tools import create_spatial_groups
+# Import time series processing modules for windowing
+from src.hyperparameter_optimization.timeseries_processor import TimeSeriesSegmenter, SegmentedWindowGenerator
+
+# Set seed for reproducibility
+np.random.seed(42)
 
 def add_time_features(df, datetime_column=None):
     """
@@ -69,208 +78,371 @@ def add_time_features(df, datetime_column=None):
     df['Month sin'] = np.sin(timestamp_s * (2 * np.pi / month))
     df['Month cos'] = np.cos(timestamp_s * (2 * np.pi / month))
     
-    
     return df
 
+def main():
+    # Define window parameters (matching CNN-LSTM implementation)
+    INPUT_WIDTH = 8   # Use 8 time steps as input
+    LABEL_WIDTH = 1   # Predict 1 time step ahead
+    SHIFT = 1         # Predict 1 step ahead
+    BATCH_SIZE = 32   # Batch size (used by window generator)
+    
+    # Set parameters for matplotlib
+    plt.rcParams['agg.path.chunksize'] = 10000
+    np.random.seed(42)  # Ensure matplotlib's random operations use seed
+    
+    print("Starting XGBoost model training")
+    
+    # Load data - exactly as in CNN-LSTM
+    print("Loading data...")
+    data_dir = Path('./outputs/processed_data/merged/site/gap_filled_size1_hourly_after_filter')
+    data_list = list(data_dir.glob('*merged.csv'))
+    
+    if not data_list:
+        print(f"No CSV files found in {data_dir}")
+        sys.exit(1)
+    
+    print(f"Found {len(data_list)} data files")
+    
+    # Process data files
+    all_segments = []
+    used_cols = ['sap_velocity', 'ext_rad', 'sw_in', 'ta', 'ws', 'vpd','ppfd_in', 'biome', 'Day sin', 'Week sin', 'Month sin', 'Year sin']
+    ['sap_velocity', 'ext_rad', 'ta', 'vpd', 'biome', 'Day sin', 'Week sin', 'Month sin', 'Year sin']
+  
+    all_biome_types = set()  # Will collect all unique biome types
+    all_possible_biome_types = ['Boreal forest', 'Subtropical desert', 'Temperate forest', 'Temperate grassland desert', 'Temperate rain forest', 'Tropical forest savanna', 'Tropical rain forest', 'Tundra', 'Woodland/Shrubland']
+    # Sort data files for deterministic processing order
+    data_list = sorted(data_list)
 
-# Load and preprocess data
-data = pd.read_csv('./outputs/processed_data/merged/site/gap_filled_size1_with_era5/all_biomes_merged_data.csv').set_index('TIMESTAMP').sort_index().dropna()
-data = data[['sap_velocity','vpd', 'ta','swc_shallow', 'volumetric_soil_water_layer_4', 'leaf_area_index_low_vegetation', 'soil_temperature_level_3', 'volumetric_soil_water_layer_3', 'biome', 'swc_deep', 'u_component_of_wind_10m', 'v_component_of_wind_10m', 'latitude', 'longitude', 'site']]
-# Convert biome to categorical if it exists
-if 'biome' in data.columns:
-    data['biome'] = data['biome'].astype('category')
-if 'site' in data.columns:
-    data['site'] = data['site'].astype('category')
-# get dummy variables for the biome column
-data = pd.get_dummies(data, columns=['biome'])
-print(data.columns)
-data = add_time_features(data)
-
-training_portion = 0.8
-
-# Use positional indexing instead of label-based indexing
-training_data = data.iloc[:int(len(data)*training_portion)]
-test_data = data.iloc[int(len(data)*training_portion):]
-#training_data = data.sample(frac=0.8, random_state=42).sort_index()
-#b test_data = data.drop(training_data.index).sort_index()
-
-print(training_data.shape)
-X = training_data.drop(columns=['sap_velocity'])
-y = training_data['sap_velocity'].values
-X_test = test_data.drop(columns=['sap_velocity'])
-y_test = test_data['sap_velocity'].values
-
-
-
-param_grid = {
-    'reg_alpha': [1.0,],
-    'reg_lambda': [1.0],
-    # Use best values from Phase 1 for these parameters
-    'max_depth': [9],
-    'min_child_weight': [1],
-    'gamma': [0.1],
-    'subsample': [0.5],
-    'colsample_bytree': [0.6],
-    'colsample_bylevel': [0.9],
-    'learning_rate': [ 0.01],
-    'n_estimators': [500],
-    'enable_categorical': [True]
-}
-optimizer = MLOptimizer( param_grid=param_grid, scoring='neg_mean_squared_error', model_type='xgb', task='regression')
-optimizer.fit(X, y, split_type='temporal', is_shuffle=False)
-# print results
-print(optimizer.best_params_)
-print(optimizer.best_estimator_)
-print(optimizer.best_estimator_.score(X, y))
-print(optimizer.best_score_)
-print(optimizer.cv_results_)
-# use best parameters to train the model on the entire dataset
-
-
-# use the best model to predict on the test data
-y_pred = optimizer.best_estimator_.predict(X_test)
-# use the best model to predict on the training data
-y_train_pred = optimizer.best_estimator_.predict(X)
-
-# plot the results
-fig, ax = plt.subplots(2,1)
-ax[0].plot(test_data.index, y_test, label='True')
-ax[0].plot(test_data.index, y_pred, label='Predicted')
-ax[0].legend()
-ax[0].set_title('Test Data')
-ax[1].plot(training_data.index, y, label='True')
-ax[1].plot(training_data.index, y_train_pred, label='Predicted')
-ax[1].legend()
-ax[1].set_title('Training Data')
+    for data_file in data_list:
+        print(f"Processing {data_file.name}")
+        try:
+            df = pd.read_csv(data_file, parse_dates=['TIMESTAMP'])
+            df.set_index('TIMESTAMP', inplace=True)
+            df = add_time_features(df)
+            
+            # Verify columns exist
+            missing_cols = [col for col in used_cols if col not in df.columns]
+            if missing_cols:
+                print(f"Warning: Missing columns in {data_file.name}: {missing_cols}")
+                continue
+                
+            # Fix potential case/whitespace issues
+            df.columns = [col.strip().lower() for col in df.columns]
+            used_cols_lower = [col.lower() for col in used_cols]
+            df = df[used_cols_lower]
+            
+            # Define all possible biomes in your desired order
 
 
-# calculate the r2 score and mse and label on the plot
+            # Replace the current biome processing code with this:
+            if 'biome' in used_cols_lower:
+                if 'biome' in df.columns:
+                    # Get non-biome columns 
+                    orig_cols = [col for col in used_cols_lower if col != 'biome']
+                    
+                    # Track which biome types are found in the data
+                    all_biome_types.update(df['biome'].unique())
+                    
+                    # Create a temporary biome column Series
+                    biome_series = df['biome']
+                    
+                    # Initialize a DataFrame with zeros for all possible biomes
+                    biome_df = pd.DataFrame(0.0, index=df.index, columns=all_possible_biome_types)
+                    
+                    # For each row, set the corresponding biome column to 1.0
+                    for idx, biome in biome_series.items():
+                        if biome in all_possible_biome_types:
+                            biome_df.loc[idx, biome] = 1.0
+                    
+                    # Join with original data
+                    df = df[orig_cols].join(biome_df)
+                else:
+                    print(f"Warning: Missing biome column in {data_file.name}")
+                    continue
+            
+            # Clean data (only once)
+            df = df.replace([np.inf, -np.inf], np.nan)
+            df = df.dropna()
+            
+            if len(df) < INPUT_WIDTH + SHIFT:
+                print(f"Warning: {data_file.name} has too few records after cleaning: {len(df)}")
+                continue
+            
+            # Segment the data
+            segments = TimeSeriesSegmenter.segment_time_series(
+                df, 
+                gap_threshold=2, 
+                unit='hours', 
+                min_segment_length=INPUT_WIDTH + SHIFT
+            )
+            
+            print(f"  Created {len(segments)} segments")
+            all_segments.extend(segments)
+            
+        except Exception as e:
+            print(f"Error processing {data_file.name}: {e}")
 
-r2 = r2_score(y_test, y_pred)
-mse = mean_squared_error(y_test, y_pred)
-r2_train = r2_score(y, y_train_pred)
-mse_train = mean_squared_error(y, y_train_pred)
-ax[0].text(0.5, 0.5, f"R2: {r2:.2f}, MSE: {mse:.2f}", transform=ax[0].transAxes)
-ax[1].text(0.5, 0.5, f"R2: {r2_train:.2f}, MSE: {mse_train:.2f}", transform=ax[1].transAxes)
-# set a suptitle
-fig.suptitle('XGBoost Model Results')
-# layout the plot
-plt.tight_layout()
-plt.show()
+    if not all_segments:
+        print("No valid segments found. Check your data files.")
+        sys.exit(1)
 
-# Print results
-print(f"r2: {r2}, mse: {mse}")
-print(f"r2_train: {r2_train}, mse_train: {mse_train}")
-# save the plot
-fig.savefig('./plots/xgb_result.png')
+    print(f"Total segments collected: {len(all_segments)}")
+    print(f"All biome types found: {all_biome_types}")
 
-# make scatter plots for the predicted and true values
-fig1, ax = plt.subplots(2,1)
-ax[0].scatter(y_test, y_pred)
-# add a line for the perfect fit
-ax[0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--', lw=4)
-# add a line to fit the data
-m, b = np.polyfit(y_test, y_pred, 1)
-ax[0].plot(y_test, m*y_test + b, color='red')
-ax[0].set_title('Test Data')
-ax[0].set_xlabel('True')
-ax[0].set_ylabel('Predicted')
-ax[0].text(0.2, 0.8, f"R2: {r2:.2f}, MSE: {mse:.2f}", transform=ax[0].transAxes)
+    # Log what biome types were actually found in the data
+    print(f"Biome types found in data: {all_biome_types}")
+    print(f"Missing biome types: {set(all_possible_biome_types) - set(all_biome_types)}")
 
-ax[1].scatter(y, y_train_pred)
-# add a line for the perfect fit
-ax[1].plot([y.min(), y.max()], [y.min(), y.max()], 'k--', lw=4)
-# add a line to fit the data
-m, b = np.polyfit(y, y_train_pred, 1)
-ax[1].plot(y, m*y + b, color='red')
-ax[1].set_title('Training Data')
-ax[1].set_xlabel('True')
-ax[1].set_ylabel('Predicted')
-ax[1].text(0.2, 0.8, f"R2: {r2_train:.2f}, MSE: {mse_train:.2f}", transform=ax[1].transAxes)
-# set a suptitle
-fig1.suptitle('Scatter Plot of Predicted and True Values for XGBoost Model')
-# layout the plot
-plt.tight_layout()
 
-plt.show()
-# save the plot
-fig1.savefig('./plots/xgb_scatter.png')
-# Create and train the final model using the best parameters on the complete training set
-final_model = XGBRegressor(**optimizer.best_params_)
-final_model.fit(X, y)
+    # Now standardize the data
+    all_data = pd.concat(all_segments)
 
-# Predict on test set
-y_pred = final_model.predict(X_test)
+    # Create scalers
+    feature_scaler = StandardScaler()
+    label_scaler = StandardScaler()
 
-# Calculate metrics
-r2 = r2_score(y_test, y_pred)
-mse = mean_squared_error(y_test, y_pred)
-rmse = np.sqrt(mse)
+    # Get numerical and categorical feature columns
+    if 'biome' in used_cols:
+        numerical_features = [col for col in all_data.columns 
+                            if col != 'sap_velocity' and col not in all_possible_biome_types]
+        categorical_features = [col for col in all_possible_biome_types if col in all_data.columns]
+    else:
+        numerical_features = [col for col in all_data.columns if col != 'sap_velocity']
+        categorical_features = []
 
-# Print metrics
-print(f"Final Model Test Performance:")
-print(f"R²: {r2:.4f}")
-print(f"MSE: {mse:.4f}")
-print(f"RMSE: {rmse:.4f}")
+    # Only fit scaler on numerical features
+    feature_scaler.fit(all_data[numerical_features])
+    label_scaler.fit(all_data[['sap_velocity']])
+    # save the scalers for later use
+    feature_scaler_path = Path('./outputs/scalers/feature_scaler.pkl')
+    label_scaler_path = Path('./outputs/scalers/label_scaler.pkl')
+    # Create directory if it doesn't exist
+    Path('./outputs/scalers').mkdir(parents=True, exist_ok=True)
 
-# Feature importance analysis
-feature_importance = final_model.feature_importances_
-feature_names = X.columns
-sorted_idx = np.argsort(feature_importance)
-plt.figure(figsize=(10, 8))
-plt.barh(range(len(sorted_idx)), feature_importance[sorted_idx])
-plt.yticks(range(len(sorted_idx)), [feature_names[i] for i in sorted_idx])
-plt.xlabel('Feature Importance')
-plt.title('XGBoost Feature Importance')
-plt.tight_layout()
-plt.savefig('./plots/xgb_feature_importance.png')
-plt.show()
 
-# Time series plot showing actual vs predicted values
-plt.figure(figsize=(14, 7))
-plt.plot(test_data.index, y_test, label='Actual', color='blue', alpha=0.7)
-plt.plot(test_data.index, y_pred, label='Predicted', color='red', alpha=0.7)
-plt.title('Actual vs Predicted Sap Velocity Over Time')
-plt.xlabel('Date')
-plt.ylabel('Sap Velocity')
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.savefig('./plots/xgb_timeseries_prediction.png')
-plt.show()
+    joblib.dump(feature_scaler, feature_scaler_path)
+    joblib.dump(label_scaler, label_scaler_path)
+    # Apply scaling to each segment
+    scaled_segments = []
+    for segment in all_segments:
+        segment_copy = segment.copy()
+        # Only transform numerical features
+        segment_copy[numerical_features] = feature_scaler.transform(segment[numerical_features])
+        # Leave categorical features as is
+        segment_copy['sap_velocity'] = label_scaler.transform(segment[['sap_velocity']])
+        print(segment_copy.columns)
+        scaled_segments.append(segment_copy)
+    
+    # Create datasets with deterministic options
+    print("Creating windowed datasets...")
+    try:
+        # First attempt with regular split
+        datasets = SegmentedWindowGenerator.create_complete_dataset_from_segments(
+            segments=scaled_segments,
+            input_width=INPUT_WIDTH,
+            label_width=LABEL_WIDTH,
+            shift=SHIFT,
+            label_columns=['sap_velocity'],
+            train_val_test_split=(0.8, 0.1, 0.1),
+            batch_size=BATCH_SIZE,
+            exclude_labels_from_inputs=True
+        )
+    except ValueError as e:
+        print(f"Error with default split ratio: {e}")
+        print("Trying with an alternative split ratio...")
+        
+        # Second attempt with more balanced split
+        datasets = SegmentedWindowGenerator.create_complete_dataset_from_segments(
+            segments=scaled_segments,
+            input_width=INPUT_WIDTH,
+            label_width=LABEL_WIDTH,
+            shift=SHIFT,
+            label_columns=['sap_velocity'],
+            train_val_test_split=(0.8, 0.1, 0.1),
+            batch_size=BATCH_SIZE,
+            exclude_labels_from_inputs=False  # Include labels in inputs as a fallback
+        )
+    
+    train_ds = datasets['train']
+    val_ds = datasets['val']
+    test_ds = datasets['test']
 
-# Residual analysis
-residuals = y_test - y_pred
-plt.figure(figsize=(14, 7))
-plt.subplot(1, 2, 1)
-plt.scatter(y_pred, residuals)
-plt.axhline(y=0, color='r', linestyle='-')
-plt.xlabel('Predicted Values')
-plt.ylabel('Residuals')
-plt.title('Residual Plot')
-plt.grid(True, alpha=0.3)
+    # Check dataset properties
+    if train_ds is None:
+        print("ERROR: Could not create training dataset.")
+        sys.exit(1)
+    
+    # Print dataset shapes for debugging
+    print("Dataset shapes:")
+    for features_batch, labels_batch in train_ds:
+        print(f"Features batch shape: {features_batch.shape}")
+        print(f"Labels batch shape: {labels_batch.shape}")
+        break
+    
+    # Convert TensorFlow datasets to numpy arrays for XGBoost
+    def convert_tf_dataset_to_xy(dataset):
+        features_list = []
+        labels_list = []
+        
+        # Iterate through all batches in the dataset
+        for features_batch, labels_batch in dataset:
+            # Convert TensorFlow tensors to numpy arrays
+            features_list.append(features_batch.numpy())
+            labels_list.append(labels_batch.numpy())
+        
+        # Concatenate batches
+        X = np.concatenate(features_list, axis=0)
+        y = np.concatenate(labels_list, axis=0)
+        
+        # Reshape for XGBoost (flatten window dimension)
+        X_reshaped = X.reshape(X.shape[0], -1)
+        
+        # If labels are shape (batch, seq_len, features) and you need (batch, features)
+        if y.ndim > 2:
+            y = y.reshape(y.shape[0], -1)
+        
+        return X_reshaped, y.flatten()
 
-plt.subplot(1, 2, 2)
-plt.hist(residuals, bins=30, alpha=0.7)
-plt.xlabel('Residual Value')
-plt.ylabel('Frequency')
-plt.title('Residual Distribution')
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.savefig('./plots/xgb_residual_analysis.png')
-plt.show()
+    # Using the function to prepare data for XGBoost
+    X_train, y_train = convert_tf_dataset_to_xy(train_ds)
+    X_val, y_val = convert_tf_dataset_to_xy(val_ds)
+    X_test, y_test = convert_tf_dataset_to_xy(test_ds)
+    
+    print(f"Training data shape: X={X_train.shape}, y={y_train.shape}")
+    print(f"Validation data shape: X={X_val.shape}, y={y_val.shape}")
+    print(f"Test data shape: X={X_test.shape}, y={y_test.shape}")
+    
+    # Define XGBoost parameter grid
+    param_grid = {
+        'reg_alpha': [1.0],
+        'reg_lambda': [2.0],
+        'max_depth': [9],
+        'min_child_weight': [1],
+        'gamma': [0.1],
+        'subsample': [0.5],
+        'colsample_bytree': [0.8],
+        'learning_rate': [0.05],
+        'n_estimators': [1000],
+    }
 
-# Save the model for future use
-final_model.save_model('./models/xgb_final_model.json')
-print("Model saved to ./models/xgb_final_model.json")
+    # Train the model with optimization
+    print("Training XGBoost model with hyperparameter optimization...")
+    optimizer = MLOptimizer(
+        param_grid=param_grid, 
+        scoring='neg_mean_squared_error', 
+        model_type='xgb', 
+        task='regression',
+        random_state=42  # For reproducibility
+    )
+    
+    # Fit with validation data
+    optimizer.fit(
+        X_train, 
+        y_train,
+        X_val=X_val,
+        y_val=y_val,
+        is_cv=False,  # Don't use cross-validation
+        is_shuffle=False  # Don't shuffle time series data
+    )
+    
+    # Get best model
+    best_model = optimizer.best_estimator_
+    print(f"Best parameters: {optimizer.best_params_}")
+    print(f"Best validation score: {optimizer.best_score_}")
+    
+    # Predict on test data
+    y_pred_scaled = best_model.predict(X_test)
+    
+    # Get predictions on train data
+    y_train_pred_scaled = best_model.predict(X_train)
+    
+    # Inverse transform predictions to original scale
+    y_pred = label_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+    y_train_pred = label_scaler.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
+    
+    # Inverse transform labels to original scale for evaluation
+    y_test_actual = label_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+    y_train_actual = label_scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
+    
+    # Calculate metrics
+    r2 = r2_score(y_test_actual, y_pred)
+    mse = mean_squared_error(y_test_actual, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_test_actual, y_pred)
+    
+    r2_train = r2_score(y_train_actual, y_train_pred)
+    mse_train = mean_squared_error(y_train_actual, y_train_pred)
+    rmse_train = np.sqrt(mse_train)
+    mae_train = mean_absolute_error(y_train_actual, y_train_pred)
+    
+    print("\nModel Evaluation:")
+    print("=================")
+    print(f"R² Score (test): {r2:.6f}")
+    print(f"R² Score (train): {r2_train:.6f}")
+    
+    print("\nTest Metrics:")
+    print(f"MSE: {mse:.6f}")
+    print(f"RMSE: {rmse:.6f}")
+    print(f"MAE: {mae:.6f}")
+    
+    print("\nTrain Metrics:")
+    print(f"MSE: {mse_train:.6f}")
+    print(f"RMSE: {rmse_train:.6f}")
+    print(f"MAE: {mae_train:.6f}")
+    
+    # Create plots directory if it doesn't exist
+    plot_dir = Path('./plots')
+    plot_dir.mkdir(exist_ok=True)
+    
+    # Plot scatter plots for predictions vs actual
+    plt.figure(figsize=(10, 10))
+    plt.scatter(y_test_actual, y_pred, alpha=0.5)
+    plt.xlabel('True Values [Sap Velocity]')
+    plt.ylabel('Predictions [Sap Velocity]')
+    plt.axis('equal')
+    plt.axis('square')
+    plt.xlim([0, max(plt.xlim()[1], plt.ylim()[1])])
+    plt.ylim([0, max(plt.xlim()[1], plt.ylim()[1])])
+    plt.plot([-100, 100], [-100, 100])
+    plt.title('XGBoost Model: Test Predictions vs Actual')
+    plt.savefig(plot_dir / 'xgboost_test_predictions.png')
+    plt.close()
+    
+    # Plot predictions vs actual for training data
+    plt.figure(figsize=(10, 10))
+    plt.scatter(y_train_actual, y_train_pred, alpha=0.5)
+    plt.xlabel('True Values [Sap Velocity]')
+    plt.ylabel('Predictions [Sap Velocity]')
+    plt.axis('equal')
+    plt.axis('square')
+    plt.xlim([0, max(plt.xlim()[1], plt.ylim()[1])])
+    plt.ylim([0, max(plt.xlim()[1], plt.ylim()[1])])
+    plt.plot([-100, 100], [-100, 100])
+    plt.title('XGBoost Model: Training Predictions vs Actual')
+    plt.savefig(plot_dir / 'xgboost_train_predictions.png')
+    plt.close()
+    
+    # Plot error distribution for test data
+    error = y_pred - y_test_actual
+    plt.figure(figsize=(10, 7))
+    plt.hist(error, bins=25)
+    plt.xlabel('Prediction Error [Sap Velocity]')
+    plt.ylabel('Count')
+    plt.title('XGBoost Model: Test Error Distribution')
+    plt.savefig(plot_dir / 'xgboost_test_error_distribution.png')
+    plt.close()
+    
+    # Plot error distribution for training data
+    error_train = y_train_pred - y_train_actual
+    plt.figure(figsize=(10, 7))
+    plt.hist(error_train, bins=25)
+    plt.xlabel('Prediction Error [Sap Velocity]')
+    plt.ylabel('Count')
+    plt.title('XGBoost Model: Training Error Distribution')
+    plt.savefig(plot_dir / 'xgboost_train_error_distribution.png')
+    plt.close()
+    
 
-# Optional: Create a performance summary table
-prediction_df = pd.DataFrame({
-    'Date': test_data.index,
-    'Actual': y_test,
-    'Predicted': y_pred,
-    'Residual': residuals,
-    'Squared_Error': residuals**2
-})
-prediction_df.to_csv('./outputs/xgb_predictions.csv')
-print("Predictions saved to ./outputs/xgb_predictions.csv")
+if __name__ == "__main__":
+    main()

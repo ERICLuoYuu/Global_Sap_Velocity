@@ -568,6 +568,7 @@ class SapFlowAnalyzer:
                     return None, None, None, None
              
             # Apply time zone adjustment with better error handling
+            '''
             try:
                 df['TIMESTAMP'] = df['TIMESTAMP'].apply(
                     lambda x: adjust_time_to_utc(x, time_zone, time_zone_map) if pd.notna(x) else x
@@ -591,7 +592,7 @@ class SapFlowAnalyzer:
             except Exception as e:
                 print(f"Error saving timezone adjusted data: {str(e)}")
                 # Continue anyway as this is not critical
-            
+            '''
             # Find and load flags file
             flags = None
             flag_file = file.parent / f"{file.stem.replace('_data', '_flags')}.csv"

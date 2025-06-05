@@ -120,11 +120,7 @@ def _process_env_variable_plot(args):
             outliers_df = None
             
         # Create figure with two subplots: main plot and monthly boxplot
-        fig = plt.figure(figsize=(figsize[0], figsize[1] * 1.5))
-        gs = plt.GridSpec(2, 1, height_ratios=[3, 1])
-        
-        # Main time series plot
-        ax1 = fig.add_subplot(gs[0])
+        fig, ax1 = plt.subplots(figsize=figsize, constrained_layout=True)
         
         # Get valid data
         valid_data = data[variable].dropna()
@@ -178,59 +174,6 @@ def _process_env_variable_plot(args):
                     transform=ax1.transAxes, va='top',
                     bbox=dict(facecolor='white', alpha=0.8))
             
-            # Monthly boxplot in second subplot - grouped by month name only
-            ax2 = fig.add_subplot(gs[1])
-
-            # Group by month name (Jan, Feb, etc.) regardless of year
-            valid_data_with_month = valid_data.copy()
-            month_indices = valid_data.index.month  # Extract just the month number (1-12)
-
-            # Define month names
-            month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-            # Group the data by month number
-            monthly_boxplot_data = []
-            month_labels = []
-
-            # Process each month (1-12)
-            for month_num in range(1, 13):  # 1 to 12
-                # Get data for this month across all years
-                month_data = valid_data[month_indices == month_num].values
-                month_data = [v for v in month_data if pd.notna(v)]
-                
-                if len(month_data) > 0:  # Only add months that have data
-                    monthly_boxplot_data.append(month_data)
-                    month_labels.append(month_names[month_num-1])
-
-            # Only proceed if we have data to plot
-            if monthly_boxplot_data:
-                # Create the boxplot with improved visual settings
-                bp = ax2.boxplot(monthly_boxplot_data, labels=month_labels, 
-                            patch_artist=True, showfliers=False)
-                
-                # Customize boxplot appearance
-                for box in bp['boxes']:
-                    box.set(color='blue', linewidth=1)
-                    box.set(facecolor='lightblue', alpha=0.7)
-                for whisker in bp['whiskers']:
-                    whisker.set(color='blue', linewidth=1)
-                for cap in bp['caps']:
-                    cap.set(color='blue', linewidth=1)
-                for median in bp['medians']:
-                    median.set(color='red', linewidth=1.5)
-                
-                ax2.set_title('Monthly Distribution (all years combined)')
-                ax2.set_xlabel('Month')
-                ax2.set_ylabel(variable)
-                
-                # Set ylim to match the main plot for consistency
-                ax2.set_ylim(ax1.get_ylim())
-                
-                # Add grid for easier reading
-                ax2.grid(axis='y', linestyle='--', alpha=0.7)
-            
-            plt.tight_layout()
             
             if save_dir:
                 filename = f"{variable}.png"
@@ -298,7 +241,7 @@ def _process_env_file(args):
         
         # Rename columns as needed
         df = df.rename(columns=column_mapping)
-        
+        '''
         # Try to locate corresponding env_md data
         time_zone_file = file_path.parent / f"{file_path.stem.replace('env_data', 'env_md')}.csv"
         
@@ -321,7 +264,7 @@ def _process_env_file(args):
                 time_zone = "UTC"
                 
         print(f"Using time zone: {time_zone}")
-        
+        '''
         # Make timestamps into datetime objects with better error handling
         for col in ['TIMESTAMP', 'solar_TIMESTAMP']:
             if col in df.columns:
@@ -334,7 +277,7 @@ def _process_env_file(args):
                     print(f"Error converting {col} to datetime: {str(e)}")
                     if col == 'TIMESTAMP':  # Only TIMESTAMP is required
                         return None, None, None, None
-         
+        ''' 
         # Apply time zone adjustment with better error handling
         try:
             df['TIMESTAMP'] = df['TIMESTAMP'].apply(
@@ -364,7 +307,7 @@ def _process_env_file(args):
         except Exception as e:
             print(f"Error saving timezone adjusted data: {str(e)}")
             # Continue anyway as this is not critical
-        
+        '''
         # Get site coordinates if available
         try:
             site_md_file = file_path.parent / f"{file_path.stem.replace('_env_data', '_site_md')}.csv"
@@ -394,9 +337,11 @@ def _process_env_file(args):
                 for col in ['TIMESTAMP']:
                     if col in flags.columns:
                         flags[col] = pd.to_datetime(flags[col], errors='coerce')
+                        '''
                         flags[col] = flags[col].apply(
                             lambda x: adjust_time_to_utc(x, time_zone, time_zone_map) if pd.notna(x) else x
                         )
+                        '''
                 print(f"Successfully loaded flags from {flag_file}")
             except Exception as e:
                 print(f"Error loading flags file {flag_file}: {str(e)}")
@@ -486,16 +431,16 @@ def _process_numeric_column(args):
 
 def _process_column_for_flags(args):
     """Process a single column for flag-based filtering"""
-    col, df, flags, output_dir = args
+    col, df, flags, output_dir, location, plant_type = args
     flag_col = [fcol for fcol in flags.columns if col in fcol]
     if not flag_col:
         return col, None
     
-    warn_mask = flags[flag_col[0]].astype(str).str.contains('OUT_WARN|RANGE_WARN', na=False)
+    warn_mask = flags[flag_col[0]].astype(str).str.contains('RANGE_WARN', na=False)
     if warn_mask.any():
         # Export filtered points
         filtered_data = df.loc[warn_mask, col]
-        filtered_data.to_csv(output_dir / f"{col}_flaged.csv")
+        filtered_data.to_csv(output_dir / f"{location}_{plant_type}_{col}_flagged.csv")
         return col, warn_mask
     return col, None
 
@@ -797,7 +742,7 @@ class EnvironmentalAnalyzer:
                     output_dir.mkdir(parents=True, exist_ok=True)
                     
                     # Process columns in parallel
-                    process_args = [(col, df, flags, output_dir) for col in data_cols]
+                    process_args = [(col, df, flags, output_dir, location, plant_type) for col in data_cols]
                     with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                         results = list(executor.map(_process_column_for_flags, process_args))
                     
@@ -814,7 +759,7 @@ class EnvironmentalAnalyzer:
                 except Exception as e:
                     print(f"Error during flag processing: {str(e)}")
                     # Continue without flag filtering
-            
+           
             # Process outliers in parallel
             try:
                 # Create processed directory for outliers
@@ -846,7 +791,7 @@ class EnvironmentalAnalyzer:
                 print(f"Error in outlier processing:")
                 print(traceback.format_exc())
                 # Continue without outlier processing
-            
+     
             # Create daily dataframe
             try:
                 # Create processed directory

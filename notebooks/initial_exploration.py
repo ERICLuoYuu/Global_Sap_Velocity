@@ -7,6 +7,8 @@ if parent_dir not in sys.path:
 import time
 from src.Analyzers import sap_analyzer_parallel
 from src.Analyzers import env_analyzer_parallel
+from src.Analyzers import sap_analyzer
+from src.Analyzers import env_analyzer
 
 
    
@@ -17,7 +19,8 @@ if __name__ == "__main__":
     start_time = time.time()
     # Initialize analyzer
     # analyzer = sap_analyzer_parallel.SapFlowAnalyzer(max_workers=8)
-    env_analyzer_parallel = env_analyzer_parallel.EnvironmentalAnalyzer(max_workers=8)
+    # env_analyzer_parallel = env_analyzer_parallel.EnvironmentalAnalyzer(max_workers=8)
+    env_analyzer = env_analyzer.EnvironmentalAnalyzer()
     
     """
     # Print available sites and their basic info
@@ -58,7 +61,7 @@ if __name__ == "__main__":
     '''
     summary = env_analyzer_parallel.plot_all_parallel(
         figsize=(15, 8),
-        save_dir='./outputs/figures/env/cleaned',
+        save_dir='./outputs/figures/env/cleaned(out_warn_removed)',
         skip_empty=True,
         plot_limit=10,  # limit plots per location
         progress_update=True
@@ -66,6 +69,15 @@ if __name__ == "__main__":
     
     print(summary)
     '''
+    summary = env_analyzer.plot_all (
+        figsize=(15, 8),
+        save_dir='./outputs/figures/env/cleaned',
+        skip_empty=True,
+        plot_limit=10,  # limit plots per location
+        progress_update=True
+    )
+    
+    print(summary)
     '''
     # Collect all DataFrames
     all_dfs = []
@@ -76,5 +88,5 @@ if __name__ == "__main__":
             print(f"Added DataFrame for {location}_{plant_type}")
     
     # Find common columns
-    common_cols = env_analyzer_parallel.get_common_columns(all_dfs)
+    common_cols = env_analyzer.get_common_columns(all_dfs)
     '''

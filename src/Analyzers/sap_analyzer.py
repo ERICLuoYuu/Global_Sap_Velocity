@@ -54,6 +54,7 @@ class SapFlowAnalyzer:
                 time_zone = tz_df['env_time_zone'].iloc[0]
                 time_zone_map = create_timezone_mapping()
                 # Apply the time zone adjustment to the entire column at once
+                '''
                 df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
                 df['solar_TIMESTAMP'] = pd.to_datetime(df['solar_TIMESTAMP'])
                 df['TIMESTAMP'] = df['TIMESTAMP'].apply(lambda x: adjust_time_to_utc(x, time_zone, time_zone_map))
@@ -62,6 +63,7 @@ class SapFlowAnalyzer:
                 if not output_dir.exists():
                     output_dir.mkdir(parents=True, exist_ok=True)
                 df.to_csv(output_dir / f'{file.stem}_adjusted.csv')
+                '''
                 # Load corresponding flags file
                 flag_file = file.parent / f"{file.stem.replace('_data', '_flags')}.csv"
                 if flag_file.exists():

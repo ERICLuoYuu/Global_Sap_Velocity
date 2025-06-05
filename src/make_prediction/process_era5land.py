@@ -22,9 +22,10 @@ import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
 import rasterio
 from rasterio.warp import transform_bounds, transform
-
+import gc
 # Import configuration
 import config
+import traceback
 
 # Try optional libraries
 try:
@@ -66,17 +67,6 @@ class ERA5LandProcessor:
     # Define Whittaker biome classification thresholds
     # Format: (temp_min, temp_max, precip_min, precip_max)
     # Temperatures in °C, precipitation in mm/year
-    BIOME_CLIMATE_THRESHOLDS = {
-        'Tropical rain forest': (20, 30, 2000, 10000),
-        'Tropical forest savanna': (20, 30, 1000, 2000),
-        'Subtropical desert': (15, 30, 0, 250),
-        'Temperate rain forest': (5, 18, 1500, 3000),
-        'Temperate forest': (5, 20, 750, 1500),
-        'Woodland/Shrubland': (8, 20, 250, 750),
-        'Temperate grassland desert': (0, 20, 0, 500),
-        'Boreal forest': (-5, 5, 300, 750),
-        'Tundra': (-15, 0, 0, 250)
-    }
     
     def __init__(self, data_dir=None, temp_dir=None, create_client=None, memory_limit=None, 
                  temp_climate_file=None, precip_climate_file=None):
@@ -131,9 +121,7 @@ class ERA5LandProcessor:
         # Initialize variable datasets
         self.datasets = {}
         
-        # Store biome data
-        self.biome_data = None
-        self.biome_kdtree = None
+
         
         # Check available system utilities
         self.has_gunzip = self._check_command("gunzip")
@@ -1426,66 +1414,7 @@ class ERA5LandProcessor:
             traceback.print_exc()
             return None, None
 
-    def determine_biome_from_climate(self, temp, precip):
-        """
-        Determine biome type based on temperature and precipitation values
-        using Whittaker biome classification.
-        
-        Parameters:
-        -----------
-        temp : float
-            Annual mean temperature in °C
-        precip : float
-            Annual mean precipitation in mm/year
-            
-        Returns:
-        --------
-        str
-            Biome type
-        """
-        # Default biome if no match is found
-        default_biome = 'Temperate forest'
-        
-        # Handle missing values
-        if np.isnan(temp) or np.isnan(precip):
-            print(f"Missing climate data: temp={temp}, precip={precip}")
-            return default_biome
-        
-        # Check each biome's climate thresholds
-        for biome, (temp_min, temp_max, precip_min, precip_max) in self.BIOME_CLIMATE_THRESHOLDS.items():
-            if temp_min <= temp <= temp_max and precip_min <= precip <= precip_max:
-                return biome
-        
-        # If no exact match, find the closest biome by climate distance
-        min_distance = float('inf')
-        closest_biome = default_biome
-        
-        for biome, (temp_min, temp_max, precip_min, precip_max) in self.BIOME_CLIMATE_THRESHOLDS.items():
-            # Use the midpoint of each range
-            biome_temp = (temp_min + temp_max) / 2
-            biome_precip = (precip_min + precip_max) / 2
-            
-            # Calculate Euclidean distance in normalized climate space
-            # Normalize temperature to 0-1 range over -15 to 30°C
-            temp_range = 45  # -15 to 30°C
-            temp_min = -15
-            temp_norm = (temp - temp_min) / temp_range
-            biome_temp_norm = (biome_temp - temp_min) / temp_range
-            
-            # Normalize precipitation to 0-1 range over 0 to 3000mm
-            precip_max = 3000
-            precip_norm = min(precip / precip_max, 1.0)  # Cap at 1.0 for very high precipitation
-            biome_precip_norm = min(biome_precip / precip_max, 1.0)
-            
-            # Calculate distance in this normalized space
-            distance = np.sqrt((temp_norm - biome_temp_norm)**2 + (precip_norm - biome_precip_norm)**2)
-            
-            if distance < min_distance:
-                min_distance = distance
-                closest_biome = biome
-        
-        print(f"No exact biome match for temp={temp}, precip={precip}. Using closest: {closest_biome}")
-        return closest_biome
+    
 
     def get_climate_at_location(self, lon, lat):
         """
@@ -1683,110 +1612,7 @@ class ERA5LandProcessor:
             traceback.print_exc()
             return None, None
     
-    def get_biome_at_location(self, lon, lat):
-        """
-        Get the biome type at a specific location using climate data.
-        
-        Parameters:
-        -----------
-        lon, lat : float
-            Coordinates of the location
-            
-        Returns:
-        --------
-        str
-            Biome type at the location
-        """
-        # First try using climate data to determine biome
-        try:
-            # Get climate values at the location
-            temperature, precipitation = self.get_climate_at_location(lon, lat)
-            
-            # Determine biome from climate
-            biome_type = self.determine_biome_from_climate(temperature, precipitation)
-            
-            return biome_type
-        
-        except Exception as e:
-            print(f"Error determining biome from climate at ({lon}, {lat}): {str(e)}")
-            
-            # Fall back to the original method if biome_data is available
-            if self.biome_data is not None:
-                try:
-                    # Use existing shapefile lookup method from the original implementation
-                    # First try the fast KDTree approach
-                    if self.biome_kdtree is not None:
-                        # Find nearest biome centroid
-                        dist, idx = self.biome_kdtree.query((lon, lat))
-                        biome_type = self.biome_data.iloc[idx]['biome_type']
-                        
-                        # Verify with point-in-polygon for the nearest and its neighbors
-                        if 'biome_type' in self.biome_data.columns:
-                            # Create a point geometry
-                            from shapely.geometry import Point
-                            point = Point(lon, lat)
-                            
-                            # Check if point is in the nearest polygon
-                            if self.biome_data.iloc[idx].geometry.contains(point):
-                                return self.biome_data.iloc[idx]['biome_type']
-                            
-                            # If not in the nearest, check neighbors
-                            distances, indices = self.biome_kdtree.query((lon, lat), k=5)
-                            for i in indices:
-                                if self.biome_data.iloc[i].geometry.contains(point):
-                                    return self.biome_data.iloc[i]['biome_type']
-                        
-                        # If no polygon contains the point, return the nearest biome type
-                        return biome_type
-                    
-                    # Fallback to direct spatial query (slower)
-                    from shapely.geometry import Point
-                    point = Point(lon, lat)
-                    
-                    # Find biomes that contain the point
-                    contains_point = self.biome_data.contains(point)
-                    if contains_point.any():
-                        biome_type = self.biome_data[contains_point].iloc[0]['biome_type']
-                        return biome_type
-                    
-                    # If point is not in any polygon, find the nearest
-                    distances = self.biome_data.distance(point)
-                    nearest_idx = distances.idxmin()
-                    return self.biome_data.loc[nearest_idx, 'biome_type']
-                
-                except Exception as inner_e:
-                    print(f"Error in shapefile fallback: {str(inner_e)}")
-            
-            # If all else fails, return a default biome type
-            print(f"Using default biome for location ({lon}, {lat})")
-            return "Temperate forest"
     
-    
-    def create_biome_one_hot(self, biome_type):
-        """
-        Create one-hot encoding for a biome type.
-        
-        Parameters:
-        -----------
-        biome_type : str
-            Biome type to encode
-            
-        Returns:
-        --------
-        dict
-            Dictionary with one-hot encoded biome features
-        """
-        result = {}
-        
-        # Initialize all biome types to 0
-        for biome in config.BIOME_TYPES:
-            result[biome] = 0.0
-        
-        # Set the matching biome to 1
-        if biome_type in result:
-            result[biome_type] = 1.0
-        
-        return result
     
     def add_time_features(self, df):
         """
@@ -1830,290 +1656,122 @@ class ERA5LandProcessor:
         
         return df
     
-    def save_datasets_to_file(self, year, month, output_dir=None):
+    
+    def flatten_time_dimensions(self, preserve_original=False):
         """
-        Save the complete datasets to files with multiple fallback approaches
-        and enhanced error handling.
+        Flatten time and step dimensions in ERA5-Land datasets to create a single datetime dimension.
+        
+        This function processes all datasets in self.datasets to combine the time (date) and 
+        step (time in a day) dimensions into a single datetime dimension, making the data easier
+        to work with for time series analysis.
         
         Parameters:
         -----------
-        year : int
-            Year to save data for
-        month : int
-            Month to save data for
-        output_dir : str or Path, optional
-            Directory to save data to (defaults to temp_dir)
-                
+        preserve_original : bool, optional
+            If True, preserves the original datasets in a separate attribute
+            
         Returns:
         --------
-        list
-            List of saved file paths
+        dict
+            Dictionary containing the flattened datasets
         """
-        import gc
-        
         if not self.datasets:
-            print("No datasets to save")
-            return []
+            print("No datasets to flatten")
+            return {}
         
-        def sanitize_filename(name):
-            """Sanitize a string to be used as a filename."""
-            # Replace invalid characters with underscores
-            invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', ' ']
-            for char in invalid_chars:
-                name = name.replace(char, '_')
-            return name
+        # Save original datasets if requested
+        if preserve_original:
+            self.original_datasets = self.datasets.copy()
         
-
-        # Create the base output directory if it doesn't exist
-        output_base_dir = Path(output_dir).absolute() if output_dir else Path(self.temp_dir).absolute()
-        output_base_dir.mkdir(parents=True, exist_ok=True)
-        
-        
-        saved_files = []
-        derived_variables = ['wind_speed', 'vpd', 'ppfd_in', 'ext_rad']
-        
+        # Process each dataset
+        flattened_datasets = {}
         for var_name, ds in self.datasets.items():
-            if var_name not in derived_variables:
-                print(f"Skipping {var_name} as it's not in the save list")
+            print(f"\nFlattening time dimensions for {var_name}...")
+            
+            # Check if dataset has both time and step dimensions
+            has_time = 'time' in ds.dims
+            has_step = 'step' in ds.dims
+            
+            if not (has_time and has_step):
+                print(f"Dataset {var_name} does not have both time and step dimensions - skipping")
+                flattened_datasets[var_name] = ds
                 continue
-                    
+            
             try:
-                # Sanitize variable name for file path
-                safe_var_name = sanitize_filename(var_name)
+                # Find the main data variable in the dataset
+                data_vars = list(ds.data_vars)
+                if not data_vars:
+                    print(f"No data variables found in {var_name} dataset - using dataset directly")
+                    # For GRIB format, data might be directly in dataset
+                    da = ds.to_array().squeeze()
+                else:
+                    # Use the first data variable
+                    main_var = data_vars[0]
+                    da = ds[main_var]
                 
-                # Create simplified output path
-                output_path = output_base_dir / f"{safe_var_name}_{year}_{month:02d}"
-                output_path.mkdir(parents=True, exist_ok=True)
-                
-                # Define output file
-                nc_file = output_path / f"{safe_var_name}.grib"
-                
-                print(f"Saving {var_name} data to {output_path}...")
-                print(f"Dataset variables: {list(ds.data_vars)}")
-                print(f"Dataset dimensions: {dict(ds.dims)}")
-                print(f"Dataset chunks: {getattr(ds, 'chunks', None)}")
-                
-                # Force garbage collection before heavy operations
-                gc.collect()
-                
-                # APPROACH 0: Try a simple test path first
-                test_path = Path('/tmp') if os.name != 'nt' else Path(os.environ.get('TEMP', 'C:/temp'))
-                test_path.mkdir(exist_ok=True)
-                test_file = test_path / f"{safe_var_name}_test.grib"
-                
-                try:
-                    print(f"Attempting test save to {test_file}...")
-                    to_grib(ds, test_file)
-                    print(f"Test save succeeded to {test_file}")
-                    # Clean up test file
-                    if os.path.exists(test_file):
-                        os.remove(test_file)
-                except Exception as e:
-                    print(f"Test save failed: {str(e)}")
-                    print("This suggests a problem with the dataset structure rather than the path")
-                
-                # APPROACH 1: Save as CSV first (most robust format)
-                try:
-                    print("Attempting to save as CSV first...")
-                    csv_dir = output_path / "csv_data"
-                    csv_dir.mkdir(exist_ok=True, parents=True)
+                # Create valid_time coordinate if it doesn't exist
+                if 'valid_time' not in da.coords:
+                    print("Creating valid_time coordinate")
+                    # Create valid_time by adding step to time
+                    times = da.coords['time'].values[:, None]
+                    steps = da.coords['step'].values[None, :]
+                    valid_time = times + steps
                     
-                    for var in ds.data_vars:
-                        csv_file = csv_dir / f"{sanitize_filename(var)}.csv"
-                        # Convert to dataframe and save as CSV
-                        df = ds[var].to_dataframe()
-                        df.to_csv(csv_file)
-                        print(f"Saved data for {var} as CSV: {csv_file}")
-                        saved_files.append(csv_file)
-                    
-                    # Create a manifest file to document the CSV export
-                    with open(csv_dir / "README.txt", "w") as f:
-                        f.write(f"Dataset: {var_name}\n")
-                        f.write(f"Year: {year}, Month: {month}\n")
-                        f.write(f"Variables: {', '.join(ds.data_vars)}\n")
-                        f.write(f"Dimensions: {dict(ds.dims)}\n")
-                        f.write("Export date: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
-                    
-                    print("CSV backup saved successfully. Now trying NetCDF formats...")
-                except Exception as e:
-                    print(f"CSV save failed: {str(e)}")
+                    # Assign the new coordinate
+                    da = da.assign_coords(valid_time=(('time', 'step'), valid_time))
                 
-                # APPROACH 2: Try with explicit chunking
-                try:
-                    print("Attempting to save with explicit chunking...")
-                    
-                    # Calculate reasonable chunk sizes (e.g., 1 time step, full lat/lon)
-                    chunk_dict = {'time': 1}
-                    for dim in ds.dims:
-                        if dim != 'time':
-                            chunk_dict[dim] = ds.dims[dim]
-                    
-                    print(f"Using explicit chunk sizes: {chunk_dict}")
-                    chunked_ds = ds.chunk(chunk_dict)
-                    
-                    # Try to save with explicit encoding
-                    encoding = {}
-                    for var in chunked_ds.data_vars:
-                        # Set up encoding for each variable
-                        encoding[var] = {
-                            'zlib': True,
-                            'complevel': 1,  # Lower compression for speed
-                            'chunksizes': [chunk_dict.get(dim, 1) for dim in chunked_ds[var].dims],
-                            '_FillValue': np.nan
-                        }
-                    
-                    print("Saving with explicit encoding...")
-                    chunked_ds.to_netcdf(
-                        nc_file,
-                        mode='w',
-                        engine='netcdf4',
-                        encoding=encoding,
-                        compute=True
+                # Stack the time and step dimensions
+                print("Stacking time and step dimensions")
+                stacked_da = da.stack(datetime=('time', 'step'))
+                
+                # Use the valid_time values as the datetime coordinate
+                flat_time = da.valid_time.stack(datetime=('time', 'step'))
+                stacked_da = stacked_da.assign_coords(datetime=flat_time.values)
+                
+                # Sort by the datetime coordinate for time series consistency
+                stacked_da = stacked_da.sortby('datetime')
+                
+                # Create a new dataset with the same metadata
+                if data_vars:
+                    flat_ds = xr.Dataset(
+                        data_vars={main_var: stacked_da},
+                        attrs=ds.attrs
                     )
-                    print(f"Successfully saved with explicit chunking to {nc_file}")
-                    saved_files.append(nc_file)
-                    continue
-                except Exception as e:
-                    print(f"Explicit chunking save failed: {str(e)}")
-                
-                # APPROACH 3: Use optimized chunking (saves complete data)
-                try:
-                    print("Attempting to save with default settings...")
-                    
-                    # Save with basic settings - full dataset
-                    ds.to_netcdf(
-                        nc_file,
-                        mode='w',
-                        engine='netcdf4',
-                        compute=True  # Ensures the operation completes
+                else:
+                    # If original dataset had no data variables, create with proper name
+                    flat_ds = xr.Dataset(
+                        data_vars={var_name: stacked_da},
+                        attrs=ds.attrs
                     )
-                    print(f"Successfully saved complete dataset to {nc_file}")
-                    saved_files.append(nc_file)
-                    continue
-                except Exception as e:
-                    print(f"Default save failed: {str(e)}")
                 
-                # APPROACH 4: Try to save as zarr directory (more robust for large datasets)
-                try:
-                    print("Attempting to save as zarr directory...")
-                    zarr_dir = output_path / f"{safe_var_name}.zarr"
-                    
-                    # Remove directory if it exists (zarr requires this)
-                    if os.path.exists(zarr_dir):
-                        import shutil
-                        shutil.rmtree(zarr_dir)
-                    
-                    # Save as zarr
-                    ds.to_zarr(zarr_dir)
-                    print(f"Successfully saved as zarr directory: {zarr_dir}")
-                    saved_files.append(zarr_dir)
-                    continue
-                except Exception as e:
-                    print(f"Zarr save failed: {str(e)}")
+                # Add to the result dictionary
+                flattened_datasets[var_name] = flat_ds
+                print(f"Successfully flattened {var_name} dataset")
                 
-                # APPROACH 5: Use scipy engine (simpler but reliable)
-                try:
-                    print("Attempting to save with scipy engine...")
-                    
-                    # Try saving with scipy engine
-                    simple_nc = output_path / f"{safe_var_name}_scipy.nc"
-                    ds.to_netcdf(simple_nc, engine='scipy')
-                    print(f"Successfully saved with scipy engine to {simple_nc}")
-                    saved_files.append(simple_nc)
-                    continue
-                except Exception as e:
-                    print(f"Scipy engine save failed: {str(e)}")
-                
-                # APPROACH 6: Split by variable for complex datasets
-                try:
-                    print("Attempting to save by splitting variables...")
-                    success = False
-                    
-                    for var in ds.data_vars:
-                        # Extract single variable dataset
-                        single_var_ds = ds[var].to_dataset()
-                        var_file = output_path / f"{sanitize_filename(var)}.nc"
-                        
-                        # Try different engines
-                        for engine in ['netcdf4', 'h5netcdf', 'scipy']:
-                            try:
-                                print(f"Trying to save {var} with {engine} engine...")
-                                single_var_ds.to_netcdf(var_file, engine=engine)
-                                print(f"Saved variable {var} to {var_file} with {engine} engine")
-                                saved_files.append(var_file)
-                                success = True
-                                break
-                            except Exception as e_inner:
-                                print(f"  Failed with {engine} engine: {str(e_inner)}")
-                    
-                    if success:
-                        continue
-                except Exception as e:
-                    print(f"Split variable save failed: {str(e)}")
-                
-                # APPROACH 7: Last resort - save in a different format
-                try:
-                    print("Attempting to save in HDF5 format...")
-                    import h5py
-                    
-                    h5_file = output_path / f"{safe_var_name}.h5"
-                    
-                    with h5py.File(h5_file, 'w') as f:
-                        # Create a group for this dataset
-                        grp = f.create_group(safe_var_name)
-                        
-                        # Add metadata
-                        grp.attrs['year'] = year
-                        grp.attrs['month'] = month
-                        
-                        # Save coordinates
-                        coords_grp = grp.create_group('coordinates')
-                        for coord_name, coord_data in ds.coords.items():
-                            coords_grp.create_dataset(coord_name, data=coord_data.values)
-                        
-                        # Save variables
-                        vars_grp = grp.create_group('variables')
-                        for var in ds.data_vars:
-                            # Get the data array
-                            data_array = ds[var]
-                            
-                            # Convert to numpy and handle missing values
-                            data = data_array.values
-                            
-                            # Create the dataset
-                            dset = vars_grp.create_dataset(var, data=data)
-                            
-                            # Add variable attributes
-                            for attr_name, attr_val in data_array.attrs.items():
-                                if attr_val is not None:
-                                    try:
-                                        dset.attrs[attr_name] = attr_val
-                                    except:
-                                        # Some attributes might not be convertible to HDF5
-                                        pass
-                    
-                    print(f"Successfully saved as HDF5: {h5_file}")
-                    saved_files.append(h5_file)
-                    continue
-                except Exception as e:
-                    print(f"HDF5 save failed: {str(e)}")
-                
-                print("All attempts to save this dataset have failed")
+                # Calculate the size of the flattened variable in MB
+                if data_vars:
+                    size_mb = flat_ds[main_var].nbytes / 1024**2
+                    flat_ds[main_var].attrs['size'] = size_mb
+                    print(f"Flattened {var_name} size: {size_mb:.2f} MB")
                 
             except Exception as e:
-                print(f"Error processing {var_name}: {str(e)}")
+                print(f"Error flattening {var_name} dataset: {str(e)}")
                 import traceback
                 traceback.print_exc()
+                # Keep the original dataset
+                flattened_datasets[var_name] = ds
         
-        # Final garbage collection
-        gc.collect()
+        # Update the class datasets
+        self.datasets = flattened_datasets
         
-        return saved_files
-    
-    def create_prediction_dataset(self, start_date, end_date, points=None, region=None):
+        return flattened_datasets
+
+
+    def create_prediction_dataset(self, start_date, end_date, points=None, region=None, output_dir=None, lat_chunk_size=50, lon_chunk_size=100, time_chunk_size=96):
         """
         Create a dataset ready for prediction by extracting data for the required time period.
-        
+        Processes large regions in spatio-temporal-longitude chunks to avoid memory errors.
+
         Parameters:
         -----------
         start_date : str or datetime
@@ -2124,397 +1782,572 @@ class ERA5LandProcessor:
             List of points to extract data for [{lat, lon, name}, ...]
         region : dict, optional
             Region to extract data for, if no points are specified
-            
+        output_dir : str or Path, optional
+            Base directory to save output files (defaults to config.PREDICTION_DIR)
+        lat_chunk_size : int, optional
+            Number of latitude rows to process in each spatial chunk (default: 50)
+        lon_chunk_size : int, optional
+            Number of longitude columns per spatial chunk (default: 100)
+        time_chunk_size : int, optional
+            Number of time steps per temporal chunk (default: 96)
+
         Returns:
         --------
-        pandas.DataFrame
-            DataFrame with features ready for prediction
+        list of str or list of pandas.DataFrame
+            - If processing a region: Returns a list of file paths where each latitude chunk DataFrame was saved.
+            - If processing points: Returns a list of pandas DataFrames, one for each point.
+            Returns None if no data can be processed or if processing fails.
         """
+        # --- Initial Setup ---
+        start_time_total = time.time()
+        print(f"Starting dataset creation for {start_date} to {end_date}")
+
         # Convert dates to datetime objects
-        start_date = pd.to_datetime(start_date)
-        end_date = pd.to_datetime(end_date)
-        
-        # Set default region if not specified
-        if region is None:
-            region = {
-                'lat_min': config.DEFAULT_LAT_MIN,
-                'lat_max': config.DEFAULT_LAT_MAX,
-                'lon_min': config.DEFAULT_LON_MIN,
-                'lon_max': config.DEFAULT_LON_MAX
-            }
-        
-        # Make sure climate data is loaded for biome determination
-        if hasattr(self, 'temp_climate_file') and hasattr(self, 'precip_climate_file'):
-            if not hasattr(self, 'temp_climate_data') or not hasattr(self, 'precip_climate_data'):
-                self.load_climate_data()
-        
-        # Load data for each month in the range
-        all_data = []
-        current_date = start_date
-        
-        while current_date <= end_date:
-            year = current_date.year
-            month = current_date.month
-            
-            print(f"\nProcessing data for {year}-{month:02d}...")
-            
-            # Load variable data
-            self.load_variable_data(config.REQUIRED_VARIABLES, year, month, region)
-            # check if derived variables are already calculated
-            if not all(var in self.datasets for var in ['wind_speed', 'vpd', 'ppfd_in', 'ext_rad']):
-                # Calculate derived variables
-                self.calculate_derived_variables()
-                # Flatten time dimensions for easier analysis
-                self.flatten_time_dimensions()
-                for var_name, ds in self.datasets.items():
-                    print(f"\nDataset '{var_name}' structure:")
-                    print(f"- Coordinates: {list(ds.coords)}")
-                    print(f"- Data variables: {list(ds.data_vars)}")
-                    if list(ds.data_vars):
-                        main_var = list(ds.data_vars)[0]
-                        print(f"- Main data variable: {main_var}")
-                        print(f"- Data shape: {ds[main_var].shape}")
-                # Optionally, save the datasets to a file
-                # self.save_datasets_to_file(year, month)
-
-            # Select only the variables needed for prediction
-            prediction_vars = []
-            for era5_name, model_name in config.VARIABLE_RENAME.items():
-                if era5_name in self.datasets:
-                    prediction_vars.append(era5_name)
-            
-            if not prediction_vars:
-                print(f"No valid data found for {year}-{month:02d}")
-                # Move to the next month
-                if current_date.month == 12:
-                    current_date = pd.Timestamp(current_date.year + 1, 1, 1)
-                else:
-                    current_date = pd.Timestamp(current_date.year, current_date.month + 1, 1)
-                continue
-            
-            # Create DataArrays for each point or grid cell
-            if points:
-                # Extract data for specific points
-                for point in points:
-                    point_data = {}
-                    point_data['name'] = point.get('name', f"Point_{point['lat']}_{point['lon']}")
-                    point_data['latitude'] = point['lat']
-                    point_data['longitude'] = point['lon']
-                    
-                    # Get biome for this point using climate-based method
-                    if config.BIOME_FEATURES:
-                        biome_type = self.get_biome_at_location(point['lon'], point['lat'])
-                        biome_features = self.create_biome_one_hot(biome_type)
-                        point_data.update(biome_features)
-                    
-                    # Extract time series for each variable
-                    for var_name in prediction_vars:
-                        try:
-                            ds = self.datasets[var_name]
-                            
-                            # Find the data variable in the dataset
-                            data_var = None
-                            for var in ds.data_vars:
-                                data_var = var
-                                break
-                            
-                            if data_var:
-                                # Extract the nearest grid cell
-                                ts = ds[data_var].sel(
-                                    latitude=point['lat'],
-                                    longitude=point['lon'],
-                                    method='nearest'
-                                )
-                                print(ts)
-                                # Convert to pandas Series
-                                series = ts.to_numpy()
-                                series = pd.Series(series)
-                                
-                                # Rename to model variable name
-                                model_name = config.VARIABLE_RENAME.get(var_name, var_name)
-                                point_data[model_name] = series
-                            else:
-                                print(f"No data variable found in {var_name} dataset")
-                        except Exception as e:
-                            print(f"Error extracting {var_name} for point {point_data['name']}: {str(e)}")
-                    
-                    # Create DataFrame from the point data
-                    df = pd.DataFrame(point_data)
-                    
-                    # Set datetime index
-                    if 'time' in df.columns:
-                        df = df.set_index('time')
-                    
-                    # Add time features if configured
-                    if config.TIME_FEATURES:
-                        df = self.add_time_features(df)
-                    
-                    # Add to the list
-                    all_data.append(df)
-            else:
-                # Extract data for entire region
-                # First, build a common grid
-                lat_var = None
-                lon_var = None
-                time_var = None
-                
-                # Use the first dataset to get coordinate variables
-                first_ds = self.datasets[prediction_vars[0]]
-                for var in first_ds.coords:
-                    if var.lower() in ['latitude', 'lat']:
-                        lat_var = var
-                    elif var.lower() in ['longitude', 'lon']:
-                        lon_var = var
-                    elif var.lower() in ['datetime']:
-                        time_var = var
-                
-                if not all([lat_var, lon_var, time_var]):
-                    print("Could not identify coordinate variables")
-                    # Move to the next month
-                    if current_date.month == 12:
-                        current_date = pd.Timestamp(current_date.year + 1, 1, 1)
-                    else:
-                        current_date = pd.Timestamp(current_date.year, current_date.month + 1, 1)
-                    continue
-                
-                # Get the grid coordinates
-                lats = first_ds[lat_var].values
-                lons = first_ds[lon_var].values
-                times = first_ds[time_var].values
-                
-                # For each grid cell, create a DataFrame
-                for lat_idx, lat in enumerate(lats):
-                    for lon_idx, lon in enumerate(lons):
-                        grid_data = {}
-                        grid_data['name'] = f"Grid_{lat}_{lon}"
-                        grid_data['latitude'] = lat
-                        grid_data['longitude'] = lon
-                        
-                        # Get biome for this grid cell using climate-based method
-                        if config.BIOME_FEATURES:
-                            biome_type = self.get_biome_at_location(lon, lat)
-                            biome_features = self.create_biome_one_hot(biome_type)
-                            grid_data.update(biome_features)
-                        
-                        # Extract time series for each variable
-                        for var_name in prediction_vars:
-                            try:
-                                ds = self.datasets[var_name]
-                                
-                                # Find the data variable in the dataset
-                                data_var = None
-                                for var in ds.data_vars:
-                                    data_var = var
-                                    break
-                                
-                                if data_var:
-                                    # Extract the grid cell
-                                    print(ds[data_var])
-                                    # Try setting Dask to use memory instead of disk
-                                    with dask.config.set({'temporary_directory': None, 'local_directory': None}):
-                                        ts = ds[data_var].sel(
-                                            latitude=lat,
-                                            longitude=lon,
-                                            method='nearest'
-                                        )
-                                        result = ts.compute()
-                                        series = pd.Series(result.values, index=ts.datetime.values)
-                                    
-                                    # Rename to model variable name
-                                    model_name = config.VARIABLE_RENAME.get(var_name, var_name)
-                                    grid_data[model_name] = series
-                                else:
-                                    print(f"No data variable found in {var_name} dataset")
-                            except Exception as e:
-                                print(f"Error extracting {var_name} for grid cell ({lat}, {lon}): {str(e)}, Error type: {type(e).__name__}")
-                        
-                        # Create DataFrame from the grid data
-                        df = pd.DataFrame(grid_data)
-                        
-                        # Set datetime index
-                        if 'time' in df.columns:
-                            df = df.set_index('time')
-                        
-                        # Add time features if configured
-                        if config.TIME_FEATURES:
-                            df = self.add_time_features(df)
-                        
-                        # Add to the list
-                        all_data.append(df)
-            
-            # Move to the next month
-            if current_date.month == 12:
-                current_date = pd.Timestamp(current_date.year + 1, 1, 1)
-            else:
-                current_date = pd.Timestamp(current_date.year, current_date.month + 1, 1)
-        
-        # Combine all DataFrames
-        if all_data:
-            print(f"Combining {len(all_data)} datasets...")
-            # Combine by concatenating (for points) or by merging with multi-index (for grid)
-            if points:
-                # For points, keep each point separate
-                result = all_data
-            else:
-                # For grid, combine with multi-index
-                result = pd.concat(all_data)
-            
-            print(f"Created prediction dataset with {len(result)} rows")
-            return result
-        else:
-            print("No data found for the specified time period")
+        try:
+            start_date = pd.to_datetime(start_date)
+            end_date = pd.to_datetime(end_date)
+            # Ensure end_date includes the whole day if just a date is given
+            if end_date.normalize() == end_date: # Checks if time part is midnight
+                 end_date = end_date + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            print(f"Processing time range: {start_date} to {end_date}")
+        except Exception as e:
+            print(f"Error parsing start/end dates: {e}")
             return None
-    
-    def save_prediction_dataset(self, df, output_path=None):
-        """
-        Save the prediction dataset to a file.
-        
-        Parameters:
-        -----------
-        df : pandas.DataFrame or list of DataFrames
-            Prediction dataset(s) to save
-        output_path : str or Path, optional
-            Path to save the dataset to
-            
-        Returns:
-        --------
-        str or list
-            Path(s) to the saved file(s)
-        """
-        if output_path is None:
-            output_path = config.PREDICTION_DIR / f"prediction_dataset_{int(time.time())}.csv"
-        
-        output_path = Path(output_path)
-        output_path.parent.mkdir(exist_ok=True, parents=True)
-        
-        if isinstance(df, list):
-            # Multiple DataFrames (points)
-            saved_paths = []
-            for i, single_df in enumerate(df):
-                name = single_df.get('name', f"point_{i}").iloc[0] if 'name' in single_df.columns else f"point_{i}"
-                file_path = output_path.parent / f"{output_path.stem}_{name}{output_path.suffix}"
-                
-                single_df.to_csv(file_path)
-                print(f"Saved dataset to {file_path}")
-                saved_paths.append(str(file_path))
-            
-            return saved_paths
-        else:
-            # Single DataFrame
-            df.to_csv(output_path)
-            print(f"Saved dataset to {output_path}")
-            return str(output_path)
 
-def visualize_biome_map(climate_processor, region=None, resolution=100, output_file=None):
-    """
-    Create a biome map visualization based on climate data.
-    
-    Parameters:
-    -----------
-    climate_processor : ERA5LandProcessor
-        Processor instance with loaded climate data
-    region : dict, optional
-        Region to visualize (lat_min, lat_max, lon_min, lon_max)
-    resolution : int, optional
-        Number of points in each dimension
-    output_file : str, optional
-        File path to save the map image
-    """
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import ListedColormap
-    import matplotlib.patches as mpatches
-    
-    # Make sure climate data is loaded
-    if not hasattr(climate_processor, 'temp_climate_data') or not hasattr(climate_processor, 'precip_climate_data'):
-        climate_processor.load_climate_data()
-    
-    # Set default region if not specified
-    if region is None:
-        region = {
-            'lat_min': config.DEFAULT_LAT_MIN,
-            'lat_max': config.DEFAULT_LAT_MAX,
-            'lon_min': config.DEFAULT_LON_MIN,
-            'lon_max': config.DEFAULT_LON_MAX
-        }
-    
-    # Create a grid of points for the region
-    lats = np.linspace(region['lat_min'], region['lat_max'], resolution)
-    lons = np.linspace(region['lon_min'], region['lon_max'], resolution)
-    lon_grid, lat_grid = np.meshgrid(lons, lats)
-    
-    # Create arrays to hold biome data
-    biome_map = np.empty(lon_grid.shape, dtype=object)
-    biome_map.fill("Unknown")
-    
-    # Define colors for each biome
-    biome_colors = {
-        'Tropical rain forest': '#004529',  # Dark green
-        'Tropical forest savanna': '#238443',  # Medium green
-        'Subtropical desert': '#ffe0b2',  # Light orange/tan
-        'Temperate rain forest': '#7fcdbb',  # Teal
-        'Temperate forest': '#41ab5d',  # Medium-light green
-        'Woodland/Shrubland': '#a1d99b',  # Light green
-        'Temperate grassland desert': '#fdae61',  # Light orange
-        'Boreal forest': '#2166ac',  # Blue
-        'Tundra': '#d1e5f0',  # Light blue/gray
-        'Unknown': '#f7f7f7'  # White/light gray
-    }
-    
-    # Numerical mapping for biomes
-    unique_biomes = list(climate_processor.BIOME_CLIMATE_THRESHOLDS.keys()) + ['Unknown']
-    biome_to_index = {biome: i for i, biome in enumerate(unique_biomes)}
-    biome_index_map = np.zeros(lon_grid.shape, dtype=int)
-    
-    # For each point in the grid, determine the biome
-    for i in range(resolution):
-        for j in range(resolution):
-            lat = lat_grid[i, j]
-            lon = lon_grid[i, j]
-            
-            # Get the biome at this location
-            biome = climate_processor.get_biome_at_location(lon, lat)
-            biome_map[i, j] = biome
-            biome_index_map[i, j] = biome_to_index.get(biome, len(unique_biomes) - 1)  # Default to 'Unknown'
-    
-    # Create a colormap from the biome colors
-    colors = [biome_colors.get(biome, '#f7f7f7') for biome in unique_biomes]
-    cmap = ListedColormap(colors)
-    
-    # Plot the biome map
-    plt.figure(figsize=(12, 10))
-    plt.pcolormesh(lon_grid, lat_grid, biome_index_map, cmap=cmap, shading='auto')
-    
-    # Add coastlines or borders if available
-    try:
-        from cartopy import crs as ccrs
-        from cartopy.feature import COASTLINE, BORDERS
-        
-        ax = plt.axes(projection=ccrs.PlateCarree())
-        ax.add_feature(COASTLINE, linewidth=0.5)
-        ax.add_feature(BORDERS, linewidth=0.3, linestyle=':')
-    except ImportError:
-        plt.xlabel('Longitude')
-        plt.ylabel('Latitude')
-    
-    # Create a legend
-    legend_patches = []
-    for biome, color in biome_colors.items():
-        if biome in climate_processor.BIOME_CLIMATE_THRESHOLDS:
-            patch = mpatches.Patch(color=color, label=biome)
-            legend_patches.append(patch)
-    
-    plt.legend(handles=legend_patches, loc='lower left', bbox_to_anchor=(1.01, 0),
-               title='Whittaker Biomes', frameon=True)
-    
-    plt.title('Climate-based Biome Classification')
-    plt.tight_layout()
-    
-    # Save the figure if requested
-    if output_file:
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
-        print(f"Biome map saved to {output_file}")
-    
-    plt.show()
+        # Determine processing mode and define region if needed
+        if points:
+            processing_mode = 'points'
+            print(f"Processing mode: Specific points ({len(points)})")
+            if region is None:
+                 all_lats = [p['lat'] for p in points]
+                 all_lons = [p['lon'] for p in points]
+                 region = {
+                     'lat_min': min(all_lats) - 0.1, 'lat_max': max(all_lats) + 0.1,
+                     'lon_min': min(all_lons) - 0.1, 'lon_max': max(all_lons) + 0.1
+                 }
+                 print(f"Region automatically determined from points: {region}")
+            else:
+                 print(f"Using provided region for point data loading: {region}")
+        else:
+            processing_mode = 'region'
+            print("Processing mode: Region")
+            if region is None:
+                 region = {
+                     'lat_min': getattr(config, 'DEFAULT_LAT_MIN', 0), 'lat_max': getattr(config, 'DEFAULT_LAT_MAX', 0),
+                     'lon_min': getattr(config, 'DEFAULT_LON_MIN', 0), 'lon_max': getattr(config, 'DEFAULT_LON_MAX', 0)
+                 }
+            print(f"Processing for region: Lat({region.get('lat_min', 'N/A')} to {region.get('lat_max', 'N/A')}), Lon({region.get('lon_min', 'N/A')} to {region.get('lon_max', 'N/A')})")
+
+        # Set default output directory
+        if output_dir is None:
+            output_dir = getattr(config, 'PREDICTION_DIR', Path('./prediction_output'))
+        output_dir = Path(output_dir)
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Using output directory: {output_dir.resolve()}")
+        except Exception as e:
+            print(f"Error creating output directory {output_dir}: {e}")
+            return None
+
+        # --- End Initial Setup ---
+
+
+        # --- Monthly Data Loading and Combination ---
+        all_monthly_data = []
+        # Generate date range covering the start and end months
+        month_iterator = pd.date_range(start=start_date.replace(day=1), end=end_date.replace(day=1), freq='MS')
+
+        required_vars = getattr(config, 'REQUIRED_VARIABLES', [])
+        if not required_vars:
+            print("Error: config.REQUIRED_VARIABLES is not defined or empty.")
+            return None
+
+        for current_month_start in month_iterator:
+            year = current_month_start.year
+            month = current_month_start.month
+            print(f"\nProcessing data loading for {year}-{month:02d}...")
+
+            # Ensure load_variable_data exists and works
+            try:
+                 # Load variable data for the current month
+                 monthly_datasets = self.load_variable_data(required_vars, year, month, region)
+            except AttributeError:
+                 print("Error: self.load_variable_data method not found.")
+                 return None
+            except Exception as e_load:
+                 print(f"Error during load_variable_data for {year}-{month}: {e_load}")
+                 monthly_datasets = None # Ensure it's None if loading fails
+
+            if not monthly_datasets:
+                print(f"No primary data loaded for {year}-{month:02d}. Skipping month.")
+                continue
+
+            # Set self.datasets for the methods below to operate on
+            self.datasets = monthly_datasets
+
+            # Calculate derived variables
+            print(f"Calculating derived variables for {year}-{month:02d}...")
+            try: self.calculate_derived_variables() # Operates on self.datasets
+            except AttributeError: print("Warning: calculate_derived_variables method not found.")
+            except Exception as e_deriv: print(f"Warning: Error calculating derived variables: {e_deriv}")
+
+            # Flatten time dimensions
+            print(f"Flattening time dimensions for {year}-{month:02d}...")
+            try: self.flatten_time_dimensions() # Operates on self.datasets
+            except AttributeError: print("Warning: flatten_time_dimensions method not found.")
+            except Exception as e_flat: print(f"Warning: Error flattening time dimensions: {e_flat}")
+
+            # Store the processed datasets for this month
+            all_monthly_data.append(self.datasets.copy())
+            print(f"Finished processing for {year}-{month:02d}")
+
+
+        if not all_monthly_data:
+            print("No data could be processed for the entire date range.")
+            return None
+
+        # --- Combine Monthly Data ---
+        print("\nCombining data across all months...")
+        combined_datasets = {}
+        all_vars = sorted(list(set(k for month_data in all_monthly_data for k in month_data.keys())))
+
+        for var_name in all_vars:
+            # ... (Combination logic with two attempts - 'no_conflicts' then attribute cleaning) ...
+            # (Copied from previous correct version - ensure it's placed here)
+            print(f"--- Combining variable: {var_name} ---")
+            datasets_to_concat = [
+                month_data[var_name]
+                for month_data in all_monthly_data
+                if var_name in month_data and month_data[var_name] is not None
+            ]
+
+            if datasets_to_concat:
+                print(f"Found {len(datasets_to_concat)} monthly datasets for {var_name}")
+                combined_success = False
+                try:
+                    # Attempt 1: Concatenate with 'no_conflicts'
+                    print(f"Attempting xr.concat for {var_name} (compat='no_conflicts')...")
+                    uses_dask = any(hasattr(ds, 'chunks') and ds.chunks for ds in datasets_to_concat)
+                    if uses_dask:
+                         first_chunks = datasets_to_concat[0].chunks
+                         if first_chunks and any(ds.chunks != first_chunks for ds in datasets_to_concat[1:] if hasattr(ds, 'chunks')):
+                              print(f"  Detected inconsistent chunks for {var_name}. Rechunking to match first dataset.")
+                              datasets_to_concat = [ds.chunk(first_chunks) if hasattr(ds,'chunks') and ds.chunks != first_chunks else ds for ds in datasets_to_concat]
+
+                    combined_ds = xr.concat(
+                        datasets_to_concat, dim='datetime', join='inner',
+                        compat='no_conflicts', coords='minimal'
+                    )
+                    combined_datasets[var_name] = combined_ds
+                    print(f"Combined {var_name} successfully (Attempt 1).")
+                    combined_success = True
+
+                except TypeError as te:
+                    if "unhashable type: 'Frozen'" not in str(te):
+                        print(f"TypeError combining {var_name} (compat='no_conflicts'): {te}. Skipping.")
+                        continue # Skip this variable
+                    print(f"Caught 'unhashable type: Frozen' with compat='no_conflicts'. Will try cleaning attributes.")
+                except Exception as e:
+                    print(f"Error combining {var_name} with compat='no_conflicts': {type(e).__name__} - {e}. Will try cleaning attributes.")
+
+                if not combined_success:
+                    # Attempt 2: Clean Attributes and Retry
+                    print(f"Attempting xr.concat for {var_name} after cleaning attributes...")
+                    try:
+                        cleaned_datasets = []
+                        for ds in datasets_to_concat:
+                            ds_copy = ds.copy(deep=False); ds_copy.attrs = {}
+                            for var in ds_copy.variables: ds_copy[var].attrs = {}
+                            cleaned_datasets.append(ds_copy)
+
+                        combined_ds_cleaned = xr.concat(
+                            cleaned_datasets, dim='datetime', join='inner',
+                            compat='override', coords='minimal'
+                        )
+                        combined_datasets[var_name] = combined_ds_cleaned
+                        print(f"Combined {var_name} successfully after cleaning attributes (Attempt 2).")
+
+                    except Exception as e_clean:
+                        print(f"Error combining {var_name} even after cleaning attributes: {type(e_clean).__name__} - {e_clean}. Skipping this variable.")
+            else:
+                print(f"No monthly datasets found for {var_name} to combine.")
+        # --- End Combination Loop ---
+
+        if not combined_datasets:
+            print("Failed to combine any variables across months.")
+            self.datasets = {}
+            return None
+
+        self.datasets = combined_datasets
+        print("Finished combining monthly data.")
+        # --- End Monthly Data Loading and Combination ---
+
+
+        # --- Prepare for Prediction Data Extraction ---
+        # Use getattr for safe access to VARIABLE_RENAME
+        var_rename_map = getattr(config, 'VARIABLE_RENAME', {})
+        prediction_vars = [era5_name for era5_name in var_rename_map if era5_name in self.datasets]
+        # Include variables that might not be renamed but are in datasets
+        for var_name in self.datasets:
+             if var_name not in prediction_vars and var_name not in var_rename_map.values():
+                  prediction_vars.append(var_name) # Add variables not in rename map
+
+        if not prediction_vars:
+            print("No variables available for prediction after combining months.")
+            return None
+        print(f"Variables prepared for extraction: {prediction_vars}")
+        # --- End Prepare ---
+
+
+        # --- Branch based on processing mode ---
+        if processing_mode == 'points':
+            # --- Process Specific Points ---
+            print(f"\nExtracting data for {len(points)} specified points...")
+            final_data_frames = []
+            for point_idx, point in enumerate(points):
+                # ... (Point processing logic - copied from previous correct version) ...
+                point_name = point.get('name', f"Point_{point['lat']:.4f}_{point['lon']:.4f}")
+                print(f"Processing point {point_idx + 1}/{len(points)}: {point_name} ({point['lat']:.4f}, {point['lon']:.4f})")
+                point_timeseries_static = {'name': point_name, 'latitude': point['lat'], 'longitude': point['lon']}
+                
+
+                valid_point_data = True
+                first_var_time_coord = None
+                lazy_arrays = {}
+
+                for var_name in prediction_vars:
+                     if var_name not in self.datasets: continue # Skip if var somehow not in combined set
+                     try:
+                          ds = self.datasets[var_name]
+                          data_var_name = list(ds.data_vars)[0] if list(ds.data_vars) else None
+                          if not data_var_name: continue
+
+                          # Use appropriate coordinate names found earlier if possible
+                          # Assuming 'latitude', 'longitude' are standard now after processing
+                          ts_lazy = ds[data_var_name].sel(latitude=point['lat'], longitude=point['lon'], method='nearest')
+
+                          if first_var_time_coord is None and 'datetime' in ts_lazy.coords:
+                               first_var_time_coord = ts_lazy['datetime'].copy()
+
+                          model_name = var_rename_map.get(var_name, var_name)
+                          lazy_arrays[model_name] = ts_lazy
+
+                     except Exception as e_sel:
+                          print(f"  Error selecting {var_name} for point {point_name}: {e_sel}")
+                          valid_point_data = False; break
+
+                if valid_point_data and first_var_time_coord is not None:
+                     print(f"  Computing data for point {point_name}...")
+                     try:
+                          computed_ds = xr.Dataset(lazy_arrays).compute()
+                          # Use computed time coord if needed, or the stored one
+                          time_index_vals = computed_ds['datetime'].values if 'datetime' in computed_ds else first_var_time_coord.values
+                          df_data = {k: computed_ds[k].values for k in computed_ds.data_vars if k != 'datetime'} # Exclude time if it's a data var
+                          df = pd.DataFrame(df_data, index=time_index_vals)
+                          df.index.name = 'time' # Ensure index is named 'time'
+
+                          for static_key, static_val in point_timeseries_static.items():
+                              df[static_key] = static_val
+
+                          if getattr(config, 'TIME_FEATURES', False): df = self.add_time_features(df)
+
+                          df = df[(df.index >= start_date) & (df.index <= end_date)].sort_index()
+
+                          if not df.empty:
+                              final_data_frames.append(df)
+                              print(f"  Successfully processed point {point_name}. DataFrame shape: {df.shape}")
+                          else:
+                              print(f"  Warning: No data remained for point {point_name} after date filtering.")
+                     except Exception as e_compute:
+                          print(f"  Error computing or creating DataFrame for point {point_name}: {e_compute}")
+                          traceback.print_exc()
+                else:
+                     print(f"  Skipping point {point_name} due to data extraction errors or missing time coordinate.")
+
+            print(f"Finished processing points. Returning {len(final_data_frames)} DataFrames.")
+            return final_data_frames if final_data_frames else None
+            # --- End Process Specific Points ---
+
+        elif processing_mode == 'region':
+            # --- Process Entire Region in Spatio-Temporal-Longitudinal Chunks ---
+            print("\nProcessing entire region in spatio-temporal-longitude chunks...")
+            saved_chunk_files = [] # Store paths to saved chunk files
+
+            # --- Prepare Merged Dataset ---
+            print("Merging all variables into a single dataset for chunking...")
+            merged_ds = xr.Dataset()
+            lat_var, lon_var, time_var = None, None, None
+            try:
+                 # Use first available variable to find coordinate names
+                 first_var_name = next(iter(self.datasets.keys())) # Get first key safely
+                 first_ds = self.datasets[first_var_name]
+                 lat_var = next((v for v in first_ds.coords if v.lower() in ['latitude', 'lat']), None)
+                 lon_var = next((v for v in first_ds.coords if v.lower() in ['longitude', 'lon']), None)
+                 time_var = next((v for v in first_ds.coords if v.lower() in ['datetime']), None)
+
+                 if not all([lat_var, lon_var, time_var]):
+                      print("Could not identify required coordinate variables (latitude, longitude, datetime).")
+                      return None
+
+                 # Merge variables using found coordinate names
+                 for var_name in prediction_vars: # Use filtered prediction_vars
+                      if var_name not in self.datasets: continue # Ensure var exists
+                      ds = self.datasets[var_name]
+                      data_var_name = list(ds.data_vars)[0] if list(ds.data_vars) else None
+                      if not data_var_name: continue
+                      model_name = var_rename_map.get(var_name, var_name) # Use rename map
+                      merged_ds[model_name] = ds[data_var_name]
+
+                 print(f"Merged dataset variables for chunking: {list(merged_ds.data_vars)}")
+                 print(f"Merged dataset coords for chunking: {list(merged_ds.coords)}")
+            except Exception as e:
+                 print(f"Error merging variables into a single dataset: {e}")
+                 traceback.print_exc()
+                 return None
+
+            # --- End Prepare Merged Dataset ---
+
+            # --- ****** NEW: Rechunk Merged Dataset ****** ---
+            print("\nRechunking merged dataset for optimized selection...")
+            # Tune these based on memory and testing
+            spatial_rechunk_size = max(1, lat_chunk_size // 2, lon_chunk_size // 2) # e.g., half of processing chunk
+            time_rechunk = time_chunk_size
+
+            target_chunks = {
+                lat_var: spatial_rechunk_size,
+                lon_var: spatial_rechunk_size,
+                time_var: time_rechunk
+            }
+            print(f"Target rechunk sizes: {target_chunks}")
+            try:
+                rechunk_start = time.time()
+                # Ensure merged_ds has data before rechunking
+                if not merged_ds.data_vars:
+                     raise ValueError("Merged dataset has no data variables to rechunk.")
+                merged_ds = merged_ds.chunk(target_chunks)
+                print(f"Rechunked merged_ds chunks: {merged_ds.chunks} ({time.time() - rechunk_start:.2f}s)")
+                gc.collect()
+            except Exception as e_rechunk:
+                print(f"Error rechunking merged_ds: {e_rechunk}")
+                print("Try adjusting target_chunks or skipping rechunking if error persists.")
+                traceback.print_exc()
+                return None # Stop if rechunking fails
+            # --- ****** End Rechunk Merged Dataset ****** ---
+
+
+            # --- Get Coordinates for Chunking ---
+            try:
+                 lats_coords = merged_ds[lat_var]
+                 lons_coords = merged_ds[lon_var]
+                 time_coords = merged_ds[time_var]
+                 num_lats = len(lats_coords)
+                 num_lons = len(lons_coords)
+                 num_times = len(time_coords)
+                 print(f"Using coordinate variables: Lat='{lat_var}', Lon='{lon_var}', Time='{time_var}'")
+            except Exception as e_coord:
+                 print(f"Error accessing coordinates for chunking: {e_coord}")
+                 return None
+
+            print(f"Starting chunked processing loops for {num_lats} lat, {num_lons} lon, {num_times} time steps...")
+
+            # --- Outer Loop: Latitude Chunks ---
+            for lat_start_idx in range(0, num_lats, lat_chunk_size):
+                lat_end_idx = min(lat_start_idx + lat_chunk_size, num_lats)
+                lat_chunk_indices = range(lat_start_idx, lat_end_idx)
+                lat_min_chunk = lats_coords.isel({lat_var: lat_start_idx}).item()
+                lat_max_chunk = lats_coords.isel({lat_var: lat_end_idx - 1}).item()
+                print(f"\nProcessing Latitude Chunk {lat_start_idx // lat_chunk_size + 1}/{ (num_lats + lat_chunk_size - 1) // lat_chunk_size }: Indices {lat_start_idx}-{lat_end_idx-1} (Lat {lat_min_chunk:.2f} to {lat_max_chunk:.2f})")
+
+                dfs_for_current_lat_chunk = []
+
+                # --- Middle Loop: Time Chunks ---
+                for time_start_idx in range(0, num_times, time_chunk_size):
+                    time_end_idx = min(time_start_idx + time_chunk_size, num_times)
+                    time_chunk_indices = range(time_start_idx, time_end_idx)
+                    time_min_chunk_ts = pd.Timestamp(time_coords.isel({time_var: time_start_idx}).values)
+                    time_max_chunk_ts = pd.Timestamp(time_coords.isel({time_var: time_end_idx - 1}).values)
+                    print(f"  Processing Time Chunk {time_start_idx // time_chunk_size + 1}/{ (num_times + time_chunk_size - 1) // time_chunk_size }: Indices {time_start_idx}-{time_end_idx-1} ({time_min_chunk_ts} to {time_max_chunk_ts})")
+
+                    dfs_for_current_st_chunk = []
+
+                    # --- Inner Loop: Longitude Chunks ---
+                    for lon_start_idx in range(0, num_lons, lon_chunk_size):
+                        lon_end_idx = min(lon_start_idx + lon_chunk_size, num_lons)
+                        lon_chunk_indices = range(lon_start_idx, lon_end_idx)
+                        print(f"    Processing Lon Chunk {lon_start_idx // lon_chunk_size + 1}/{ (num_lons + lon_chunk_size - 1) // lon_chunk_size }: Indices {lon_start_idx}-{lon_end_idx-1}")
+
+                        # Initialize variables used in try/finally
+                        stl_chunk_ds_lazy = None
+                        computed_stl_chunk_ds = None
+                        df_stl_chunk = None
+                        stacked_stl_chunk = None
+
+                        try:
+                            # Select spatio-temporal-longitude chunk (LAZY selection on RECHUNKED data)
+                            print("      Selecting chunk indices...")
+                            stl_chunk_ds_lazy = merged_ds.isel({
+                                lat_var: lat_chunk_indices,
+                                time_var: time_chunk_indices,
+                                lon_var: lon_chunk_indices
+                            })
+
+                            # Compute only this smallest chunk
+                            print("      Computing chunk data...")
+                            start_compute = time.time()
+                            # Add progress bar if dask client exists
+                            if hasattr(self, 'client') and self.client:
+                                 from dask.diagnostics import ProgressBar
+                                 with ProgressBar():
+                                     computed_stl_chunk_ds = stl_chunk_ds_lazy.compute()
+                            else:
+                                 computed_stl_chunk_ds = stl_chunk_ds_lazy.compute()
+                            print(f"      Computation complete ({time.time() - start_compute:.2f}s).")
+
+                            # Convert smallest chunk to DataFrame
+                            print("      Converting chunk to DataFrame...")
+                            start_convert = time.time()
+                            # Stack spatial dimensions, keep time as dimension initially
+                            # create_index=False might help memory slightly
+                            stacked_stl_chunk = computed_stl_chunk_ds.stack(location=(lat_var, lon_var), create_index=False).reset_index(time_var)
+                            df_stl_chunk = stacked_stl_chunk.to_dataframe()
+                            df_stl_chunk = df_stl_chunk.reset_index() # Get time, lat, lon as columns
+                            print(f"      Conversion complete ({time.time() - start_convert:.2f}s).")
+
+
+                            # Process smallest DataFrame Chunk
+                            df_stl_chunk = df_stl_chunk.rename(columns={time_var: 'time', lat_var: 'latitude', lon_var: 'longitude'})
+                            if 'location' in df_stl_chunk.columns: df_stl_chunk = df_stl_chunk.drop(columns=['location'])
+                            df_stl_chunk.dropna(axis=1, how='all', inplace=True) # Drop empty columns
+
+                            if df_stl_chunk.empty:
+                                print("      Chunk DataFrame is empty. Skipping.")
+                                continue
+
+                            # Set time index
+                            if 'time' in df_stl_chunk.columns:
+                                df_stl_chunk = df_stl_chunk.set_index('time')
+                            else:
+                                print("      Warning: 'time' column not found. Cannot set index.")
+                                continue
+
+                            # Add time features
+                            if getattr(config, 'TIME_FEATURES', False):
+                                print("      Adding time features...")
+                                df_stl_chunk = self.add_time_features(df_stl_chunk) # Assumes method exists
+
+                            # Append the processed smallest DataFrame
+                            dfs_for_current_st_chunk.append(df_stl_chunk)
+
+                        except MemoryError as me_stl:
+                            print(f"! MemoryError processing chunk (Lat: {lat_start_idx}-{lat_end_idx-1}, Time: {time_start_idx}-{time_end_idx-1}, Lon: {lon_start_idx}-{lon_end_idx-1}): {me_stl}")
+                            print("! This chunk is STILL too large during compute/convert. Try reducing ALL chunk sizes ('lat_chunk_size', 'lon_chunk_size', 'time_chunk_size') and rechunk sizes ('spatial_rechunk_size', 'time_rechunk').")
+                            raise MemoryError("Stopping due to MemoryError in smallest chunk.") from me_stl # Stop all processing
+                        except Exception as e_stl:
+                            print(f"! Error processing chunk (Lat: {lat_start_idx}-{lat_end_idx-1}, Time: {time_start_idx}-{time_end_idx-1}, Lon: {lon_start_idx}-{lon_end_idx-1}): {e_stl}")
+                            traceback.print_exc()
+                            print("      Skipping current smallest chunk due to error.")
+                        finally:
+                            # --- Updated Finally Block ---
+                            print("      Cleaning up chunk memory...")
+                            # Check existence before deleting
+                            if 'stl_chunk_ds_lazy' in locals() and stl_chunk_ds_lazy is not None: del stl_chunk_ds_lazy
+                            if 'computed_stl_chunk_ds' in locals() and computed_stl_chunk_ds is not None: del computed_stl_chunk_ds
+                            if 'df_stl_chunk' in locals() and df_stl_chunk is not None: del df_stl_chunk
+                            if 'stacked_stl_chunk' in locals() and stacked_stl_chunk is not None: del stacked_stl_chunk
+                            gc.collect() # Force garbage collection
+                            print("      Memory cleanup for smallest chunk complete.")
+                            # --- End Updated Finally Block ---
+                    # --- End Inner Loop: Longitude Chunks ---
+
+                    # --- Combine Longitude Chunks for the current Spatio-Temporal Chunk ---
+                    if dfs_for_current_st_chunk:
+                         print(f"    Concatenating {len(dfs_for_current_st_chunk)} longitude chunks for time chunk {time_start_idx}-{time_end_idx-1}...")
+                         st_concat_start = time.time()
+                         try:
+                              df_st_chunk_combined = pd.concat(dfs_for_current_st_chunk, axis=0)
+                              dfs_for_current_lat_chunk.append(df_st_chunk_combined)
+                              print(f"    Appended combined ST chunk. Shape: {df_st_chunk_combined.shape} ({time.time() - st_concat_start:.2f}s)")
+                         except Exception as e_concat_lon:
+                              print(f"    Error concatenating longitude chunks: {e_concat_lon}")
+                         finally:
+                              del dfs_for_current_st_chunk, df_st_chunk_combined
+                              gc.collect()
+                    else:
+                         print(f"    No longitude chunks processed for time chunk {time_start_idx}-{time_end_idx-1}.")
+                    # --- End Combine Longitude Chunks ---
+                    print(f"  Finished Time Chunk {time_start_idx // time_chunk_size + 1}.")
+                # --- End Middle Loop: Time Chunks ---
+
+                # --- Combine Time Chunks and Save Full Latitude Chunk ---
+                if dfs_for_current_lat_chunk:
+                    print(f"\nConcatenating {len(dfs_for_current_lat_chunk)} time chunks for latitude chunk {lat_start_idx}-{lat_end_idx-1}...")
+                    lat_chunk_concat_start = time.time()
+                    df_lat_chunk = None # Initialize for finally block
+                    try:
+                        df_lat_chunk = pd.concat(dfs_for_current_lat_chunk, axis=0)
+                        print(f"  Concatenated latitude chunk DataFrame shape: {df_lat_chunk.shape} ({time.time() - lat_chunk_concat_start:.2f}s)")
+
+                        # Apply final filtering by date range
+                        print("  Filtering final date range for latitude chunk...")
+                        # Ensure index is DatetimeIndex before filtering
+                        if not isinstance(df_lat_chunk.index, pd.DatetimeIndex):
+                             print("  Warning: Index is not DatetimeIndex before final filtering. Attempting conversion...")
+                             try: df_lat_chunk.index = pd.to_datetime(df_lat_chunk.index)
+                             except Exception as e_conv:
+                                  print(f"  Error converting index to DatetimeIndex: {e_conv}. Cannot filter/save chunk.")
+                                  continue # Skip to next latitude chunk
+
+                        df_lat_chunk = df_lat_chunk[
+                             (df_lat_chunk.index >= start_date) & (df_lat_chunk.index <= end_date)
+                        ]
+                        # Sorting index ensures time is sequential, might be required by models
+                        print("  Sorting index for latitude chunk...")
+                        sort_start = time.time()
+                        df_lat_chunk.sort_index(inplace=True)
+                        print(f"  Sorting complete ({time.time() - sort_start:.2f}s)")
+
+
+                        if df_lat_chunk.empty:
+                             print("  Latitude chunk is empty after final date filtering.")
+                        else:
+                            # Define output file path
+                            chunk_filename = Path(output_dir) / f"prediction_chunk_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}_lat_{lat_min_chunk:.2f}_{lat_max_chunk:.2f}.parquet"
+                            print(f"  Saving latitude chunk to {chunk_filename}...")
+                            save_start = time.time()
+                            # Ensure lat/lon are standard columns before saving
+                            if 'latitude' not in df_lat_chunk.columns or 'longitude' not in df_lat_chunk.columns:
+                                 df_lat_chunk = df_lat_chunk.reset_index()
+
+                            df_lat_chunk.to_parquet(chunk_filename, index=True) # Save with time index
+                            saved_chunk_files.append(str(chunk_filename))
+                            print(f"  Latitude chunk saved successfully ({time.time() - save_start:.2f}s).")
+
+                    except Exception as e_concat_time:
+                        print(f"Error concatenating time chunks or saving latitude chunk {lat_start_idx}-{lat_end_idx-1}: {e_concat_time}")
+                        traceback.print_exc()
+                    finally:
+                         # Clean up list and combined DataFrame for the latitude chunk
+                         del dfs_for_current_lat_chunk # List of DFs
+                         if 'df_lat_chunk' in locals() and df_lat_chunk is not None: del df_lat_chunk
+                         gc.collect()
+                else:
+                     print(f"No data processed for latitude chunk {lat_start_idx}-{lat_end_idx-1}.")
+                # --- End Combine and Save Full Latitude Chunk ---
+
+                # No explicit lazy latitude dataset to delete here as merged_ds is used directly
+                gc.collect()
+                print(f"--- Finished Latitude Chunk {lat_start_idx // lat_chunk_size + 1} ---")
+            # --- End Outer Loop: Latitude Chunks ---
+
+            print(f"\nFinished chunked processing. Saved {len(saved_chunk_files)} chunk files.")
+            print(f"Total time for dataset creation: {time.time() - start_time_total:.2f} seconds")
+            return saved_chunk_files # Return the list of file paths
+            # --- End Region Processing ---
+
+        # Fallback return if neither points nor region processing path completed
+        return None
+
+
 
 def main():
     """
@@ -2535,15 +2368,19 @@ def main():
     parser.add_argument('--point-name', type=str, default=None, help='Point name')
     parser.add_argument('--temp-climate', type=str, default=None, help='Temperature climate GeoTIFF file path')
     parser.add_argument('--precip-climate', type=str, default=None, help='Precipitation climate GeoTIFF file path')
-    parser.add_argument('--create-biome-map', action='store_true', help='Create a biome map visualization')
-    parser.add_argument('--disable-cfgrib-index', action='store_true', help='Disable cfgrib indexing')
     
+    parser.add_argument('--disable-cfgrib-index', action='store_true', help='Disable cfgrib indexing')
+    parser.add_argument('--lat-chunk-size', type=int, default=1, help='Number of latitude rows per spatial chunk for region processing')
+    parser.add_argument('--lon-chunk-size', type=int, default=1, help='Number of longitude columns per spatial chunk for region processing') # Added
+    parser.add_argument('--time-chunk-size', type=int, default=24, help='Number of time steps per temporal chunk for region processing') # Added
+    parser.add_argument('--output-dir', type=str, default=None, help='Directory to save output chunk files for region processing')
     args = parser.parse_args()
 
     # Set environment variable if requested
     if args.disable_cfgrib_index:
         os.environ['CFGRIB_DISABLE_INDEX'] = '1'
         print("cfgrib indexing disabled via environment variable")
+    output_dir = args.output_dir or config.PREDICTION_DIR
 
     # Create ERA5-Land processor with climate data files
     processor = ERA5LandProcessor(
@@ -2560,11 +2397,7 @@ def main():
             'lon_max': args.lon_max if args.lon_max is not None else config.DEFAULT_LON_MAX
         }
         
-        # Create biome map if requested
-        if args.create_biome_map:
-            biome_map_file = args.output or f"biome_map_{int(time.time())}.png"
-            visualize_biome_map(processor, region, output_file=biome_map_file)
-            return
+ 
         
         # Define points if specified
         points = None
@@ -2583,12 +2416,17 @@ def main():
             end_date = pd.Timestamp(args.year, args.month + 1, 1) - pd.Timedelta(days=1)
         
         # Create prediction dataset
-        df = processor.create_prediction_dataset(start_date, end_date, points, region)
+        df = processor.create_prediction_dataset(start_date, end_date, points, region, output_dir=output_dir, lat_chunk_size=args.lat_chunk_size, lon_chunk_size=args.lon_chunk_size, time_chunk_size=args.time_chunk_size)
         
         if df is not None:
             # Save the dataset
-            output_path = args.output or f"era5land_prediction_{args.year}_{args.month:02d}.csv"
-            processor.save_prediction_dataset(df, output_path)
+            saved_files = processor.save_prediction_dataset(df, output_path=Path(output_dir) / (args.output or f"prediction_output_{args.year}_{args.month:02d}") ) # Provide a base name/path for point files
+            print("\nProcessing complete.")
+            if isinstance(saved_files, list):
+                print(f"Generated {len(saved_files)} output files:")
+                for f in saved_files: print(f" - {f}")
+            elif isinstance(saved_files, str):
+                print(f"Generated output file: {saved_files}")
     
     finally:
         # Reset environment variable if set

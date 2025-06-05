@@ -710,7 +710,7 @@ if __name__ == "__main__":
         if not os.path.exists(merged_shapefile_path):
             print(f"ERROR: Merged shapefile not found for dissolving: {merged_shapefile_path}", file=sys.stderr)
         else:
-            dissolve_merged_shapefile(merged_shapefile_path +'/Global_Tree_Existence_9km_merged.shp', args.dissolved_shapefile)
+            dissolve_merged_shapefile(merged_shapefile_path +'/tree_cover_shapefile.shp', args.dissolved_shapefile)
             # Subsequent steps like plotting should now use dissolved_shapefile_path
     # STEP 4: Plot
     if args.plot:

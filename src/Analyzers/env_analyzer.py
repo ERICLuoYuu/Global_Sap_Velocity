@@ -8,6 +8,7 @@ from typing import Dict, List
 import warnings
 import plotly.graph_objects as go
 import plotly.io as pio
+import pvlib
 parent_dir = str(Path(__file__).parent.parent.parent)
 print(parent_dir)
 if parent_dir not in sys.path:
@@ -51,18 +52,20 @@ class EnvironmentalAnalyzer:
                 # load corresponding evn_md data
                 time_zone_file = file.parent / f"{file.stem.replace('env_data', 'env_md')}.csv"
                 tz_df = pd.read_csv(time_zone_file)
-                time_zone = tz_df['env_time_zone'].iloc[0]
+                time_zone = tz_df['env_time_zone'].iloc[0][2:]
                 time_zone_map = create_timezone_mapping()
                 # Apply the time zone adjustment to the entire column at once
+                
                 df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
                 df['solar_TIMESTAMP'] = pd.to_datetime(df['solar_TIMESTAMP'])
+                '''
                 df['TIMESTAMP'] = df['TIMESTAMP'].apply(lambda x: adjust_time_to_utc(x, time_zone, time_zone_map))
                 df['solar_TIMESTAMP'] = df['solar_TIMESTAMP'].apply(lambda x: adjust_time_to_utc(x, time_zone, time_zone_map))
                 output_dir = Path('./outputs/processed_data/env/timezone_adjusted')
                 if not output_dir.exists():
                     output_dir.mkdir(parents=True, exist_ok=True)
                 df.to_csv(output_dir / f'{file.stem}_adjusted.csv')
-                
+                '''
                 # Load corresponding metadata file
                 flag_file = file.parent / f"{file.stem.replace('_data', '_flags')}.csv"
                 if flag_file.exists():
@@ -71,8 +74,10 @@ class EnvironmentalAnalyzer:
                     flags = flags.rename(columns=column_mapping)
                     flags['TIMESTAMP'] = pd.to_datetime(flags['TIMESTAMP'])
                     flags['solar_TIMESTAMP'] = pd.to_datetime(flags['solar_TIMESTAMP'])
+                    '''
                     flags['TIMESTAMP'] = flags['TIMESTAMP'].apply(lambda x: adjust_time_to_utc(x, time_zone, time_zone_map))
                     flags['solar_TIMESTAMP'] = flags['solar_TIMESTAMP'].apply(lambda x: adjust_time_to_utc(x, time_zone, time_zone_map))
+                    '''
                 else:
                     print(f"Warning: No flag file found for {file.name}")
                     flags = None
@@ -81,12 +86,16 @@ class EnvironmentalAnalyzer:
                 print(f"\nProcessing {file.name}")
                 # get cooridnates information from "*_site_md.csv"
                 site_md_file = file.parent / f"{file.stem.replace('_env_data', '_site_md')}.csv"
+                env_md_file = file.parent / f"{file.stem.replace('_env_data', '_env_md')}.csv"
                 # load the site_md_file
                 site_md = pd.read_csv(site_md_file)
+                env_md = pd.read_csv(env_md_file)
                 # get the latitude and longitude from columns "si_lat" and "si_long"
                 latitude = site_md['si_lat'].values[0]
                 longitude = site_md['si_long'].values[0]
-                df = self._process_environmental_data(df, location, plant_type, flags)
+                elevation = site_md['si_elev'].values[0]
+                timestep = env_md['env_timestep'].values[0]
+                df = self._process_environmental_data(df, latitude, longitude, timestep, time_zone, elevation, location, plant_type, flags, )
                 # add coordinates to the metadata
                 df['lat'] = latitude
                 df['long'] = longitude
@@ -97,7 +106,7 @@ class EnvironmentalAnalyzer:
             except Exception as e:
                 print(f"Error loading {file.name}: {str(e)}")
     
-    def _process_environmental_data(self, df: pd.DataFrame, location: str = None, plant_type: str = None, flags: pd.DataFrame = None) -> pd.DataFrame:
+    def _process_environmental_data(self, df: pd.DataFrame, latitude: float, longitude: float, timestep: float, time_zone: str, elevation: float, location: str = None, plant_type: str = None, flags: pd.DataFrame = None) -> pd.DataFrame:
         """
         Process environment data with debugging information
         
@@ -122,7 +131,11 @@ class EnvironmentalAnalyzer:
         
         # Convert string "NA" to numpy NaN
         df = df.replace("NA", np.nan)
-        
+
+        # --- Define your radiation variables ---
+        RADIATION_VARIABLES = ['ppfd_in', 'sw_in', 'ext_rad', 'netrad'] # Add other radiation column names if any
+        NONNEGATIVE_VARIABLES = ['ppfd_in', 'sw_in', 'precip', 'ws', 'rh', 'vpd', 'swc_deep', 'swc_shallow'] # Variables that should not have negative values
+
         # Convert numeric columns to float, with error handling
         numeric_cols = [col for col in df.columns if col != 'TIMESTAMP' and col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
         for col in numeric_cols:
@@ -155,7 +168,15 @@ class EnvironmentalAnalyzer:
             for col in data_cols:
                 flag_col = [fcol for fcol in flags.columns if col in fcol]
                 if flag_col:
-                    warn_mask = flags[flag_col[0]].astype(str).str.contains('OUT_WARN|RANGE_WARN', na=False)
+                    warn_mask = flags[flag_col[0]].astype(str).str.contains('RANGE_WARN', na=False)
+                    if col in  NONNEGATIVE_VARIABLES:
+                        # get mask for radiation columns where values are less than 0, and exclude them from original mask
+                        negative_radiation_mask = (df[col] < 0)
+                        warn_mask = warn_mask & ~ negative_radiation_mask
+                        # set negative values to 0
+                        df.loc[df[col] < 0, col] = 0
+                    
+                    # Export flagged values to CSV
                     if warn_mask.any():
                         print(f"\nFiltering {warn_mask.sum()} values in {col} due to warnings")
                     df.loc[warn_mask, col].to_csv(output_dir / f"{location}_{plant_type}_{col}_flagged.csv")
@@ -163,52 +184,173 @@ class EnvironmentalAnalyzer:
             
             
             filter_path = output_dir / f"{location}_{plant_type}_filtered.csv"
-            df.to_csv(filter_path, index=False)
+            df.to_csv(filter_path, index=True)
             print(f"Saved filtered data to {filter_path}")
 
         
-        try:
-            # Initialize the nested dictionary if location doesn't exist
+        try: 
+            # --- Default parameters for non-radiation variables ---
+            # set one month time window
+            TIME_WINDOW = 30 * 24 * 60 # 30 days in minutes
+            DEFAULT_WINDOW_POINTS = int(TIME_WINDOW / timestep) # e.g., for 30-min data, a 24-hour window
+            DEFAULT_N_STD = 5
+
+            # --- Parameters for DAYTIME radiation ---
+            DAY_RADIATION_WINDOW_POINTS = DEFAULT_WINDOW_POINTS # e.g., for 30-min data, a 3-hour window
+            DAY_RADIATION_N_STD = 7
+
+            # --- Parameters/settings for NIGHTTIME radiation ---
+            NIGHT_RADIATION_PPFDIN = 2
+            NIGHT_RADIATION_SWIN = 5
+            NIGHT_RADIATION_EXTRAD = 50 # Absolute threshold for ppfd_in or sw_in at night
+            # Alternatively, use _detect_outliers with specific params:
+            # NIGHT_RADIATION_WINDOW_POINTS = 3
+            # NIGHT_RADIATION_N_STD = 3 
             if location not in self.outlier_removed_data:
                 self.outlier_removed_data[location] = {}
-            # Create processed directory for outliers
             outlier_dir = Path('./outputs/processed_data/env/outliers')
-            if not outlier_dir.exists():
-                outlier_dir.mkdir(parents=True, exist_ok=True)
+            outlier_dir.mkdir(parents=True, exist_ok=True)
+            day_mask_dir = Path('./outputs/processed_data/env/day_masks')
+            day_mask_dir.mkdir(parents=True, exist_ok=True)
+            current_df_latitude = latitude
+            current_df_longitude = longitude
+
+            data_cols = [col for col in df.columns if col not in ['solar_TIMESTAMP', 'lat', 'long'] and 'Unnamed:' not in str(col)]
             
-            # Process each column for outliers
-            data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long' and 'Unnamed:'not in str(col)]
             for col in data_cols:
                 if df[col].isna().all():
-                    print(f"Skipping {col} - all values are NA")
+                    print(f"Skipping {col} at {location}_{plant_type} - all values are NA")
                     continue
-                    
-                # Detect outliers using method B (rolling window)
-                outliers = self._detect_outliers(
-                    series=df[col],
-                    n_std=7,
-                    time_window=len(df[col]),  # 24 hours
-                    method='C'
-                )
+
+                print(f"Processing {col} for outliers at {location}_{plant_type}...")
+                column_series = df[col].copy() # Work on a copy for safety before modifying df
+                final_col_outliers = pd.Series(False, index=column_series.index)
+
+                if col in RADIATION_VARIABLES:
+                    print(f"Applying radiation-specific outlier detection for {col}...")
+                    try:
+                        
+                        day_mask = self._calculate_daytime_mask(df.index, current_df_latitude, current_df_longitude, elevation, elevation_threshold=0)
+                        # Extract the boolean values. These correspond positionally to the solar_TIMESTAMP sequence.
+                        day_mask_raw_values = day_mask.values
+                        # Sanity check for length. After DataFrame processing (set_index on 'TIMESTAMP',
+                        # sort, drop duplicates), df.index and df['solar_TIMESTAMP'] (as a column)
+                        # should have the same length. pvlib's handling of NaT in solar_TIMESTAMP
+                        # (typically resulting in NaN elevation, then False in mask) should maintain length.
+                        if len(day_mask_raw_values) != len(df.index):
+                            message = (
+                                f"Length mismatch for {location}_{plant_type}, column {col}: "
+                                f"Solar mask values length ({len(day_mask_raw_values)}) "
+                                f"does not match df.index length ({len(df.index)}). "
+                                "This may be due to NaT handling in solar_TIMESTAMP or pvlib. "
+                                "Cannot reliably align day/night mask."
+                            )
+                            # This custom error will be caught by the broader except block below,
+                            # leading to the global fallback.
+                            raise ValueError(message)
+
+                        # Create the final day_mask Series.
+                        # Its *values* are determined by solar_TIMESTAMP.
+                        # Its *index* is df.index (i.e., 'TIMESTAMP').
+                        # This correctly aligns the solar-time-based day/night determination
+                        # with the primary 'TIMESTAMP' index of the DataFrame.
+                        
+                        day_mask = pd.Series(day_mask_raw_values, index=df.index)
+                        day_mask_with_extrad = {
+                            'day_mask': day_mask,
+                            'ext_rad': df['ext_rad'],
+                            col: df[col],
+                            'lat': current_df_latitude,
+                            'long': current_df_longitude
+
+                        }
+                        # save it to csv
+                        day_mask_df = pd.DataFrame(day_mask_with_extrad)
+                        day_mask_path = day_mask_dir / f"{location}_{plant_type}_{col}_day_mask.csv"
+                        day_mask_df.to_csv(day_mask_path, index=True)
+                        print(f"  Day/night mask saved to {day_mask_path}")
+                        night_mask = ~day_mask # Also indexed by df.index
+                        
+                    except Exception as e:
+                        print(f"  Could not calculate day/night mask for {col} at {location}_{plant_type}: {e}. Processing column globally.")
+                        # Fallback to default global processing if day/night calculation fails
+                        final_col_outliers = self._detect_outliers(
+                            series=column_series,
+                            n_std=DEFAULT_N_STD, # Or your previous n_std=7 if preferred as fallback
+                            time_window=len(column_series), # Fallback to global as before if this is intended
+                            method='C'
+                        )
+                        df.loc[final_col_outliers, col] = np.nan
+                        continue # Next column
+
+
+                    day_series = column_series.copy()
+                    night_series = column_series.copy()
+                    # Apply the day/night mask to separate series
+                    day_series.loc[night_mask] = np.nan
+                    night_series.loc[day_mask] = np.nan
+
+                    # Process Daytime Radiation
+                    if not day_series.empty:
+                        # print(f"  Processing daytime for {col} ({len(day_series)} points)...")
+                        day_outliers_detected = self._detect_outliers(
+                            series=day_series,
+                            n_std=DAY_RADIATION_N_STD,
+                            time_window=DAY_RADIATION_WINDOW_POINTS,
+                            method='C' # Or 'B'
+                        )
+                        final_col_outliers.loc[day_outliers_detected[day_outliers_detected].index] = True
+
+                    '''
+                    # Process Nighttime Radiation
+                    if not night_series.empty:
+                        if col=='ppfd_in':
+                            # print(f"  Processing nighttime for {col} ({len(night_series)} points)...")
+                            night_outliers_detected_bool = night_series > NIGHT_RADIATION_PPFDIN
+                            final_col_outliers.loc[night_series[night_outliers_detected_bool].index] = True
+                        elif col=='sw_in':
+                            # print(f"  Processing nighttime for {col} ({len(night_series)} points)...")
+                            night_outliers_detected_bool = night_series > NIGHT_RADIATION_SWIN
+                            final_col_outliers.loc[night_series[night_outliers_detected_bool].index] = True
+                        elif col=='ext_rad':
+                            # print(f"  Processing nighttime for {col} ({len(night_series)} points)...")
+                            night_outliers_detected_bool = night_series > NIGHT_RADIATION_EXTRAD
+                            final_col_outliers.loc[night_series[night_outliers_detected_bool].index] = True
+                    '''
+
+                else: # For non-radiation variables
+                    # Use a sensible default windowing strategy, NOT len(df[col]) unless global is truly intended
+                    # print(f"Applying default outlier detection for {col}...")
+                    final_col_outliers = self._detect_outliers(
+                        series=column_series,
+                        n_std=DEFAULT_N_STD,
+                        time_window=DEFAULT_WINDOW_POINTS, # A fixed, reasonable window
+                        method='B' # Or 'B'
+                    )
                 
-                # Save outlier information
-                outlier_df = pd.DataFrame({
-                    'timestamp': df.index,
-                    'value': df[col],
-                    'is_outlier': outliers
+                # Save outlier information (using final_col_outliers)
+                # This part needs the original values before they are set to NaN
+                outlier_info_df = pd.DataFrame({
+                    'timestamp': df.index, # Timestamps of outliers
+                    'value': df.loc[:, col],    # Original values of outliers
+                    'is_outlier': final_col_outliers                          # Redundant but can be explicit
                 })
                 
-                outlier_path = outlier_dir / f"{location}{plant_type}_{col}_outliers.csv"
-                outlier_df.to_csv(outlier_path)
-                print(f"Saved outliers for {col} to {outlier_path}")
-                
-                # Set outliers to NaN in original data
-                df.loc[outliers, col] = np.nan
+                if not outlier_info_df.empty:
+                    outlier_path = outlier_dir / f"{location}_{plant_type}_{col}_outliers.csv" # Ensure plant_type is defined
+                    outlier_info_df.to_csv(outlier_path, index=False)
+                    # print(f"Saved {final_col_outliers.sum()} outliers for {col} to {outlier_path}")
+
+                # Set outliers to NaN in the original DataFrame
+                df.loc[final_col_outliers, col] = np.nan
+                # print(f"Applied {final_col_outliers.sum()} NaNs for {col} at {location}_{plant_type}")
+
             self.outlier_removed_data[location][plant_type] = df
-            
+            # print(f"Finished outlier processing for {location}_{plant_type}")
+
         except Exception as e:
-            print(f"Error processing outliers: {str(e)}")
-            return None
+            print(f"Critical error during outlier processing for {location}_{plant_type}: {str(e)}")
+            # return None # Or handle as appropriate
         
         try:
             # Create processed directory
@@ -250,7 +392,37 @@ class EnvironmentalAnalyzer:
             print(f"Error during daily resampling: {str(e)}")
             return None
             
+    def _calculate_daytime_mask(self, timestamps: pd.DatetimeIndex, lat: float, lon: float, elevation: float, elevation_threshold: float = 0) -> pd.Series:
+        """
+        Calculates a boolean mask indicating daytime based on solar elevation.
 
+        Parameters:
+        -----------
+        timestamps : pd.DatetimeIndex
+            Timestamps for which to calculate daytime.
+        lat : float
+            Latitude of the location.
+        lon : float
+            Longitude of the location.
+        elevation_threshold : float, optional
+            Solar elevation threshold (in degrees) to consider it daytime. 
+            Defaults to 0 (sun above the horizon).
+
+        Returns:
+        --------
+        pd.Series : Boolean mask, True if daytime.
+        """
+        if not isinstance(timestamps, pd.DatetimeIndex):
+            raise ValueError("Timestamps must be a pandas DatetimeIndex.")
+        if timestamps.tzinfo is None:
+            # pvlib requires timezone-aware timestamps. Assuming UTC if not specified.
+            # You might need to adjust this based on your data's timezone.
+            print("Warning: Timestamps are timezone-naive. Assuming UTC for solar position calculation.")
+            timestamps = timestamps.tz_localize('UTC')
+
+            
+        solar_position = pvlib.solarposition.get_solarposition(timestamps, lat, lon, altitude=elevation)
+        return solar_position['elevation'] > elevation_threshold
     def _detect_outliers(self, series: pd.Series, n_std: float = 3, time_window:int = 1440 ,method: str = 'A') -> pd.Series:
         """
         Detect outliers using standard deviation within monthly windows
@@ -431,7 +603,7 @@ class EnvironmentalAnalyzer:
                 continue
             
             # Load outliers data
-            outlier_path = Path('./outputs/processed_data/env/outliers') / f"{location}{plant_type}_{variable}_outliers.csv"
+            outlier_path = Path('./outputs/processed_data/env/outliers') / f"{location}_{plant_type}_{variable}_outliers.csv"
             if outlier_path.exists():
                 outliers_df = pd.read_csv(outlier_path, parse_dates=['timestamp']).set_index('timestamp')
             else:
@@ -523,6 +695,10 @@ class EnvironmentalAnalyzer:
             plot_limit (int): Maximum number of variables to plot per location
             progress_update (bool): Print progress updates
         """
+        # release memory by empty some dictionaries
+        self.env_raw_data = {}
+        self.env_data = {}
+
         # Create summary dictionary to store processing results
         summary = {
             'total_locations': len(self.outlier_removed_data),

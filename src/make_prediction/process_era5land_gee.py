@@ -52,35 +52,38 @@ try:
 except ImportError:
     HAVE_NETCDF4 = False
     print("NetCDF4 module not available. Using fallback methods.")
-def _biome_batch_processor(args):
+def _biome_batch_processor_shared(args):
     """
-    Process a batch of locations for biome determination.
-    This function must be at module level to be picklable for multiprocessing.
-    
-    Parameters:
-    -----------
-    args : tuple
-        (processor_settings, points_batch)
-        processor_settings: dict containing temp_climate_file, precip_climate_file
-        points_batch: list of (lon, lat) tuples
-        
-    Returns:
-    --------
-    dict
-        Dictionary mapping location keys to biome types
+    Process a batch of locations for biome determination using shared memory for climate data.
     """
-    # Recreate a minimal processor just for biome determination
-    temp_file, precip_file = args[0]
-    points_batch = args[1]
     
-    # Create a minimal processor
-    processor = ERA5LandGEEProcessor(
-        gee_initialize=False,  # Don't need GEE for biome calculation
-        temp_climate_file=temp_file,
-        precip_climate_file=precip_file
-    )
+    climate_info, points_batch = args
     
-    # Process each point and build the cache
+    # Load memory-mapped climate data arrays
+    temp_data = np.load(climate_info['temp_data_file'], mmap_mode='r')
+    precip_data = np.load(climate_info['precip_data_file'], mmap_mode='r')
+    
+    # Create climate data structures
+    temp_climate = {
+        'data': temp_data,
+        'transform': climate_info['temp_transform'],
+        'nodata': climate_info['temp_nodata'],
+        'height': climate_info['height'],
+        'width': climate_info['width']
+    }
+    
+    precip_climate = {
+        'data': precip_data,
+        'transform': climate_info['precip_transform'],
+        'nodata': climate_info['precip_nodata'],
+        'height': climate_info['height'],
+        'width': climate_info['width']
+    }
+    
+    # Create a minimal processor to use its methods
+    processor = ERA5LandGEEProcessor(gee_initialize=False)
+    
+    # Process each point using shared data
     result_cache = {}
     try:
         for lon, lat in points_batch:
@@ -88,7 +91,7 @@ def _biome_batch_processor(args):
             loc_key = (round(lon, 5), round(lat, 5))
             
             # Get climate values at the location
-            temperature, precipitation = processor.get_climate_at_location(lon, lat)
+            temperature, precipitation = processor.get_climate_at_location_direct(lon, lat, temp_climate, precip_climate)
             
             # Determine biome from climate
             biome_type = processor.determine_biome_from_climate(temperature, precipitation)
@@ -98,11 +101,14 @@ def _biome_batch_processor(args):
             
     except Exception as e:
         print(f"Error in biome batch processor: {str(e)}")
+        import traceback
+        traceback.print_exc()
     finally:
-        # Clean up resources
+        # Clean up
         processor.close()
     
     return result_cache
+
 def _day_processing_worker(args):
     """
     Worker function for processing a single day (used by multiprocessing).
@@ -178,80 +184,86 @@ class ERA5LandGEEProcessor:
 
     }
     
-    def __init__(self, temp_dir=None, create_client=None, memory_limit=None, 
-             temp_climate_file=None, precip_climate_file=None, gee_initialize=True):
+    def __init__(self, data_dir=None, temp_dir=None, create_client=None, memory_limit=None,
+                 temp_climate_file=None, precip_climate_file=None, use_dask=True): # Added use_dask
         """
-        Initialize the ERA5-Land GEE data processor.
-        
+        Initialize the ERA5-Land data processor.
+
         Parameters:
         -----------
+        data_dir : str or Path, optional
+            Directory where ERA5-Land data is stored (defaults to config)
         temp_dir : str or Path, optional
             Directory for temporary storage (defaults to config)
         create_client : bool, optional
-            Whether to create a Dask distributed client
+            (Deprecated in favor of use_dask)
         memory_limit : str, optional
             Memory limit for the Dask client (if created)
         temp_climate_file : str or Path, optional
             Path to the annual mean temperature GeoTIFF file
         precip_climate_file : str or Path, optional
             Path to the annual mean precipitation GeoTIFF file
-        gee_initialize : bool, optional
-            Whether to initialize the Google Earth Engine API
+        use_dask : bool, optional
+            Whether to attempt creating a Dask distributed client (default: True)
         """
+        self.data_dir = Path(data_dir) if data_dir else config.ERA5LAND_DIR
         self.temp_dir = Path(temp_dir) if temp_dir else config.ERA5LAND_TEMP_DIR
-        
+
         # Create temporary directory if it doesn't exist
         self.temp_dir.mkdir(exist_ok=True, parents=True)
-        
+
         # Set climate file paths
         self.temp_climate_file = Path(temp_climate_file) if temp_climate_file else getattr(config, 'TEMP_CLIMATE_FILE', None)
         self.precip_climate_file = Path(precip_climate_file) if precip_climate_file else getattr(config, 'PRECIP_CLIMATE_FILE', None)
-        
+
         # Initialize climate data attributes
         self.temp_climate_data = None
         self.precip_climate_data = None
         self.resampled_temp_data = None
         self.resampled_precip_data = None
-        
-        # Add biome cache
-        self.biome_cache = {}
-        
+
         # Initialize Dask client if requested and available
         self.client = None
-        create_client = config.DASK_CREATE_CLIENT if create_client is None else create_client
+        # -- START MODIFICATION: Use use_dask argument --
+        # create_client = config.DASK_CREATE_CLIENT if create_client is None else create_client # Deprecated line
         memory_limit = config.DASK_MEMORY_LIMIT if memory_limit is None else memory_limit
-        
-        if create_client and HAVE_DASK:
+
+        if use_dask and HAVE_DASK: # Check use_dask flag
             try:
-                from dask.distributed import Client
+                from dask.distributed import Client, LocalCluster # Import LocalCluster here too
                 print(f"Creating Dask client with memory limit: {memory_limit}")
-                self.client = Client(memory_limit=memory_limit)
+                 # Example: Use LocalCluster for more control if needed
+                cluster = LocalCluster(n_workers=4, threads_per_worker=2, memory_limit=memory_limit) # Adjust n_workers/threads
+                self.client = Client(cluster)
+                # Or simpler: self.client = Client(memory_limit=memory_limit)
                 print(f"Dask dashboard link: {self.client.dashboard_link}")
             except Exception as e:
                 print(f"Could not create Dask client: {str(e)}")
-        
+        else:
+             print("Dask client creation skipped (use_dask=False or Dask not available).")
+        # -- END MODIFICATION --
+
         # Initialize variable datasets
         self.datasets = {}
-        
-        # Store biome data
-        self.biome_data = None
-        self.biome_kdtree = None
-        
-        # Initialize Google Earth Engine if requested
-        self.ee_initialized = False
-        if gee_initialize:
-            self.initialize_gee()
-        
+
+        # ... (Keep rest of __init__ like _check_command calls and climate loading) ...
+        # Check available system utilities
+        self.has_gunzip = self._check_command("gunzip")
+        self.has_file = self._check_command("file")
+        self.has_cdo = self._check_command("cdo")
+        self.has_nccopy = self._check_command("nccopy")
+
+        print("\nSystem utilities available:")
+        print(f"gunzip: {self.has_gunzip}")
+        print(f"file: {self.has_file}")
+        print(f"cdo: {self.has_cdo}")
+        print(f"nccopy: {self.has_nccopy}")
+
         # Try to load climate data if files are provided
         if self.temp_climate_file and self.precip_climate_file:
             if self.temp_climate_file.exists() and self.precip_climate_file.exists():
                 print("Loading climate data during initialization...")
-                self.load_climate_data(bounds = {
-                    'lon_min': -180.0,  # Eastern longitude boundary
-                    'lat_min': -57,  # Southern latitude boundary
-                    'lon_max': 180.0,  # Western longitude boundary 
-                    'lat_max': 78.0   # Northern latitude boundary
-                })
+                self.load_climate_data()
     
     def __del__(self):
         """Clean up resources on object deletion."""
@@ -281,7 +293,7 @@ class ERA5LandGEEProcessor:
         try:
             # Initialize the Earth Engine API
             ee.Authenticate()
-            ee.Initialize(project='era5download-447713')
+            ee.Initialize(project='ee-yuluo-2')
             #ee.Initialize()
             self.ee_initialized = True
             print("Google Earth Engine initialized successfully")
@@ -1901,7 +1913,7 @@ class ERA5LandGEEProcessor:
         
         # Tropical rain forest - typically high rainfall, consistently warm
         def is_in_tropical_rainforest(t, p):
-            if 20 <= t <= 30:
+            if 20 <= t <= 33:
                 # Boundary with tropical savanna, increases with temperature
                 min_precip = 2300 + 45 * (t - 20)
                 return p >= min_precip
@@ -1909,7 +1921,7 @@ class ERA5LandGEEProcessor:
         
         # Tropical forest savanna - seasonally dry tropics
         def is_in_tropical_savanna(t, p):
-            if 18 <= t <= 30:
+            if 18 <= t <= 32:
                 min_precip = 500 + 42 * (t - 18)  # Lower boundary with subtropical desert
                 max_precip = 2300 + 45 * (t - 20)    # Upper boundary with rainforest
                 return min_precip <= p <= max_precip
@@ -1917,7 +1929,7 @@ class ERA5LandGEEProcessor:
         
         # Subtropical desert - hot, very dry
         def is_in_subtropical_desert(t, p):
-            if 15 <= t <= 30:
+            if 18 <= t <= 30:
                 # Upper boundary with savanna, increases with temperature
                 max_precip = 500 + 42 * (t - 18) 
                 return 0 <= p <= max_precip
@@ -1925,35 +1937,36 @@ class ERA5LandGEEProcessor:
         
         # Temperate rain forest - mild temperatures, very wet
         def is_in_temperate_rainforest(t, p):
-            if 3 <= t <= 19:
+            if 4 <= t <= 20:
                 # Curved lower boundary, decreases as it gets warmer
-                min_precip = 400 + (t - 3) * 50
-                max_precip = 1750 + (t - 3) * 35  # Upper boundary with temperate forest
+                min_precip = 1600 + 50 * ( t - 4 )
+                # Upper boundary with temperate rainforest
+                max_precip = 2000 + (t - 4) * 82
+                
                 return min_precip <= p <= max_precip
             return False
         
         # Temperate forest - mild temperature, moderate rainfall
         def is_in_temperate_forest(t, p):
-            if 4 <= t <= 20:
+            if 3 <= t <= 20:
                 
-                min_precip = 1600 + 50 * ( t - 4 )
-                # Upper boundary with temperate rainforest
-                max_precip = 2000 + (t - 4) * 82 
+                min_precip = 400 + (t - 3) * 50
+                max_precip = 1600 + 50 * ( t - 4 )  # Upper boundary with temperate forest
                 return min_precip <= p <= max_precip
             return False
         
         # Woodland/Shrubland - warm, relatively dry
         def is_in_woodland_shrubland(t, p):
-            if -9 <= t <= 20:
-                min_precip = 30 + (t + 9) * 17  # Curved lower boundary
-                max_precip = 50 + ( t + 9) * 42
+            if -8 <= t <= 20:
+                min_precip = 30 + (t + 8) * 17  # Curved lower boundary
+                max_precip = 40 + ( t + 7) * 43
                 return min_precip <= p <= max_precip
             return False
         
         # Temperate grassland/desert - cold to warm, very dry
         def is_in_temperate_grassland_desert(t, p):
             if -9 <= t <= 20:
-                max_precip = 0 + (t - 10) * 16  # Curved upper boundary
+                max_precip = 0 + (t + 9) * 16  # Curved upper boundary
                 return 0 <= p <= max_precip
             return False
         
@@ -1961,7 +1974,7 @@ class ERA5LandGEEProcessor:
         def is_in_boreal_forest(t, p):
             if -7 <= t <= 5:
                 min_precip = 150 + (t + 7) * 30  # Curved lower boundary
-                max_precip = 1000 + (t + 7) * 83  # Curved upper boundary
+                max_precip = 1000 + (t + 4) * 120  # Curved upper boundary
                 return min_precip <= p <= max_precip
             return False
         
@@ -1993,12 +2006,11 @@ class ERA5LandGEEProcessor:
         elif is_in_tundra(temp, precip):
             return 'Tundra'
         
-        # If no match found with curved boundaries, use distance-based approach as fallback
-        # This is similar to the existing code but with some improvements
+           # If no match found, use optimized distance-based approach
         min_distance = float('inf')
         closest_biome = default_biome
         
-        # Define representative points for each biome (more accurate than rectangle center)
+        # Define representative points for each biome
         biome_representative_points = {
             'Tropical rain forest': (25, 3300),          # °C, mm/year
             'Tropical forest savanna': (25, 1500),
@@ -2011,27 +2023,32 @@ class ERA5LandGEEProcessor:
             'Tundra': (-10, 250)
         }
         
-        # Calculate distance to representative points
+        # Calculate normalizations ONCE before the loop
+        temp_range = 48  # -15 to 30°C
+        temp_min = -15
+        temp_norm = (temp - temp_min) / temp_range
+        
+        # Log-scale precipitation once
+        precip_log = np.log1p(max(0, precip))
+        
+        # Scale factors
+        temp_weight = 0.6
+        precip_weight = 0.4
+        
+        # Pre-calculate the maximum log precipitation for normalization
+        max_precip_log = np.log1p(10000)  # Maximum expected value
+        precip_log_norm = precip_log / max_precip_log
+        
+        # Calculate distance to each representative point
         for biome, (biome_temp, biome_precip) in biome_representative_points.items():
-            # Normalize temperature to 0-1 range over -15 to 30°C
-            temp_range = 45  # -15 to 30°C
-            temp_min = -15
-            temp_norm = (temp - temp_min) / temp_range
+            # Normalize the biome reference point the same way
             biome_temp_norm = (biome_temp - temp_min) / temp_range
-            
-            # Normalize precipitation using log scale to better represent its effect
-            # Log scale makes more sense for precipitation differences
-            precip_log = np.log1p(max(0, precip))  # log(1+x) to handle zero
-            biome_precip_log = np.log1p(max(0, biome_precip))
-            
-            # Scale factors - precipitation often has less weight than temperature in biome determination
-            temp_weight = 0.6
-            precip_weight = 0.4
+            biome_precip_log_norm = np.log1p(max(0, biome_precip)) / max_precip_log
             
             # Calculate weighted distance
             distance = np.sqrt(
                 temp_weight * (temp_norm - biome_temp_norm)**2 + 
-                precip_weight * (precip_log / 8 - biome_precip_log / 8)**2  # Scaled to similar range
+                precip_weight * (precip_log_norm - biome_precip_log_norm)**2
             )
             
             if distance < min_distance:
@@ -2041,60 +2058,54 @@ class ERA5LandGEEProcessor:
         print(f"No exact biome match for temp={temp}, precip={precip}. Using closest: {closest_biome}")
         return closest_biome
 
-    def get_climate_at_location(self, lon, lat):
+    def get_climate_at_location_direct(self, lon, lat, temp_climate, precip_climate):
         """
         Get annual mean temperature and precipitation at a specific location
-        using direct raster lookup on GeoTIFF data.
+        using direct lookup from provided climate data.
         
         Parameters:
         -----------
         lon, lat : float
             Coordinates of the location
+        temp_climate : dict
+            Temperature climate data dictionary
+        precip_climate : dict
+            Precipitation climate data dictionary
             
         Returns:
         --------
         tuple
             (temperature, precipitation)
         """
-        if not hasattr(self, 'temp_climate_data') or not hasattr(self, 'precip_climate_data'):
-            # Try to load climate data if not already loaded
-            if self.load_climate_data(bounds = {
-                    'lon_min': -180.0,  # Eastern longitude boundary
-                    'lat_min': -57,  # Southern latitude boundary
-                    'lon_max': 180.0,  # Western longitude boundary 
-                    'lat_max': 78.0   }) == (None, None):
-                print("Could not load climate data, returning default values")
-                return 15.0, 800.0  # Default values for temperate climate
-        
         try:
             # Get temperature using direct raster lookup
             # Convert geographic coordinates to raster row/col
-            row, col = ~self.temp_climate_data['transform'] * (lon, lat)
+            row, col = ~temp_climate['transform'] * (lon, lat)
             row, col = int(row), int(col)
             
             # Make sure the indices are within bounds
-            if 0 <= row < self.temp_climate_data['height'] and 0 <= col < self.temp_climate_data['width']:
-                temperature = float(self.temp_climate_data['data'][row, col])
+            if 0 <= row < temp_climate['height'] and 0 <= col < temp_climate['width']:
+                temperature = float(temp_climate['data'][row, col])
                 
                 # Check for nodata value
-                if self.temp_climate_data['nodata'] is not None and temperature == self.temp_climate_data['nodata']:
+                if temp_climate['nodata'] is not None and temperature == temp_climate['nodata']:
                     temperature = 15.0  # Default value
                 else:
-                    temperature = float(temperature)  # Convert from tenths of degree to degrees Celsius
+                    temperature = float(temperature)
             else:
                 temperature = 15.0  # Default value
             
             # Get precipitation using direct raster lookup
             # Convert geographic coordinates to raster row/col
-            row, col = ~self.precip_climate_data['transform'] * (lon, lat)
+            row, col = ~precip_climate['transform'] * (lon, lat)
             row, col = int(row), int(col)
             
             # Make sure the indices are within bounds
-            if 0 <= row < self.precip_climate_data['height'] and 0 <= col < self.precip_climate_data['width']:
-                precipitation = float(self.precip_climate_data['data'][row, col])
+            if 0 <= row < precip_climate['height'] and 0 <= col < precip_climate['width']:
+                precipitation = float(precip_climate['data'][row, col])
                 
                 # Check for nodata value
-                if self.precip_climate_data['nodata'] is not None and precipitation == self.precip_climate_data['nodata']:
+                if precip_climate['nodata'] is not None and precipitation == precip_climate['nodata']:
                     precipitation = 800.0  # Default value
             else:
                 precipitation = 800.0  # Default value
@@ -2103,10 +2114,7 @@ class ERA5LandGEEProcessor:
         
         except Exception as e:
             print(f"Error getting climate at location ({lon}, {lat}): {str(e)}")
-            import traceback
-            traceback.print_exc()
             return 15.0, 800.0  # Default values for temperate climate
-
     def resample_climate_data(self, target_lat=None, target_lon=None):
         """
         Resample climate data from GeoTIFF files to match a target resolution.
@@ -2345,20 +2353,11 @@ class ERA5LandGEEProcessor:
     def precalculate_biomes(self, points=None, region=None, num_workers=None):
         """
         Pre-calculate biomes for all points or a grid in the region of interest.
-        Uses parallel processing for efficiency.
-        
-        Parameters:
-        -----------
-        points : list of dict, optional
-            List of specific points [{lat, lon, name}, ...]
-        region : dict, optional
-            Region boundaries {lat_min, lat_max, lon_min, lon_max}
-        resolution : int, optional
-            Number of grid points to calculate for each dimension if using region
-        num_workers : int, optional
-            Number of worker processes to use (defaults to CPU count - 1)
+        Uses parallel processing with shared memory for efficiency.
         """
         import multiprocessing as mp
+        import tempfile
+        import os
         
         print("Pre-calculating biomes for all locations using parallel processing...")
         
@@ -2388,9 +2387,17 @@ class ERA5LandGEEProcessor:
             print(f"Processing {len(location_points)} specific points")
         
         elif region:
-            # Create a grid for the region
-            lats = np.linspace(region['lat_min'], region['lat_max'], 1351)
-            lons = np.linspace(region['lon_min'], region['lon_max'], 3601)
+            # Create a grid for the region with adaptive resolution
+            lat_range = region['lat_max'] - region['lat_min']
+            lon_range = region['lon_max'] - region['lon_min']
+            
+            # Calculate appropriate resolution (points per degree)
+            points_per_degree = 20  # Reasonable default
+            lat_points = max(10, int(lat_range * points_per_degree))
+            lon_points = max(10, int(lon_range * points_per_degree))
+            
+            lats = np.linspace(region['lat_min'], region['lat_max'], lat_points)
+            lons = np.linspace(region['lon_min'], region['lon_max'], lon_points)
             
             for lat in lats:
                 for lon in lons:
@@ -2398,14 +2405,14 @@ class ERA5LandGEEProcessor:
             
             print(f"Processing {len(location_points)} grid points in region:")
             print(f"  Region: lat={region['lat_min']}-{region['lat_max']}, lon={region['lon_min']}-{region['lon_max']}")
-            print(f"  Resolution: {1351}x{3601}")
+            print(f"  Resolution: {lat_points}x{lon_points}")
         
         else:
             print("No points or region specified for biome precalculation")
             return
         
         # Split the points into batches for parallel processing
-        batch_size = max(100, len(location_points) // (num_workers * 10))  # Aim for ~10 batches per worker
+        batch_size = max(100, len(location_points) // (num_workers * 10))
         batches = []
         
         for i in range(0, len(location_points), batch_size):
@@ -2414,17 +2421,40 @@ class ERA5LandGEEProcessor:
         
         print(f"Split {len(location_points)} points into {len(batches)} batches of ~{batch_size} points each")
         
-        # Prepare processor settings to pass to worker processes
-        processor_settings = (str(self.temp_climate_file), str(self.precip_climate_file))
+        # Create temporary files for memory-mapped arrays
+        temp_data_file = os.path.join(tempfile.gettempdir(), f"temp_climate_data_{os.getpid()}.npy")
+        precip_data_file = os.path.join(tempfile.gettempdir(), f"precip_climate_data_{os.getpid()}.npy")
         
-        # Process batches in parallel
+        # Save climate data as memory-mapped files
+        np.save(temp_data_file, self.temp_climate_data['data'])
+        np.save(precip_data_file, self.precip_climate_data['data'])
+        
+        # Create additional info to pass to workers
+        climate_info = {
+            'temp_transform': self.temp_climate_data['transform'],
+            'precip_transform': self.precip_climate_data['transform'],
+            'temp_nodata': self.temp_climate_data['nodata'],
+            'precip_nodata': self.precip_climate_data['nodata'],
+            'temp_data_file': temp_data_file,
+            'precip_data_file': precip_data_file,
+            'height': self.temp_climate_data['height'],
+            'width': self.temp_climate_data['width']
+        }
+        
+        # Process batches in parallel with shared climate data
         print("Starting parallel biome determination...")
         start_time = time.time()
         
         with mp.Pool(processes=num_workers) as pool:
-            # Each worker gets (processor_settings, batch_of_points)
-            worker_args = [(processor_settings, batch) for batch in batches]
-            results = pool.map(_biome_batch_processor, worker_args)
+            worker_args = [(climate_info, batch) for batch in batches]
+            results = pool.map(_biome_batch_processor_shared, worker_args)
+        
+        # Clean up temporary files
+        try:
+            os.remove(temp_data_file)
+            os.remove(precip_data_file)
+        except Exception as e:
+            print(f"Warning: Could not remove temporary files: {e}")
         
         # Merge all results into the main cache
         total_biomes = 0
@@ -2570,411 +2600,692 @@ class ERA5LandGEEProcessor:
         
         return timestamps  # Return unchanged if not recognized type
         
-        return timestamps  # Return unchanged if not recognized type
-    def create_prediction_dataset(self, start_date=None, end_date=None, points=None, region=None, use_existing_data=True, use_utc=True):
+
+    def create_prediction_dataset(self, start_date, end_date, points=None, region=None, output_dir=None, lat_chunk_size=50, lon_chunk_size=100, time_chunk_size=96):
         """
-        Create a dataset ready for prediction by extracting data.
-        
+        Create a dataset ready for prediction by extracting data for the required time period.
+        Processes large regions in spatio-temporal-longitude chunks to avoid memory errors.
+
         Parameters:
         -----------
-        start_date : str or datetime, optional
-            Start date for the prediction period (required if use_existing_data=False)
-        end_date : str or datetime, optional
-            End date for the prediction period (required if use_existing_data=False)
+        start_date : str or datetime
+            Start date for the prediction period
+        end_date : str or datetime
+            End date for the prediction period
         points : list of dict, optional
             List of points to extract data for [{lat, lon, name}, ...]
         region : dict, optional
             Region to extract data for, if no points are specified
-        use_existing_data : bool, optional
-            If True, will use all data already loaded in self.datasets instead of 
-            loading new data. When True, start_date and end_date are optional and
-            only used to filter the existing data if provided.
-            
+        output_dir : str or Path, optional
+            Base directory to save output files (defaults to config.PREDICTION_DIR)
+        lat_chunk_size : int, optional
+            Number of latitude rows to process in each spatial chunk (default: 50)
+        lon_chunk_size : int, optional
+            Number of longitude columns per spatial chunk (default: 100)
+        time_chunk_size : int, optional
+            Number of time steps per temporal chunk (default: 96)
+
         Returns:
         --------
-        pandas.DataFrame
-            DataFrame with features ready for prediction
+        list of str or list of pandas.DataFrame
+            - If processing a region: Returns a list of file paths where each latitude chunk DataFrame was saved.
+            - If processing points: Returns a list of pandas DataFrames, one for each point.
+            Returns None if no data can be processed or if processing fails.
         """
-        # Set default region if not specified
-        if region is None:
-            region = {
-                'lat_min': config.DEFAULT_LAT_MIN,
-                'lat_max': config.DEFAULT_LAT_MAX,
-                'lon_min': config.DEFAULT_LON_MIN,
-                'lon_max': config.DEFAULT_LON_MAX
-            }
-        
-        # Make sure climate data is loaded for biome determination
-        if hasattr(self, 'temp_climate_file') and hasattr(self, 'precip_climate_file'):
-            if not hasattr(self, 'temp_climate_data') or not hasattr(self, 'precip_climate_data'):
-                self.load_climate_data(bounds = {
-                    'lon_min': -180.0,  # Eastern longitude boundary
-                    'lat_min': -57,  # Southern latitude boundary
-                    'lon_max': 180.0,  # Western longitude boundary 
-                    'lat_max': 78.0   })
-        
-        # Check if we're using existing data
-        if use_existing_data:
-            if not self.datasets:
-                raise ValueError("use_existing_data=True but no data has been loaded. Call load_variable_data() first.")
-            
-            # Determine time range from existing data if not specified
-            if start_date is None or end_date is None:
-                # Find min and max dates across all datasets
-                # With this standardized version
-                all_times = []
-                for ds_name, ds in self.datasets.items():
-                    if 'time' in ds.coords:
-                        times = pd.to_datetime(ds.coords['time'].values)
-                        all_times.extend(times)
-                    elif 'datetime' in ds.coords:
-                        times = pd.to_datetime(ds.coords['datetime'].values)
-                        all_times.extend(times)
+        # --- Initial Setup ---
+        start_time_total = time.time()
+        print(f"Starting dataset creation for {start_date} to {end_date}")
 
-                # Standardize all timestamps before comparison
-                use_utc = True  # Choose whichever standard you prefer
-                all_times = self.standardize_timestamps(all_times, use_utc=use_utc)
-                
-                if not all_times:
-                    raise ValueError("No time coordinates found in existing datasets")
-                
-                # Use entire date range from existing data if not specified
-                if start_date is None:
-                    start_date = min(all_times)
-                    print(f"Using start_date from existing data: {start_date}")
-                if end_date is None:
-                    end_date = max(all_times)
-                    print(f"Using end_date from existing data: {end_date}")
-            
-            # Check required derived variables
-            required_derived_vars = ['wind_speed', 'vpd', 'ppfd_in', 'ext_rad']
-            if not all(var in self.datasets for var in required_derived_vars):
-                print("Calculating missing derived variables...")
-                self.calculate_derived_variables()
-        else:
-            # Traditional mode - we need to load data for each month in the range
-            if start_date is None or end_date is None:
-                raise ValueError("start_date and end_date are required when use_existing_data=False")
-                
-            # Convert dates to datetime objects if they're strings
+        # --- (Keep date parsing, mode determination, output dir setup) ---
+        # Convert dates to datetime objects
+        try:
             start_date = pd.to_datetime(start_date)
             end_date = pd.to_datetime(end_date)
-            # Make consistent with your chosen standard
-            if use_utc:
-                # Make timezone-aware (UTC)
-                if start_date.tzinfo is None:
-                    start_date = start_date.replace(tzinfo=datetime.timezone.utc)
-                if end_date.tzinfo is None:
-                    end_date = end_date.replace(tzinfo=datetime.timezone.utc)
-            else:
-                # Make timezone-naive
-                if start_date.tzinfo is not None:
-                    start_date = start_date.replace(tzinfo=None)
-                if end_date.tzinfo is not None:
-                    end_date = end_date.replace(tzinfo=None)
-            # Make consistent with your chosen standard
-            if use_utc:
-                # Make timezone-aware (UTC)
-                if start_date.tzinfo is None:
-                    start_date = start_date.replace(tzinfo=datetime.timezone.utc)
-                if end_date.tzinfo is None:
-                    end_date = end_date.replace(tzinfo=datetime.timezone.utc)
-            else:
-                # Make timezone-naive
-                if start_date.tzinfo is not None:
-                    start_date = start_date.replace(tzinfo=None)
-                if end_date.tzinfo is not None:
-                    end_date = end_date.replace(tzinfo=None)
-            # Load data for each month in the range
-            current_date = start_date
-            while current_date <= end_date:
-                year = current_date.year
-                month = current_date.month
-                
-                print(f"\nProcessing data for {year}-{month:02d}...")
-                
-                # Load variable data for this month
-                self.load_variable_data(config.REQUIRED_VARIABLES, year, month, None, region)
-                
-                # Calculate derived variables
-                self.calculate_derived_variables()
-                
-                # Move to the next month
-                if current_date.month == 12:
-                    current_date = pd.Timestamp(current_date.year + 1, 1, 1)
-                else:
-                    current_date = pd.Timestamp(current_date.year, current_date.month + 1, 1)
-        
-        # Convert dates to datetime objects if they're strings
-        start_date = pd.to_datetime(start_date)
-        end_date = pd.to_datetime(end_date)
-        
-        # Process all data to create prediction dataset
-        all_data = []
-        
-        # Select only the variables needed for prediction
-        prediction_vars = []
-        for era5_name, model_name in config.VARIABLE_RENAME.items():
-            if era5_name in self.datasets:
-                prediction_vars.append(era5_name)
-        
-        if not prediction_vars:
-            print("No valid data variables found")
+            # Ensure end_date includes the whole day if just a date is given
+            if end_date.normalize() == end_date: # Checks if time part is midnight
+                 end_date = end_date + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            print(f"Processing time range: {start_date} to {end_date}")
+        except Exception as e:
+            print(f"Error parsing start/end dates: {e}")
             return None
-        
-        print(f"Processing variables: {prediction_vars}")
-        
-        # Create DataArrays for each point or grid cell
-        if points:
-            # Extract data for specific points
-            for point in points:
-                point_data = {}
-                point_data['name'] = point.get('name', f"Point_{point['lat']}_{point['lon']}")
-                point_data['latitude'] = point['lat']
-                point_data['longitude'] = point['lon']
-                
-                # Get biome for this point using climate-based method
-                if config.BIOME_FEATURES:
-                    biome_type = self.get_biome_at_location(point['lon'], point['lat'])
-                    biome_features = self.create_biome_one_hot(biome_type)
-                    point_data.update(biome_features)
-                
-                # Extract time series for each variable
-                for var_name in prediction_vars:
-                    try:
-                        ds = self.datasets[var_name]
-                        
-                        # Find the data variable in the dataset
-                        data_var = None
-                        for var in ds.data_vars:
-                            data_var = var
-                            break
-                        
-                        if data_var:
-                            # Extract the nearest grid cell
-                            ts = ds[data_var].sel(
-                                latitude=point['lat'],
-                                longitude=point['lon'],
-                                method='nearest'
-                            )
-                            
-                            # Get the time coordinate name
-                            time_dim = None
-                            for dim in ts.dims:
-                                if dim.lower() in ['time', 'datetime']:
-                                    time_dim = dim
-                                    break
-                            
-                            if time_dim is None:
-                                print(f"Warning: No time dimension found in {var_name}")
-                                continue
-                            
-                            # Filter to the requested date range if specified
-                            if start_date is not None and end_date is not None:
-                                ts = ts.sel({time_dim: slice(start_date, end_date)})
-                            
-                            # Convert to pandas Series with proper time index
-                            times = ts[time_dim].values
-                            values = ts.values
-                            series = pd.Series(values, index=times)
-                            
-                            # Rename to model variable name
-                            model_name = config.VARIABLE_RENAME.get(var_name, var_name)
-                            point_data[model_name] = series
-                        else:
-                            print(f"No data variable found in {var_name} dataset")
-                    except Exception as e:
-                        print(f"Error extracting {var_name} for point {point_data['name']}: {str(e)}")
-                        import traceback
-                        traceback.print_exc()
-                
-                # Create DataFrame from the point data
-                try:
-                    # Find a common time index across all series
-                    all_series = [s for s in point_data.values() if isinstance(s, pd.Series)]
-                    if all_series:
-                        # Create a DataFrame with all data
-                        df = pd.DataFrame(point_data)
-                        
-                        # Set datetime index if available
-                        time_cols = [col for col in df.columns if col.lower() in ['time', 'datetime']]
-                        if time_cols:
-                            df = df.set_index(time_cols[0])
-                        
-                        # Add time features if configured
-                        if config.TIME_FEATURES:
-                            df = self.add_time_features(df)
-                        
-                        # Add to the list
-                        all_data.append(df)
-                    else:
-                        print(f"No valid time series data for point {point_data['name']}")
-                except Exception as e:
-                    print(f"Error creating DataFrame for point {point_data['name']}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-        else:
-            # Extract data for entire region grid cells
-            # First, build a common grid
-            lat_var = None
-            lon_var = None
-            time_var = None
-            
-            # Use the first dataset to get coordinate variables
-            first_ds = self.datasets[prediction_vars[0]]
-            for var in first_ds.coords:
-                if var.lower() in ['latitude', 'lat']:
-                    lat_var = var
-                elif var.lower() in ['longitude', 'lon']:
-                    lon_var = var
-                elif var.lower() in ['time', 'datetime']:
-                    time_var = var
-            
-            if not all([lat_var, lon_var, time_var]):
-                print("Could not identify coordinate variables")
-                return None
-            
-            # Get the grid coordinates
-            lats = first_ds[lat_var].values
-            lons = first_ds[lon_var].values
-            times = first_ds[time_var].values
-            
-            print(f"Grid dimensions: {len(lats)}x{len(lons)} with {len(times)} time steps")
-            
-            # For each grid cell, create a DataFrame
-            for lat_idx, lat in enumerate(lats):
-                for lon_idx, lon in enumerate(lons):
-                    grid_data = {}
-                    grid_data['name'] = f"Grid_{lat}_{lon}"
-                    grid_data['latitude'] = lat
-                    grid_data['longitude'] = lon
-                    
-                    # Get biome for this grid cell using climate-based method
-                    if config.BIOME_FEATURES:
-                        biome_type = self.get_biome_at_location(lon, lat)
-                        biome_features = self.create_biome_one_hot(biome_type)
-                        grid_data.update(biome_features)
-                    
-                    # Extract time series for each variable
-                    for var_name in prediction_vars:
-                        try:
-                            ds = self.datasets[var_name]
-                            
-                            # Find the data variable in the dataset
-                            data_var = None
-                            for var in ds.data_vars:
-                                data_var = var
-                                break
-                            
-                            if data_var:
-                                # Extract the grid cell
-                                # Try setting Dask to use memory instead of disk if available
-                                if HAVE_DASK:
-                                    with dask.config.set({'temporary_directory': None, 'local_directory': None}):
-                                        ts = ds[data_var].sel(
-                                            latitude=lat,
-                                            longitude=lon,
-                                            method='nearest'
-                                        )
-                                        
-                                        # Get the time coordinate name
-                                        time_dim = None
-                                        for dim in ts.dims:
-                                            if dim.lower() in ['time', 'datetime']:
-                                                time_dim = dim
-                                                break
-                                        
-                                        if time_dim is None:
-                                            print(f"Warning: No time dimension found in {var_name}")
-                                            continue
-                                        
-                                        # Filter to the requested date range if specified
-                                        if start_date is not None and end_date is not None:
-                                            ts = ts.sel({time_dim: slice(start_date, end_date)})
-                                        
-                                        # Compute the result
-                                        result = ts.compute()
-                                        series = pd.Series(result.values, index=ts[time_dim].values)
-                                else:
-                                    # Without Dask, use direct selection
-                                    ts = ds[data_var].sel(
-                                        latitude=lat,
-                                        longitude=lon,
-                                        method='nearest'
-                                    )
-                                    
-                                    # Get the time coordinate name
-                                    time_dim = None
-                                    for dim in ts.dims:
-                                        if dim.lower() in ['time', 'datetime']:
-                                            time_dim = dim
-                                            break
-                                    
-                                    if time_dim is None:
-                                        print(f"Warning: No time dimension found in {var_name}")
-                                        continue
-                                    
-                                    # Filter to the requested date range if specified
-                                    if start_date is not None and end_date is not None:
-                                        ts = ts.sel({time_dim: slice(start_date, end_date)})
-                                    
-                                    # Convert to pandas Series
-                                    series = pd.Series(ts.values, index=ts[time_dim].values)
-                                
-                                # Rename to model variable name
-                                model_name = config.VARIABLE_RENAME.get(var_name, var_name)
-                                grid_data[model_name] = series
-                            else:
-                                print(f"No data variable found in {var_name} dataset")
-                        except Exception as e:
-                            print(f"Error extracting {var_name} for grid cell ({lat}, {lon}): {str(e)}")
-                            import traceback
-                            traceback.print_exc()
-                    
-                    # Create DataFrame from the grid data
-                    try:
-                        # Find a common time index across all series
-                        all_series = [s for s in grid_data.values() if isinstance(s, pd.Series)]
-                        if all_series:
-                            # Create a DataFrame with all data
-                            df = pd.DataFrame(grid_data)
-                            
-                            # Set datetime index if available
-                            time_cols = [col for col in df.columns if col.lower() in ['time', 'datetime']]
-                            if time_cols:
-                                df = df.set_index(time_cols[0])
-                            
-                            # Add time features if configured
-                            if config.TIME_FEATURES:
-                                df = self.add_time_features(df)
-                            
-                            # Add to the list
-                            all_data.append(df)
-                        else:
-                            print(f"No valid time series data for grid cell ({lat}, {lon})")
-                    except Exception as e:
-                        print(f"Error creating DataFrame for grid cell ({lat}, {lon}): {str(e)}")
-                        import traceback
-                        traceback.print_exc()
-        
-        # Combine all DataFrames
-        if all_data:
-            print(f"Combining {len(all_data)} datasets...")
-            # Combine by concatenating (for points) or by merging with multi-index (for grid)
-            if points:
-                # For points, keep each point separate
-                result = all_data
 
+        # Determine processing mode and define region if needed
+        if points:
+            processing_mode = 'points'
+            print(f"Processing mode: Specific points ({len(points)})")
+            if region is None:
+                 all_lats = [p['lat'] for p in points]
+                 all_lons = [p['lon'] for p in points]
+                 region = {
+                     'lat_min': min(all_lats) - 0.1, 'lat_max': max(all_lats) + 0.1,
+                     'lon_min': min(all_lons) - 0.1, 'lon_max': max(all_lons) + 0.1
+                 }
+                 print(f"Region automatically determined from points: {region}")
             else:
-                # For grid, combine with multi-index
-                result = pd.concat(all_data)
-                
-            
-            print(f"Created prediction dataset with {len(result)} rows")
-            return result
+                 print(f"Using provided region for point data loading: {region}")
         else:
-            print("No data found for the specified time period")
+            processing_mode = 'region'
+            print("Processing mode: Region")
+            if region is None:
+                 region = {
+                     'lat_min': getattr(config, 'DEFAULT_LAT_MIN', 0), 'lat_max': getattr(config, 'DEFAULT_LAT_MAX', 0),
+                     'lon_min': getattr(config, 'DEFAULT_LON_MIN', 0), 'lon_max': getattr(config, 'DEFAULT_LON_MAX', 0)
+                 }
+            print(f"Processing for region: Lat({region.get('lat_min', 'N/A')} to {region.get('lat_max', 'N/A')}), Lon({region.get('lon_min', 'N/A')} to {region.get('lon_max', 'N/A')})")
+
+        # Set default output directory
+        if output_dir is None:
+            output_dir = getattr(config, 'PREDICTION_DIR', Path('./prediction_output'))
+        output_dir = Path(output_dir)
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Using output directory: {output_dir.resolve()}")
+        except Exception as e:
+            print(f"Error creating output directory {output_dir}: {e}")
             return None
+        # --- End Initial Setup ---
+
+
+        # --- Monthly Data Loading and Combination ---
+        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        # NOTE: If reducing chunk sizes doesn't work, the next major step is to
+        # refactor this section. Instead of loading all months here, you would
+        # move the month iteration inside the spatio-temporal loops below (in the
+        # 'region' processing block) and load only the necessary data for the
+        # current small chunk directly from files.
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        all_monthly_data = []
+        month_iterator = pd.date_range(start=start_date.replace(day=1), end=end_date.replace(day=1), freq='MS')
+
+        required_vars = getattr(config, 'REQUIRED_VARIABLES', [])
+        if not required_vars:
+            print("Error: config.REQUIRED_VARIABLES is not defined or empty.")
+            return None
+
+        for current_month_start in month_iterator:
+            year = current_month_start.year
+            month = current_month_start.month
+            print(f"\nProcessing data loading for {year}-{month:02d}...")
+
+            try:
+                 monthly_datasets = self.load_variable_data(required_vars, year, month, region)
+            except AttributeError:
+                 print("Error: self.load_variable_data method not found.")
+                 return None
+            except Exception as e_load:
+                 print(f"Error during load_variable_data for {year}-{month}: {e_load}")
+                 traceback.print_exc() # Print full traceback for loading errors
+                 monthly_datasets = None
+
+            if not monthly_datasets:
+                print(f"No primary data loaded for {year}-{month:02d}. Skipping month.")
+                continue
+
+            self.datasets = monthly_datasets
+            print(f"Calculating derived variables for {year}-{month:02d}...")
+            try: self.calculate_derived_variables()
+            except AttributeError: print("Warning: calculate_derived_variables method not found.")
+            except Exception as e_deriv: print(f"Warning: Error calculating derived variables: {e_deriv}")
+
+            print(f"Flattening time dimensions for {year}-{month:02d}...")
+            try: self.flatten_time_dimensions()
+            except AttributeError: print("Warning: flatten_time_dimensions method not found.")
+            except Exception as e_flat: print(f"Warning: Error flattening time dimensions: {e_flat}")
+
+            all_monthly_data.append(self.datasets.copy())
+            # Explicitly clean up monthly dataset to free memory sooner
+            del self.datasets
+            gc.collect()
+            print(f"Finished processing for {year}-{month:02d}")
+
+        if not all_monthly_data:
+            print("No data could be processed for the entire date range.")
+            return None
+
+        # --- Combine Monthly Data ---
+        print("\nCombining data across all months...")
+        # (Keep the existing combination logic with try/except blocks for concat)
+        # ... (combination logic as before) ...
+        combined_datasets = {}
+        all_vars = sorted(list(set(k for month_data in all_monthly_data for k in month_data.keys())))
+
+        for var_name in all_vars:
+            print(f"--- Combining variable: {var_name} ---")
+            datasets_to_concat = [
+                month_data[var_name]
+                for month_data in all_monthly_data
+                if var_name in month_data and month_data[var_name] is not None
+            ]
+
+            if datasets_to_concat:
+                print(f"Found {len(datasets_to_concat)} monthly datasets for {var_name}")
+                combined_success = False
+                try:
+                    # Attempt 1: Concatenate with 'no_conflicts'
+                    print(f"Attempting xr.concat for {var_name} (compat='no_conflicts')...")
+                    # --- Check and align chunks before concat ---
+                    uses_dask = any(hasattr(ds, 'chunks') and ds.chunks for ds in datasets_to_concat)
+                    if uses_dask:
+                        first_chunks = None
+                        # Find the first dataset with chunks to use as a template
+                        for ds in datasets_to_concat:
+                             if hasattr(ds, 'chunks') and ds.chunks:
+                                 first_chunks = ds.chunks
+                                 break
+                        if first_chunks:
+                             needs_rechunking = False
+                             for ds in datasets_to_concat:
+                                 if hasattr(ds, 'chunks') and ds.chunks and ds.chunks != first_chunks:
+                                     needs_rechunking = True
+                                     break
+                             if needs_rechunking:
+                                 print(f"  Detected inconsistent chunks for {var_name}. Rechunking to match first dataset's chunks: {first_chunks}")
+                                 aligned_datasets = []
+                                 for ds in datasets_to_concat:
+                                     if hasattr(ds,'chunks') and ds.chunks != first_chunks:
+                                          aligned_datasets.append(ds.chunk(first_chunks))
+                                     else:
+                                          aligned_datasets.append(ds)
+                                 datasets_to_concat = aligned_datasets
+                                 del aligned_datasets # Free memory
+                                 gc.collect()
+                        else:
+                             print(f"  Warning: Dask detected but couldn't determine template chunks for {var_name}.")
+                    # --- End chunk alignment ---
+
+                    combined_ds = xr.concat(
+                        datasets_to_concat, dim='datetime', join='inner',
+                        compat='no_conflicts', coords='minimal'
+                    )
+                    combined_datasets[var_name] = combined_ds
+                    print(f"Combined {var_name} successfully (Attempt 1).")
+                    combined_success = True
+
+                except TypeError as te:
+                    if "unhashable type: 'Frozen'" not in str(te) and "Cannot compare types" not in str(te): # Add check for other common type errors
+                        print(f"TypeError combining {var_name} (compat='no_conflicts'): {te}. Skipping.")
+                        traceback.print_exc()
+                        continue # Skip this variable
+                    print(f"Caught TypeError ({te}) with compat='no_conflicts'. Will try cleaning attributes.")
+                except Exception as e:
+                    print(f"Error combining {var_name} with compat='no_conflicts': {type(e).__name__} - {e}. Will try cleaning attributes.")
+                    traceback.print_exc()
+
+                if not combined_success:
+                    print(f"Attempting xr.concat for {var_name} after cleaning attributes...")
+                    try:
+                        cleaned_datasets = []
+                        for ds in datasets_to_concat:
+                            ds_copy = ds.copy(deep=False); ds_copy.attrs = {}
+                            for var in ds_copy.variables: ds_copy[var].attrs = {}
+                            # Also clean coordinate attributes
+                            for coord in ds_copy.coords: ds_copy[coord].attrs = {}
+                            cleaned_datasets.append(ds_copy)
+
+                        # Maybe try 'override' or 'equals' if 'no_conflicts' failed first time
+                        combined_ds_cleaned = xr.concat(
+                            cleaned_datasets, dim='datetime', join='inner',
+                            compat='override', coords='minimal' # Or try compat='equals'
+                        )
+                        combined_datasets[var_name] = combined_ds_cleaned
+                        print(f"Combined {var_name} successfully after cleaning attributes (Attempt 2).")
+
+                    except Exception as e_clean:
+                        print(f"Error combining {var_name} even after cleaning attributes: {type(e_clean).__name__} - {e_clean}. Skipping this variable.")
+                        traceback.print_exc()
+            else:
+                print(f"No monthly datasets found for {var_name} to combine.")
+            # Clean up list used in loop
+            del datasets_to_concat
+            gc.collect()
+        # --- End Combination Loop ---
+
+        # Explicitly delete the list of monthly data
+        del all_monthly_data
+        gc.collect()
+
+
+        if not combined_datasets:
+            print("Failed to combine any variables across months.")
+            self.datasets = {}
+            return None
+
+        self.datasets = combined_datasets
+        print("Finished combining monthly data.")
+        # --- End Monthly Data Loading and Combination ---
+
+
+        # --- Prepare for Prediction Data Extraction ---
+        # (Keep variable preparation logic)
+        var_rename_map = getattr(config, 'VARIABLE_RENAME', {})
+        prediction_vars = [era5_name for era5_name in var_rename_map if era5_name in self.datasets]
+        for var_name in self.datasets:
+             if var_name not in prediction_vars and var_name not in var_rename_map.values():
+                  prediction_vars.append(var_name)
+
+        if not prediction_vars:
+            print("No variables available for prediction after combining months.")
+            return None
+        print(f"Variables prepared for extraction: {prediction_vars}")
+        # --- End Prepare ---
+
+
+        # --- Branch based on processing mode ---
+        if processing_mode == 'points':
+            # --- (Keep existing point processing logic) ---
+            print(f"\nExtracting data for {len(points)} specified points...")
+            final_data_frames = []
+            for point_idx, point in enumerate(points):
+                point_name = point.get('name', f"Point_{point['lat']:.4f}_{point['lon']:.4f}")
+                print(f"Processing point {point_idx + 1}/{len(points)}: {point_name} ({point['lat']:.4f}, {point['lon']:.4f})")
+                point_timeseries_static = {'name': point_name, 'latitude': point['lat'], 'longitude': point['lon']}
+
+
+                valid_point_data = True
+                first_var_time_coord = None
+                lazy_arrays = {}
+
+                for var_name in prediction_vars:
+                     if var_name not in self.datasets: continue
+                     try:
+                          ds = self.datasets[var_name]
+                          data_var_name = list(ds.data_vars)[0] if list(ds.data_vars) else None
+                          if not data_var_name:
+                               print(f"  Warning: No data variable found in dataset for {var_name}")
+                               continue
+
+                          # Ensure necessary coords exist before selection
+                          coord_check_ok = True
+                          for coord in ['latitude', 'longitude']: # Check standard names first
+                               if coord not in ds.coords:
+                                    # Try alternative names
+                                    alt_lat = next((c for c in ds.coords if c.lower() == 'lat'), None)
+                                    alt_lon = next((c for c in ds.coords if c.lower() == 'lon'), None)
+                                    if coord == 'latitude' and alt_lat:
+                                         ds = ds.rename({alt_lat: 'latitude'})
+                                    elif coord == 'longitude' and alt_lon:
+                                         ds = ds.rename({alt_lon: 'longitude'})
+                                    else:
+                                         print(f"  Error: Coordinate '{coord}' not found in dataset for {var_name}")
+                                         coord_check_ok = False; break
+                          if not coord_check_ok:
+                               valid_point_data = False; break
+
+                          # Perform selection
+                          ts_lazy = ds[data_var_name].sel(latitude=point['lat'], longitude=point['lon'], method='nearest')
+
+                          if first_var_time_coord is None and 'datetime' in ts_lazy.coords:
+                               first_var_time_coord = ts_lazy['datetime'].copy(deep=True) # Deep copy coord
+
+                          model_name = var_rename_map.get(var_name, var_name)
+                          lazy_arrays[model_name] = ts_lazy
+
+                     except Exception as e_sel:
+                          print(f"  Error selecting {var_name} for point {point_name}: {e_sel}")
+                          traceback.print_exc()
+                          valid_point_data = False; break
+
+                if valid_point_data and first_var_time_coord is not None:
+                     print(f"  Computing data for point {point_name}...")
+                     try:
+                          # Compute necessary data
+                          computed_arrays = dask.compute(lazy_arrays)[0] if HAVE_DASK else {k: v.compute() for k, v in lazy_arrays.items()}
+
+                          # Construct DataFrame using computed data
+                          time_index_vals = first_var_time_coord.values # Use the copied coord
+                          df_data = {k: computed_arrays[k].values for k in computed_arrays}
+                          df = pd.DataFrame(df_data, index=time_index_vals)
+                          df.index.name = 'time'
+
+                          for static_key, static_val in point_timeseries_static.items():
+                              df[static_key] = static_val
+
+                          if getattr(config, 'TIME_FEATURES', False): df = self.add_time_features(df)
+
+                          df = df[(df.index >= start_date) & (df.index <= end_date)].sort_index()
+
+                          if not df.empty:
+                              final_data_frames.append(df)
+                              print(f"  Successfully processed point {point_name}. DataFrame shape: {df.shape}")
+                          else:
+                              print(f"  Warning: No data remained for point {point_name} after date filtering.")
+                     except Exception as e_compute:
+                          print(f"  Error computing or creating DataFrame for point {point_name}: {e_compute}")
+                          traceback.print_exc()
+                     finally:
+                          # Clean up computed data for the point
+                          del lazy_arrays, computed_arrays
+                          gc.collect()
+                else:
+                     print(f"  Skipping point {point_name} due to data extraction errors or missing time coordinate.")
+
+            # Explicitly clean up combined datasets after point processing is done
+            del self.datasets
+            gc.collect()
+
+            print(f"Finished processing points. Returning {len(final_data_frames)} DataFrames.")
+            return final_data_frames if final_data_frames else None
+            # --- End Process Specific Points ---
+
+        elif processing_mode == 'region':
+            # --- Process Entire Region in Spatio-Temporal-Longitudinal Chunks ---
+            print("\nProcessing entire region in spatio-temporal-longitude chunks...")
+            saved_chunk_files = []
+
+            # --- Prepare Merged Dataset ---
+            print("Merging all variables into a single dataset for chunking...")
+            merged_ds = xr.Dataset()
+            lat_var, lon_var, time_var = None, None, None
+            try:
+                 # (Keep logic to find coordinate names and merge variables)
+                 # Use first available variable to find coordinate names
+                 first_var_name = next(iter(self.datasets.keys())) # Get first key safely
+                 first_ds = self.datasets[first_var_name]
+                 lat_var = next((v for v in first_ds.coords if v.lower() in ['latitude', 'lat']), None)
+                 lon_var = next((v for v in first_ds.coords if v.lower() in ['longitude', 'lon']), None)
+                 time_var = next((v for v in first_ds.coords if v.lower() in ['datetime']), None) # Assuming 'datetime' after flatten
+
+                 if not all([lat_var, lon_var, time_var]):
+                      print("Could not identify required coordinate variables (latitude, longitude, datetime).")
+                      del self.datasets # Clean up combined data
+                      gc.collect()
+                      return None
+
+                 # Merge variables using found coordinate names
+                 for var_name in prediction_vars: # Use filtered prediction_vars
+                      if var_name not in self.datasets: continue # Ensure var exists
+                      ds = self.datasets[var_name]
+                      # Find the actual data variable name within the dataset
+                      data_var_name = list(ds.data_vars)[0] if list(ds.data_vars) else None
+                      if not data_var_name:
+                           print(f"Warning: No data variable found in dataset for {var_name} during merge.")
+                           continue
+                      model_name = var_rename_map.get(var_name, var_name) # Use rename map
+                      merged_ds[model_name] = ds[data_var_name]
+                      # Clean up individual dataset as we go
+                      del self.datasets[var_name]
+                      gc.collect()
+
+
+                 print(f"Merged dataset variables for chunking: {list(merged_ds.data_vars)}")
+                 print(f"Merged dataset coords for chunking: {list(merged_ds.coords)}")
+            except Exception as e:
+                 print(f"Error merging variables into a single dataset: {e}")
+                 traceback.print_exc()
+                 del self.datasets # Clean up combined data
+                 gc.collect()
+                 return None
+            finally:
+                 # Clean up the original combined_datasets dictionary as it's no longer needed
+                 del self.datasets
+                 gc.collect()
+            # --- End Prepare Merged Dataset ---
+
+            # --- ****** MODIFIED: Rechunk Merged Dataset ****** ---
+            print("\nRechunking merged dataset for optimized selection...")
+            # --- START MODIFICATION ---
+            # FIX: Use SMALLER, FIXED rechunk sizes to combat MemoryError during compute.
+            # These control the Dask chunks of the merged dataset. Smaller chunks
+            # might help Dask request data from cfgrib in smaller pieces.
+            # Adjust these values based on available memory and testing.
+            spatial_rechunk_size = 25   # e.g., 10, 25, 50 (try smaller first)
+            time_rechunk = 48         # e.g., 24, 48, 96 (try smaller first)
+            # --- END MODIFICATION ---
+
+            target_chunks = {
+                lat_var: spatial_rechunk_size,
+                lon_var: spatial_rechunk_size,
+                time_var: time_rechunk
+            }
+            print(f"Target rechunk sizes (Fixed): {target_chunks}")
+            try:
+                rechunk_start = time.time()
+                if not merged_ds.data_vars:
+                     raise ValueError("Merged dataset has no data variables to rechunk.")
+                merged_ds = merged_ds.chunk(target_chunks)
+                print(f"Rechunked merged_ds chunks: {merged_ds.chunks} ({time.time() - rechunk_start:.2f}s)")
+                gc.collect()
+            except Exception as e_rechunk:
+                print(f"Error rechunking merged_ds: {e_rechunk}")
+                print("Try adjusting target_chunks or skipping rechunking if error persists.")
+                traceback.print_exc()
+                del merged_ds # Clean up
+                gc.collect()
+                return None # Stop if rechunking fails
+            # --- ****** End Rechunk Merged Dataset ****** ---
+
+
+            # --- Get Coordinates for Chunking ---
+            try:
+                 # (Keep coordinate access logic)
+                 lats_coords = merged_ds[lat_var]
+                 lons_coords = merged_ds[lon_var]
+                 time_coords = merged_ds[time_var]
+                 num_lats = len(lats_coords)
+                 num_lons = len(lons_coords)
+                 num_times = len(time_coords)
+                 print(f"Using coordinate variables: Lat='{lat_var}', Lon='{lon_var}', Time='{time_var}'")
+            except Exception as e_coord:
+                 print(f"Error accessing coordinates for chunking: {e_coord}")
+                 del merged_ds # Clean up
+                 gc.collect()
+                 return None
+
+            print(f"Starting chunked processing loops for {num_lats} lat, {num_lons} lon, {num_times} time steps...")
+            print(f"Processing chunk sizes: Lat={lat_chunk_size}, Lon={lon_chunk_size}, Time={time_chunk_size}") # Log processing chunk sizes
+
+            # --- Outer Loop: Latitude Chunks ---
+            for lat_start_idx in range(0, num_lats, lat_chunk_size):
+                # (Keep latitude loop logic)
+                lat_end_idx = min(lat_start_idx + lat_chunk_size, num_lats)
+                lat_chunk_indices = slice(lat_start_idx, lat_end_idx) # Use slice for isel
+                lat_min_chunk = lats_coords.isel({lat_var: lat_start_idx}).item()
+                lat_max_chunk = lats_coords.isel({lat_var: lat_end_idx - 1}).item()
+                print(f"\nProcessing Latitude Chunk {lat_start_idx // lat_chunk_size + 1}/{ (num_lats + lat_chunk_size - 1) // lat_chunk_size }: Indices {lat_start_idx}-{lat_end_idx-1} (Lat {lat_min_chunk:.2f} to {lat_max_chunk:.2f})")
+
+                dfs_for_current_lat_chunk = []
+
+                # --- Middle Loop: Time Chunks ---
+                for time_start_idx in range(0, num_times, time_chunk_size):
+                    # (Keep time loop logic)
+                    time_end_idx = min(time_start_idx + time_chunk_size, num_times)
+                    time_chunk_indices = slice(time_start_idx, time_end_idx) # Use slice for isel
+                    time_min_chunk_ts = pd.Timestamp(time_coords.isel({time_var: time_start_idx}).values)
+                    time_max_chunk_ts = pd.Timestamp(time_coords.isel({time_var: time_end_idx - 1}).values)
+                    print(f"  Processing Time Chunk {time_start_idx // time_chunk_size + 1}/{ (num_times + time_chunk_size - 1) // time_chunk_size }: Indices {time_start_idx}-{time_end_idx-1} ({time_min_chunk_ts} to {time_max_chunk_ts})")
+
+                    dfs_for_current_st_chunk = []
+
+                    # --- Inner Loop: Longitude Chunks ---
+                    for lon_start_idx in range(0, num_lons, lon_chunk_size):
+                        # (Keep longitude loop logic)
+                        lon_end_idx = min(lon_start_idx + lon_chunk_size, num_lons)
+                        lon_chunk_indices = slice(lon_start_idx, lon_end_idx) # Use slice for isel
+                        print(f"    Processing Lon Chunk {lon_start_idx // lon_chunk_size + 1}/{ (num_lons + lon_chunk_size - 1) // lon_chunk_size }: Indices {lon_start_idx}-{lon_end_idx-1}")
+
+                        stl_chunk_ds_lazy = None
+                        computed_stl_chunk_ds = None
+                        df_stl_chunk = None
+                        stacked_stl_chunk = None
+
+                        try:
+                            # Select spatio-temporal-longitude chunk (LAZY selection on RECHUNKED data)
+                            print("      Selecting chunk indices...")
+                            # Use slices for selection
+                            stl_chunk_ds_lazy = merged_ds.isel({
+                                lat_var: lat_chunk_indices,
+                                time_var: time_chunk_indices,
+                                lon_var: lon_chunk_indices
+                            })
+
+                            # Compute only this smallest chunk
+                            print(f"      Computing chunk data (shape: {stl_chunk_ds_lazy.sizes})...") # Log shape before compute
+                            start_compute = time.time()
+                            if self.client: # Check if client exists
+                                 from dask.diagnostics import ProgressBar
+                                 with ProgressBar():
+                                     computed_stl_chunk_ds = stl_chunk_ds_lazy.compute()
+                            else:
+                                 computed_stl_chunk_ds = stl_chunk_ds_lazy.compute()
+                            print(f"      Computation complete ({time.time() - start_compute:.2f}s).")
+
+                            # Convert smallest chunk to DataFrame
+                            print("      Converting chunk to DataFrame...")
+                            start_convert = time.time()
+                            # Convert to DataFrame (stacking can be memory intensive too)
+                            # Try to optimize this step if it causes memory issues later
+                            df_stl_chunk = computed_stl_chunk_ds.to_dataframe().reset_index() # Simpler conversion
+                            print(f"      Conversion complete ({time.time() - start_convert:.2f}s).")
+
+                            # Process smallest DataFrame Chunk
+                            df_stl_chunk = df_stl_chunk.rename(columns={time_var: 'time', lat_var: 'latitude', lon_var: 'longitude'})
+                            # Drop columns with all NaNs that might result from stacking/conversion
+                            df_stl_chunk.dropna(axis=1, how='all', inplace=True)
+                            # Drop rows where all variables (excluding coords) are NaN
+                            data_cols = [col for col in df_stl_chunk.columns if col not in ['time', 'latitude', 'longitude']]
+                            df_stl_chunk.dropna(subset=data_cols, how='all', inplace=True)
+
+
+                            if df_stl_chunk.empty:
+                                print("      Chunk DataFrame is empty after processing. Skipping.")
+                                continue
+
+                            # Set time index
+                            if 'time' in df_stl_chunk.columns:
+                                df_stl_chunk['time'] = pd.to_datetime(df_stl_chunk['time']) # Ensure datetime type
+                                df_stl_chunk = df_stl_chunk.set_index('time')
+                            else:
+                                print("      Warning: 'time' column not found after conversion. Cannot set index.")
+                                continue
+
+                            # Add time features
+                            if getattr(config, 'TIME_FEATURES', False):
+                                print("      Adding time features...")
+                                df_stl_chunk = self.add_time_features(df_stl_chunk)
+
+                            # Append the processed smallest DataFrame
+                            dfs_for_current_st_chunk.append(df_stl_chunk)
+
+                        except MemoryError as me_stl:
+                            # (Keep MemoryError handling)
+                            print(f"! MemoryError processing chunk (Lat: {lat_start_idx}-{lat_end_idx-1}, Time: {time_start_idx}-{time_end_idx-1}, Lon: {lon_start_idx}-{lon_end_idx-1}): {me_stl}")
+                            print("! This chunk is STILL too large during compute/convert. Try reducing ALL chunk sizes ('lat_chunk_size', 'lon_chunk_size', 'time_chunk_size') and rechunk sizes (spatial_rechunk_size, time_rechunk).")
+                            # Also consider the refactoring mentioned above if this persists.
+                            traceback.print_exc() # Print stack trace for MemoryError too
+                            # Clean up before raising
+                            del stl_chunk_ds_lazy, computed_stl_chunk_ds, df_stl_chunk, stacked_stl_chunk, merged_ds
+                            gc.collect()
+                            raise MemoryError("Stopping due to MemoryError in smallest chunk.") from me_stl # Stop all processing
+                        except Exception as e_stl:
+                            # (Keep generic Exception handling)
+                            print(f"! Error processing chunk (Lat: {lat_start_idx}-{lat_end_idx-1}, Time: {time_start_idx}-{time_end_idx-1}, Lon: {lon_start_idx}-{lon_end_idx-1}): {e_stl}")
+                            traceback.print_exc()
+                            print("      Skipping current smallest chunk due to error.")
+                        finally:
+                            # (Keep cleanup logic)
+                            print("      Cleaning up chunk memory...")
+                            if 'stl_chunk_ds_lazy' in locals() and stl_chunk_ds_lazy is not None: del stl_chunk_ds_lazy
+                            if 'computed_stl_chunk_ds' in locals() and computed_stl_chunk_ds is not None: del computed_stl_chunk_ds
+                            if 'df_stl_chunk' in locals() and df_stl_chunk is not None: del df_stl_chunk
+                            if 'stacked_stl_chunk' in locals() and stacked_stl_chunk is not None: del stacked_stl_chunk
+                            gc.collect()
+                            print("      Memory cleanup for smallest chunk complete.")
+                    # --- End Inner Loop: Longitude Chunks ---
+
+                    # --- Combine Longitude Chunks ---
+                    if dfs_for_current_st_chunk:
+                         # (Keep longitude concatenation logic)
+                         print(f"    Concatenating {len(dfs_for_current_st_chunk)} longitude chunks for time chunk {time_start_idx}-{time_end_idx-1}...")
+                         st_concat_start = time.time()
+                         try:
+                              # Use ignore_index=False to preserve original index if needed, but usually not here
+                              df_st_chunk_combined = pd.concat(dfs_for_current_st_chunk, axis=0, ignore_index=False)
+                              dfs_for_current_lat_chunk.append(df_st_chunk_combined)
+                              print(f"    Appended combined ST chunk. Shape: {df_st_chunk_combined.shape} ({time.time() - st_concat_start:.2f}s)")
+                         except Exception as e_concat_lon:
+                              print(f"    Error concatenating longitude chunks: {e_concat_lon}")
+                              traceback.print_exc()
+                         finally:
+                              # Explicitly delete list and combined df for this ST chunk
+                              del dfs_for_current_st_chunk
+                              if 'df_st_chunk_combined' in locals(): del df_st_chunk_combined
+                              gc.collect()
+                    else:
+                         print(f"    No longitude chunks processed for time chunk {time_start_idx}-{time_end_idx-1}.")
+                    # --- End Combine Longitude Chunks ---
+                    print(f"  Finished Time Chunk {time_start_idx // time_chunk_size + 1}.")
+                # --- End Middle Loop: Time Chunks ---
+
+                # --- Combine Time Chunks and Save ---
+                if dfs_for_current_lat_chunk:
+                    # (Keep time concatenation, filtering, sorting, saving logic)
+                    print(f"\nConcatenating {len(dfs_for_current_lat_chunk)} time chunks for latitude chunk {lat_start_idx}-{lat_end_idx-1}...")
+                    lat_chunk_concat_start = time.time()
+                    df_lat_chunk = None
+                    try:
+                        # Use ignore_index=False to preserve original index if needed
+                        df_lat_chunk = pd.concat(dfs_for_current_lat_chunk, axis=0, ignore_index=False)
+                        print(f"  Concatenated latitude chunk DataFrame shape: {df_lat_chunk.shape} ({time.time() - lat_chunk_concat_start:.2f}s)")
+
+                        # Apply final filtering by date range
+                        print("  Filtering final date range for latitude chunk...")
+                        if not isinstance(df_lat_chunk.index, pd.DatetimeIndex):
+                             print("  Warning: Index is not DatetimeIndex before final filtering. Attempting conversion...")
+                             try: df_lat_chunk.index = pd.to_datetime(df_lat_chunk.index)
+                             except Exception as e_conv:
+                                  print(f"  Error converting index to DatetimeIndex: {e_conv}. Cannot filter/save chunk.")
+                                  # Don't continue outer loop, just skip saving this chunk
+                                  df_lat_chunk = None # Ensure it gets cleaned up
+                                  raise # Re-raise to indicate failure for this lat chunk
+
+                        df_lat_chunk = df_lat_chunk[
+                             (df_lat_chunk.index >= start_date) & (df_lat_chunk.index <= end_date)
+                        ]
+                        print("  Sorting index for latitude chunk...")
+                        sort_start = time.time()
+                        df_lat_chunk.sort_index(inplace=True) # Sort by time
+                        print(f"  Sorting complete ({time.time() - sort_start:.2f}s)")
+
+
+                        if df_lat_chunk.empty:
+                             print("  Latitude chunk is empty after final date filtering.")
+                        else:
+                            chunk_filename = Path(output_dir) / f"prediction_chunk_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}_lat_{lat_min_chunk:.2f}_{lat_max_chunk:.2f}.parquet"
+                            print(f"  Saving latitude chunk to {chunk_filename}...")
+                            save_start = time.time()
+                            # Reset index to save lat/lon as columns in parquet file
+                            df_lat_chunk.reset_index().to_parquet(chunk_filename, index=False) # index=False since time is now a column
+                            saved_chunk_files.append(str(chunk_filename))
+                            print(f"  Latitude chunk saved successfully ({time.time() - save_start:.2f}s).")
+
+                    except Exception as e_concat_time:
+                        print(f"Error concatenating time chunks or saving latitude chunk {lat_start_idx}-{lat_end_idx-1}: {e_concat_time}")
+                        traceback.print_exc()
+                    finally:
+                         del dfs_for_current_lat_chunk
+                         if 'df_lat_chunk' in locals() and df_lat_chunk is not None: del df_lat_chunk
+                         gc.collect()
+                else:
+                     print(f"No data processed for latitude chunk {lat_start_idx}-{lat_end_idx-1}.")
+                # --- End Combine and Save ---
+
+                gc.collect()
+                print(f"--- Finished Latitude Chunk {lat_start_idx // lat_chunk_size + 1} ---")
+            # --- End Outer Loop: Latitude Chunks ---
+
+            # Clean up the large merged dataset
+            del merged_ds
+            gc.collect()
+
+            print(f"\nFinished chunked processing. Saved {len(saved_chunk_files)} chunk files.")
+            print(f"Total time for dataset creation: {time.time() - start_time_total:.2f} seconds")
+            return saved_chunk_files # Return the list of file paths
+            # --- End Region Processing ---
+
+        # Fallback return
+        return None
+
+
     
     def save_prediction_dataset(self, df, output_path=None):
         """
@@ -3413,6 +3724,7 @@ def main():
     parser.add_argument('--gee-scale', type=float, default=11132, help='Scale in meters for GEE export (default 27km)')
     parser.add_argument('--precalculate-biomes', action='store_true', 
                         help='Pre-calculate biomes for the region before processing')
+    parser.add_argument('--use-dask', action=argparse.BooleanOptionalAction, default=True, help='Enable/disable Dask client creation (default: enabled)')
     
     args = parser.parse_args()
 

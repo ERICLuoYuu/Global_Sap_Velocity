@@ -5,7 +5,7 @@ Contains paths, parameters, and settings for the entire workflow.
 
 import os
 from pathlib import Path
-
+GEE_PROJECT = 'ee-yuluo-2' 
 # Base directory structure
 BASE_DIR = Path(__file__).parent.parent.parent.absolute()
 DATA_DIR = BASE_DIR / "data"
@@ -15,7 +15,7 @@ MODEL_DIR = OUTPUT_DIR / "models"
 PREDICTION_DIR = OUTPUT_DIR / "predictions"
 
 # ERA5-Land data settings
-ERA5LAND_DIR = RAW_DATA_DIR / "era5land_vars"
+ERA5LAND_DIR = Path('D:/Temp/era5land_vars')
 ERA5LAND_TEMP_DIR = DATA_DIR / "temp" / "era5land_extracted"
 #ERA5LAND_TEMP_DIR = Path('D:/Temp/era5land_extracted/')
 BIOMES_FILE = RAW_DATA_DIR / "spatial_features" / "biomes" / "biomes.shp"
@@ -26,13 +26,21 @@ for directory in [ERA5LAND_TEMP_DIR, MODEL_DIR, PREDICTION_DIR]:
 
 # ERA5-Land variables needed for prediction
 REQUIRED_VARIABLES = [
-    "2m_dewpoint_temperature",  # For VPD calculation
-    "2m_temperature",           # For VPD and temperature
+    "dewpoint_temperature_2m",  # For VPD calculation
+    "temperature_2m",           # For VPD and temperature
     "surface_solar_radiation_downwards",  # For solar radiation
     "10m_u_component_of_wind",  # For wind speed
     "10m_v_component_of_wind"   # For wind speed
 ]
+REQUIRED_VARIABLES_PREDICTION = [
+    "2m_temperature",           # For VPD and temperature
+    "surface_solar_radiation_downwards",  # For solar radiation
+    'wind_speed',  # For wind speed
+    'vpd',         # For VPD calculation
+    'ext_rad',    # For solar radiation
+    'ppfd_in'     # For solar radiation
 
+]
 # Model settings
 DEFAULT_MODEL = "model_xgb_regression"  # Default model to use for prediction
 FEATURE_SCALER = "feature_scaler.pkl"
@@ -44,10 +52,10 @@ DEFAULT_OUTPUT_FORMAT = "csv"  # Default output format (csv, json)
 
 # Coordinate settings for study area
 # Default to a broad region (can be overridden by user input)
-DEFAULT_LAT_MIN = -57.0
-DEFAULT_LAT_MAX = 78.0
-DEFAULT_LON_MIN = -180
-DEFAULT_LON_MAX = 180
+DEFAULT_LAT_MIN = 60
+DEFAULT_LAT_MAX = 65
+DEFAULT_LON_MIN = 100
+DEFAULT_LON_MAX = 110
 
 # Processing settings
 DASK_MEMORY_LIMIT = "8GB"
@@ -79,8 +87,7 @@ BIOME_TYPES = [
 
 # Variables renaming dictionary (ERA5 names to model feature names)
 VARIABLE_RENAME = {
-    "2m_temperature": "ta",
-    "2m_dewpoint_temperature": "td",
+    'temperature_2m': 'ta',
     "surface_solar_radiation_downwards": "sw_in",
     "wind_speed": "ws",
     "vpd": "vpd",

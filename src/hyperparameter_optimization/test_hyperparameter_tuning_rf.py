@@ -105,7 +105,7 @@ def main():
     
     # Process data files
     all_segments = []
-    used_cols = ['sap_velocity', 'ext_rad', 'sw_in', 'ta', 'ws', 'vpd','ppfd_in', 'biome', 'Day sin', 'Week sin', 'Month sin', 'Year sin']
+    used_cols = ['sap_velocity', 'ext_rad', 'sw_in', 'ta', 'ws', 'vpd','ppfd_in', 'mean_annual_temp', 'mean_annual_precip', 'Day sin', 'Week sin', 'Month sin', 'Year sin', ]
     ['sap_velocity', 'ext_rad', 'ta', 'vpd', 'biome', 'Day sin', 'Week sin', 'Month sin', 'Year sin']
   
     all_biome_types = set()  # Will collect all unique biome types
@@ -316,8 +316,8 @@ def main():
 
     param_grid = {
     'n_estimators': [800],  # More trees to capture complex patterns
-    'max_depth': [10, 15],  # Deeper trees to model more complex relationships
-    'min_samples_split': [2, 3],  # Lower values allow more splits
+    'max_depth': [15],  # Deeper trees to model more complex relationships
+    'min_samples_split': [3],  # Lower values allow more splits
     'min_samples_leaf': [1],  # Minimum value allows leaves to be as specific as possible
     'max_features': [0.7],  # More features per split ('auto' is same as 'sqrt' for classification, all for regression)
     'bootstrap': [True],

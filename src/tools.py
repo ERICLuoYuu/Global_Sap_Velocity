@@ -314,7 +314,15 @@ def adjust_time_to_utc(timestamp: pd.Timestamp, timezone: str, timezone_map: dic
 
     hours, minutes = timezone_map[clean_tz]
     return timestamp + pd.Timedelta(hours=hours, minutes=minutes)
+def adjust_time_to_local(timestamp: pd.Timestamp, timezone: str, timezone_map: dict) -> pd.Timestamp:
+    """Convert UTC time to local time based on timezone offset."""
+    # Clean the timezone string
+    clean_tz = clean_timezone_string(timezone)
+    if clean_tz not in timezone_map:
+        raise ValueError(f"Unknown timezone: {timezone} (cleaned: {clean_tz})")
 
+    hours, minutes = timezone_map[clean_tz]
+    return timestamp - pd.Timedelta(hours=hours, minutes=minutes)
 def extract_site_info(directory: Path) -> pd.DataFrame:
     """
     Extract site information from files and convert timestamps to UTC.
@@ -353,8 +361,8 @@ def extract_site_info(directory: Path) -> pd.DataFrame:
         sapf_df['TIMESTAMP'] = pd.to_datetime(sapf_df['TIMESTAMP'])
         
         # Get min and max timestamps and convert to UTC
-        start_date = adjust_time_to_utc(sapf_df['TIMESTAMP'].min(), timezone, timezone_map)
-        end_date = adjust_time_to_utc(sapf_df['TIMESTAMP'].max(), timezone, timezone_map)
+        start_date = sapf_df['TIMESTAMP'].min()
+        end_date = sapf_df['TIMESTAMP'].max()
 
         # Store the information
         site_name = sapf_file.stem.split("_")

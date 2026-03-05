@@ -5,6 +5,75 @@ from Google Earth Engine with maintained functionality for derived variables.
 """
 import os
 import sys
+# Find and set PROJ_LIB path
+def setup_proj():
+    """Set up PROJ_LIB environment variable."""
+    # Common locations for proj.db
+    possible_paths = []
+    
+    # Check virtual environment first
+    if hasattr(sys, 'prefix'):
+        venv_paths = [
+            os.path.join(sys.prefix, 'Library', 'share', 'proj'),  # Windows conda/venv
+            os.path.join(sys.prefix, 'share', 'proj'),  # Linux/Mac
+            os.path.join(sys.prefix, 'Lib', 'site-packages', 'pyproj', 'proj_dir', 'share', 'proj'),  # pyproj bundled
+        ]
+        possible_paths.extend(venv_paths)
+    
+    # Check site-packages for pyproj bundled proj
+    try:
+        import pyproj
+        pyproj_path = os.path.dirname(pyproj.__file__)
+        possible_paths.extend([
+            os.path.join(pyproj_path, 'proj_dir', 'share', 'proj'),
+            os.path.join(os.path.dirname(pyproj_path), 'pyproj.libs'),
+        ])
+        
+        # pyproj >= 3.0 has datadir
+        if hasattr(pyproj, 'datadir'):
+            proj_dir = pyproj.datadir.get_data_dir()
+            if proj_dir:
+                possible_paths.insert(0, proj_dir)
+    except ImportError:
+        pass
+    
+    # Check for OSGEO4W installation (common on Windows)
+    osgeo_paths = [
+        r'C:\OSGeo4W64\share\proj',
+        r'C:\OSGeo4W\share\proj',
+        r'C:\Program Files\QGIS 3.28\share\proj',
+        r'C:\Program Files\QGIS 3.34\share\proj',
+    ]
+    possible_paths.extend(osgeo_paths)
+    
+    # Find the first valid path containing proj.db
+    for path in possible_paths:
+        proj_db = os.path.join(path, 'proj.db')
+        if os.path.exists(proj_db):
+            os.environ['PROJ_LIB'] = path
+            os.environ['PROJ_DATA'] = path  # For newer PROJ versions
+            print(f"PROJ_LIB set to: {path}")
+            return True
+    
+    # If not found, try to find proj.db anywhere in site-packages
+    try:
+        import site
+        for site_path in site.getsitepackages():
+            for root, dirs, files in os.walk(site_path):
+                if 'proj.db' in files:
+                    os.environ['PROJ_LIB'] = root
+                    os.environ['PROJ_DATA'] = root
+                    print(f"PROJ_LIB set to: {root}")
+                    return True
+    except:
+        pass
+    
+    print("WARNING: Could not find proj.db. CRS operations may fail.")
+    return False
+
+# Set up PROJ before importing geo libraries
+setup_proj()
+
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -24,7 +93,6 @@ import calendar
 import ee
 import geemap
 import requests
-import config
 import rioxarray
 import traceback
 
@@ -54,73 +122,85 @@ try:
 except ImportError:
     HAVE_NETCDF4 = False
     print("NetCDF4 module not available. Using fallback methods.")
+# --- ADD THIS AT THE TOP LEVEL OF YOUR FILE (After imports) ---
 
+def global_worker_init():
+    """
+    Initializer that runs inside every worker process immediately upon creation.
+    It sets up the GEE session using credentials cached by the main process.
+    """
+    import ee
+    try:
+        # Re-initialize using the project ID. 
+        # This reads the credentials from disk/environment variables.
+        # It does NOT open a browser or ask for interactive auth.
+        ee.Initialize(project='era5download-447713')
+    except Exception as e:
+        # On Windows, printing might get swallowed depending on the IDE, 
+        # but it's good to try.
+        print(f"!!! Worker Initialization Failed: {e}")
 def _hour_processing_worker(args):
     """
-    Worker function for processing a single hour (used by multiprocessing).
-    Must be defined at module level to be picklable.
-    
-    Parameters:
-    -----------
-    args : tuple
-        Tuple containing (year, month, day, hour, variables, shapefile, output_dir, temp_dir)
-        
-    Returns:
-    --------
-    dict
-        Dictionary containing hour data and metadata, or None if processing failed
+    Worker function for processing a single hour.
+    Saves results to a temporary file to avoid Multiprocessing Data Leaks.
     """
     year, month, day, hour, variables, shapefile, output_dir, temp_dir = args
     
-    # Create a new processor instance for each process with unique temp directory
-    hour_temp_dir = Path(temp_dir) 
+    # Create a unique temp directory for this specific hour
+    hour_id = f"{year}{month:02d}{day:02d}_{hour:02d}"
+    hour_temp_dir = Path(temp_dir) / f"worker_{hour_id}"
     hour_temp_dir.mkdir(exist_ok=True, parents=True)
     
-    hour_processor = ERA5LandGEEProcessor(temp_dir=hour_temp_dir)
+    # Initialize processor for this worker
+    # We set gee_initialize=True to ensure each process has its own GEE session
+    hour_processor = ERA5LandGEEProcessor(temp_dir=hour_temp_dir, gee_initialize=False)
     
     try:
-        print(f"Processing hour {year}-{month:02d}-{day:02d} {hour:02d}:00...")
+        print(f"--- Process Start: Hour {hour:02d}:00 ---")
         
-        # Calculate start and end times for this hour
+        # Determine timestamps
         hour_start = pd.Timestamp(year=year, month=month, day=day, hour=hour, tz='UTC')
-        hour_end = hour_start + pd.Timedelta(hours=1) - pd.Timedelta(seconds=1)
         
-        # Load data for this hour
+        # LOGIC FIX: Solar Radiation in ERA5-Land is accumulated.
+        # To get the value for Hour H, we often need Hour H and Hour H-1.
+        # We load a small buffer if needed, or handle it in the GEE call.
         hour_processor.load_variable_data(
             variables, year, month, day, hour, shapefile=shapefile
         )
         
-        # Calculate derived variables
+        # Calculate derived variables (VPD, Wind Speed, etc.)
         hour_processor.calculate_derived_variables()
         
-        # Create prediction dataset for just this hour
-        df = hour_processor.create_prediction_dataset(
-        )
+        # Create the dataset for this specific hour
+        # This will be a small DataFrame (Lat x Lon for 1 timestamp)
+        df = hour_processor.create_prediction_dataset(use_existing_data=True)
         
-        if df is not None:
-            # Return the data instead of saving it (we'll save the combined daily data later)
-            print(f"Hour {hour} DF columns before return: {df.columns.tolist()}")
-            result = {
+        if df is not None and not df.empty:
+            # FIX #7: Save to disk immediately. 
+            # We use a temporary CSV. Index=False makes it easier to merge later.
+            temp_file_path = hour_temp_dir / f"hour_{hour:02d}_raw.csv"
+            df.to_csv(temp_file_path, index=False)
+            
+            print(f"--- Process Success: Hour {hour:02d}:00 (Saved to Temp) ---")
+            return {
                 'hour': hour,
-                'data': df,
-                'timestamp': hour_start,
-                'success': True
+                'file_path': str(temp_file_path),
+                'success': True,
+                'timestamp': hour_start
             }
-            print(f"Successfully processed hour {hour:02d}:00")
-            return result
         else:
-            print(f"No data for hour {hour:02d}:00")
-            return {'hour': hour, 'success': False}
+            return {'hour': hour, 'success': False, 'error': 'Empty DataFrame'}
     
     except Exception as e:
-        print(f"Error processing hour {hour:02d}:00: {str(e)}")
-        import traceback
+        print(f"!!! Process Error Hour {hour:02d}: {str(e)} !!!")
         traceback.print_exc()
-        return {'hour': hour, 'success': False}
+        return {'hour': hour, 'success': False, 'error': str(e)}
     
     finally:
-        # Clean up
+        # Crucial for memory management in multiprocessing
         hour_processor.close()
+        import gc
+        gc.collect()
         
        
 def _day_processing_worker(args):
@@ -138,7 +218,7 @@ def _day_processing_worker(args):
     str
         Path to saved prediction dataset file, or None if processing failed
     """
-    year, month, day, variables, shapefile, output_dir, day_processor = args
+    year, month, day, variables, shapefile, output_dir = args
     
     # Create a new processor instance for each process
     day_processor = ERA5LandGEEProcessor()
@@ -162,20 +242,11 @@ class ERA5LandGEEProcessor:
     # Format: (temp_min, temp_max, precip_min, precip_max)
     # Temperatures in °C, precipitation in mm/year
     
-    # ERA5-Land variable names in Google Earth Engine
-    GEE_VARIABLE_MAPPING = {
-        'temperature_2m': 'temperature_2m',
-        'dewpoint_temperature_2m': 'dewpoint_temperature_2m',
-        'total_precipitation': 'total_precipitation',
-        'surface_solar_radiation_downwards': 'surface_solar_radiation_downwards',
-        '10m_u_component_of_wind': 'u_component_of_wind_10m',
-        '10m_v_component_of_wind': 'v_component_of_wind_10m',
 
-
-    }
+  
     
     def __init__(self, temp_dir=None, create_client=None, memory_limit=None, 
-             temp_climate_file=None, precip_climate_file=None, gee_initialize=True):
+             temp_climate_file=None, precip_climate_file=None, gee_initialize=True, time_scale='daily'):
         """
         Initialize the ERA5-Land GEE data processor.
         
@@ -194,6 +265,41 @@ class ERA5LandGEEProcessor:
         gee_initialize : bool, optional
             Whether to initialize the Google Earth Engine API
         """
+        self.ee_initialized = False
+        import ee
+        self.time_scale = time_scale
+        if self.time_scale not in ['hourly', 'daily']:
+            raise ValueError("time_scale must be either 'hourly' or 'daily'")
+        if self.time_scale == 'hourly':
+              self.GEE_VARIABLE_MAPPING = {
+                    'temperature_2m': 'temperature_2m',
+                    'dewpoint_temperature_2m': 'dewpoint_temperature_2m',
+                    'total_precipitation': 'total_precipitation_hourly',
+                    'surface_solar_radiation_downwards': 'surface_solar_radiation_downwards_hourly',
+                    '10m_u_component_of_wind': 'u_component_of_wind_10m',
+                    '10m_v_component_of_wind': 'v_component_of_wind_10m',
+                    'volumetric_soil_water_layer_1': 'volumetric_soil_water_layer_1',
+                    'soil_temperature_level_1': 'soil_temperature_level_1',
+                    'potential_evaporation': 'potential_evaporation_hourly',  # For PET calculation
+                }
+        elif  self.time_scale == 'daily':
+              self.GEE_VARIABLE_MAPPING = {
+                    'temperature_2m': 'temperature_2m',
+                    'dewpoint_temperature_2m': 'dewpoint_temperature_2m',
+                    'total_precipitation': 'total_precipitation_sum',
+                    'surface_solar_radiation_downwards': 'surface_solar_radiation_downwards_sum',
+                    '10m_u_component_of_wind': 'u_component_of_wind_10m',
+                    '10m_v_component_of_wind': 'v_component_of_wind_10m',
+                    'volumetric_soil_water_layer_1': 'volumetric_soil_water_layer_1',
+                    'soil_temperature_level_1': 'soil_temperature_level_1',
+                    'potential_evaporation': 'potential_evaporation_sum',  # For PET calculation
+                }
+        # Check if a session is already active (set by global_worker_init)
+        if ee.data._credentials:
+             self.ee_initialized = True
+        elif gee_initialize:
+             # Only explicitly initialize if requested AND not already done
+             self.initialize_gee()
         self.temp_dir = Path(temp_dir) if temp_dir else config.ERA5LAND_TEMP_DIR
         
         # Create temporary directory if it doesn't exist
@@ -208,7 +314,22 @@ class ERA5LandGEEProcessor:
         self.precip_climate_data = None
         self.resampled_temp_data = None
         self.resampled_precip_data = None
-
+        # Initialize static data attributes
+        # Initialize static data attributes (raw data with transform info)
+        self.elevation_raw = None
+        self.pft_raw = None
+        self.canopy_height_raw = None
+        self.lai_raw = None
+        
+        # Resampled static data (aligned to ERA5 grid)
+        self.elevation_data = None
+        self.pft_data = None
+        self.canopy_height_data = None
+        self.lai_data = None
+        
+        # Path for local LAI data
+        self.lai_data_dir = Path(getattr(config, 'LAI_DATA_DIR', './data/raw/grided/globmap_lai/'))
+        
         
         # Initialize Dask client if requested and available
         self.client = None
@@ -281,7 +402,941 @@ class ERA5LandGEEProcessor:
             print(f"Failed to initialize Google Earth Engine: {str(e)}")
             print("You may need to authenticate first using 'earthengine authenticate'")
             self.ee_initialized = False
-    def read_shapefile(self, shapefile_path):
+    def mask_zero_values(self, variables_to_check=None, threshold=1e-10, 
+                     require_all_zero=True, apply_to_all=True):
+        """
+        Set grid cells to NaN based on zero values in specified variables.
+        
+        Parameters:
+        -----------
+        variables_to_check : list, optional
+            List of variable names to check for zeros. If None, uses all raw ERA5 variables.
+        threshold : float, optional
+            Values below this threshold are considered "zero" (default 1e-10)
+        require_all_zero : bool, optional
+            If True, mask only where ALL specified variables are zero.
+            If False, mask where ANY specified variable is zero.
+        apply_to_all : bool, optional
+            If True, apply the mask to all datasets.
+            If False, only apply to the variables that were checked.
+            
+        Returns:
+        --------
+        tuple
+            (mask_array, masked_cell_count)
+        """
+        if not self.datasets:
+            print("No datasets loaded. Cannot apply zero mask.")
+            return None, 0
+        
+        print("\n" + "="*60)
+        print("MASKING ZERO VALUES")
+        print("="*60)
+        
+        # Default raw ERA5-Land variables
+        default_raw_variables = [
+            'temperature_2m',
+            'dewpoint_temperature_2m', 
+            'total_precipitation',
+            'surface_solar_radiation_downwards',
+            '10m_u_component_of_wind',
+            '10m_v_component_of_wind',
+            'volumetric_soil_water_layer_1',
+            'soil_temperature_level_1',
+            'potential_evaporation',
+        ]
+        
+        # Determine which variables to check
+        if variables_to_check is None:
+            variables_to_check = [v for v in default_raw_variables if v in self.datasets]
+        else:
+            variables_to_check = [v for v in variables_to_check if v in self.datasets]
+        
+        if not variables_to_check:
+            print("No specified variables found in datasets.")
+            print(f"Available datasets: {list(self.datasets.keys())}")
+            return None, 0
+        
+        print(f"Variables to check: {variables_to_check}")
+        print(f"Mode: {'ALL must be zero' if require_all_zero else 'ANY can be zero'}")
+        
+        # Get reference for dimensions
+        ref_var = variables_to_check[0]
+        ref_ds = self.datasets[ref_var]
+        ref_data_var = list(ref_ds.data_vars)[0]
+        ref_shape = ref_ds[ref_data_var].shape
+        
+        # Find coordinates
+        lat_var, lon_var, time_var = None, None, None
+        for coord in ref_ds.coords:
+            coord_lower = coord.lower()
+            if coord_lower in ('latitude', 'lat'):
+                lat_var = coord
+            elif coord_lower in ('longitude', 'lon'):
+                lon_var = coord
+            elif coord_lower in ('time', 'datetime'):
+                time_var = coord
+        
+        print(f"Reference shape: {ref_shape}")
+        
+        # Build mask
+        if require_all_zero:
+            # Start with True (assume all zeros), set to False where ANY var is non-zero
+            combined_mask = np.ones(ref_shape, dtype=bool)
+        else:
+            # Start with False (assume all non-zero), set to True where ANY var is zero
+            combined_mask = np.zeros(ref_shape, dtype=bool)
+        
+        for var_name in variables_to_check:
+            ds = self.datasets[var_name]
+            data_var_name = list(ds.data_vars)[0]
+            data = ds[data_var_name].values
+            
+            if data.shape != ref_shape:
+                print(f"  Warning: {var_name} shape {data.shape} doesn't match reference {ref_shape}, skipping")
+                continue
+            
+            is_zero = np.abs(data) <= threshold
+            
+            if require_all_zero:
+                # Mask only where ALL variables are zero
+                combined_mask = combined_mask & is_zero
+            else:
+                # Mask where ANY variable is zero
+                combined_mask = combined_mask | is_zero
+            
+            zero_count = np.sum(is_zero)
+            total_count = data.size
+            print(f"  {var_name}: {zero_count}/{total_count} cells are zero ({100*zero_count/total_count:.2f}%)")
+        
+        # Summary
+        masked_cell_count = np.sum(combined_mask)
+        total_cell_count = combined_mask.size
+        mask_percentage = (masked_cell_count / total_cell_count) * 100
+        
+        print(f"\nMask summary:")
+        print(f"  Cells to mask: {masked_cell_count}/{total_cell_count} ({mask_percentage:.2f}%)")
+        
+        if masked_cell_count == 0:
+            print("  No cells to mask.")
+            return combined_mask, 0
+        
+        # Apply mask
+        datasets_to_mask = self.datasets.keys() if apply_to_all else variables_to_check
+        
+        print(f"\nApplying mask to {len(list(datasets_to_mask))} datasets...")
+        
+        for var_name in list(datasets_to_mask):
+            ds = self.datasets[var_name]
+            try:
+                data_var_name = list(ds.data_vars)[0]
+                data = ds[data_var_name].values.copy()
+                
+                if data.shape == combined_mask.shape:
+                    data[combined_mask] = np.nan
+                    ds[data_var_name].values = data
+                    print(f"  {var_name}: Masked")
+                else:
+                    print(f"  {var_name}: Shape mismatch, skipped")
+                    
+            except Exception as e:
+                print(f"  {var_name}: Error - {e}")
+        
+        self.zero_mask = combined_mask
+        print(f"\nMasking complete.")
+        print("="*60 + "\n")
+        
+        return combined_mask, masked_cell_count
+    def process_month_daily(self, variables, year, month, shapefile=None, output_dir=None):
+        """
+        Process an entire month of daily ERA5-Land data and save to a single file.
+        Optimized for daily time scale where data volume is much smaller.
+        
+        Parameters:
+        -----------
+        variables : list
+            List of variables to process
+        year : int
+            Year to process
+        month : int
+            Month to process
+        shapefile : str, optional
+            Path to shapefile for region definition
+        output_dir : str or Path, optional
+            Directory to save the monthly prediction dataset
+            
+        Returns:
+        --------
+        str
+            Path to saved prediction dataset file
+        """
+        import calendar
+        
+        print(f"\n{'='*60}")
+        print(f"PROCESSING MONTH: {year}-{month:02d} (DAILY TIME SCALE)")
+        print(f"{'='*60}\n")
+        
+        # Validate time scale
+        if self.time_scale != 'daily':
+            print(f"Warning: time_scale is '{self.time_scale}', but this method is optimized for 'daily'.")
+            print("Consider using process_month_parallel() for hourly data.")
+        
+        # Get number of days in month
+        days_in_month = calendar.monthrange(year, month)[1]
+        print(f"Days in month: {days_in_month}")
+        
+        # Create output directory
+        if output_dir is None:
+            output_dir = config.PREDICTION_DIR / f"{year}_{month:02d}_monthly"
+        
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
+        
+        # ============================================================
+        # OPTION 1: Load entire month at once (simpler, works for daily)
+        # ============================================================
+        try:
+            print(f"\nLoading all daily data for {year}-{month:02d}...")
+            
+            # Load data for the entire month (day=None loads all days)
+            self.load_variable_data(variables, year, month, day=None, shapefile=shapefile)
+            
+            # Apply zero mask
+            print("\nApplying zero-value mask...")
+            self.mask_zero_values(threshold=1e-10)
+            
+            # Calculate derived variables
+            print("\nCalculating derived variables...")
+            self.calculate_derived_variables()
+            
+            # Create prediction dataset for the entire month
+            print("\nCreating prediction dataset for entire month...")
+            start_date = pd.Timestamp(year=year, month=month, day=1, tz='UTC')
+            if month == 12:
+                end_date = pd.Timestamp(year=year+1, month=1, day=1, tz='UTC') - pd.Timedelta(seconds=1)
+            else:
+                end_date = pd.Timestamp(year=year, month=month+1, day=1, tz='UTC') - pd.Timedelta(seconds=1)
+            
+            df = self.create_prediction_dataset(
+                start_date=start_date,
+                end_date=end_date,
+                use_existing_data=True
+            )
+            
+            if df is not None and not df.empty:
+                # Save monthly prediction dataset
+                output_file = output_dir / f"prediction_{year}_{month:02d}_daily.csv"
+                saved_path = self.save_prediction_dataset(df, output_file)
+                
+                print(f"\n{'='*60}")
+                print(f"SUCCESS: Monthly dataset saved")
+                print(f"  File: {output_file}")
+                print(f"  Rows: {len(df)}")
+                print(f"  Columns: {len(df.columns)}")
+                print(f"  Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+                print(f"{'='*60}\n")
+                
+                return saved_path
+            else:
+                print(f"ERROR: No data created for {year}-{month:02d}")
+                return None
+                
+        except Exception as e:
+            print(f"ERROR processing month {year}-{month:02d}: {str(e)}")
+            traceback.print_exc()
+            return None
+        
+        finally:
+            # Clean up
+            self._clear_datasets()
+            import gc
+            gc.collect()
+
+
+    def process_month_daily_chunked(self, variables, year, month, shapefile=None, 
+                                    output_dir=None, days_per_chunk=10):
+        """
+        Process an entire month of daily ERA5-Land data in chunks to manage memory.
+        Accumulates daily data and saves to a single monthly file.
+        
+        Parameters:
+        -----------
+        variables : list
+            List of variables to process
+        year : int
+            Year to process
+        month : int
+            Month to process
+        shapefile : str, optional
+            Path to shapefile for region definition
+        output_dir : str or Path, optional
+            Directory to save the monthly prediction dataset
+        days_per_chunk : int, optional
+            Number of days to process at once (default 10)
+            
+        Returns:
+        --------
+        str
+            Path to saved prediction dataset file
+        """
+        import calendar
+        import gc
+        
+        print(f"\n{'='*60}")
+        print(f"PROCESSING MONTH (CHUNKED): {year}-{month:02d}")
+        print(f"Time scale: {self.time_scale}")
+        print(f"Days per chunk: {days_per_chunk}")
+        print(f"{'='*60}\n")
+        
+        # Get number of days in month
+        days_in_month = calendar.monthrange(year, month)[1]
+        print(f"Total days in month: {days_in_month}")
+        
+        # Create output directory
+        if output_dir is None:
+            output_dir = config.PREDICTION_DIR / f"{year}_{month:02d}_monthly"
+        
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Temporary directory for chunk files
+        temp_chunk_dir = self.temp_dir / f"month_{year}_{month:02d}_chunks"
+        temp_chunk_dir.mkdir(exist_ok=True, parents=True)
+        
+        # ============================================================
+        # PROCESS IN CHUNKS
+        # ============================================================
+        chunk_files = []
+        chunk_dataframes = []
+        
+        for chunk_start_day in range(1, days_in_month + 1, days_per_chunk):
+            chunk_end_day = min(chunk_start_day + days_per_chunk - 1, days_in_month)
+            
+            print(f"\n--- Processing chunk: days {chunk_start_day} to {chunk_end_day} ---")
+            
+            try:
+                # Process each day in the chunk
+                chunk_dfs = []
+                
+                for day in range(chunk_start_day, chunk_end_day + 1):
+                    print(f"\n  Processing day {day}...")
+                    
+                    # Clear previous data
+                    self._clear_datasets()
+                    gc.collect()
+                    
+                    # Load data for this specific day
+                    self.load_variable_data(variables, year, month, day, shapefile=shapefile)
+                    
+                    # Apply zero mask
+                    self.mask_zero_values(threshold=1e-10)
+                    
+                    # Calculate derived variables
+                    self.calculate_derived_variables()
+                    
+                    # Create prediction dataset for this day
+                    start_date = pd.Timestamp(year=year, month=month, day=day, tz='UTC')
+                    end_date = start_date + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                    
+                    df = self.create_prediction_dataset(
+                        start_date=start_date,
+                        end_date=end_date,
+                        use_existing_data=True
+                    )
+                    
+                    if df is not None and not df.empty:
+                        chunk_dfs.append(df)
+                        print(f"    Day {day}: {len(df)} rows")
+                    else:
+                        print(f"    Day {day}: No data")
+                
+                # Combine chunk dataframes
+                if chunk_dfs:
+                    chunk_df = pd.concat(chunk_dfs, ignore_index=True)
+                    
+                    # Option A: Keep in memory (for smaller datasets)
+                    chunk_dataframes.append(chunk_df)
+                    
+                    # Option B: Save to temp file (for larger datasets)
+                    # chunk_file = temp_chunk_dir / f"chunk_{chunk_start_day:02d}_{chunk_end_day:02d}.csv"
+                    # chunk_df.to_csv(chunk_file, index=False)
+                    # chunk_files.append(chunk_file)
+                    
+                    print(f"  Chunk complete: {len(chunk_df)} total rows")
+                    
+                    # Clean up chunk_dfs
+                    del chunk_dfs
+                    gc.collect()
+                
+            except Exception as e:
+                print(f"  ERROR processing chunk {chunk_start_day}-{chunk_end_day}: {str(e)}")
+                traceback.print_exc()
+        
+        # ============================================================
+        # COMBINE ALL CHUNKS INTO FINAL MONTHLY FILE
+        # ============================================================
+        print(f"\n{'='*60}")
+        print("COMBINING CHUNKS INTO MONTHLY FILE")
+        print(f"{'='*60}")
+        
+        try:
+            # Option A: Combine from memory
+            if chunk_dataframes:
+                print(f"Combining {len(chunk_dataframes)} chunks from memory...")
+                monthly_df = pd.concat(chunk_dataframes, ignore_index=True)
+            
+            # Option B: Combine from temp files
+            # elif chunk_files:
+            #     print(f"Combining {len(chunk_files)} chunks from temp files...")
+            #     chunk_dfs = [pd.read_csv(f) for f in chunk_files]
+            #     monthly_df = pd.concat(chunk_dfs, ignore_index=True)
+            
+            else:
+                print("ERROR: No chunk data available")
+                return None
+            
+            # Sort by timestamp and location
+            sort_cols = []
+            if 'timestamp' in monthly_df.columns:
+                monthly_df['timestamp'] = pd.to_datetime(monthly_df['timestamp'])
+                sort_cols.append('timestamp')
+            if 'name' in monthly_df.columns:
+                sort_cols.append('name')
+            elif 'latitude' in monthly_df.columns and 'longitude' in monthly_df.columns:
+                sort_cols.extend(['latitude', 'longitude'])
+            
+            if sort_cols:
+                monthly_df = monthly_df.sort_values(sort_cols)
+            
+            # Remove duplicates if any
+            before_dedup = len(monthly_df)
+            monthly_df = monthly_df.drop_duplicates()
+            after_dedup = len(monthly_df)
+            if before_dedup != after_dedup:
+                print(f"Removed {before_dedup - after_dedup} duplicate rows")
+            
+            # Save monthly file
+            output_file = output_dir / f"prediction_{year}_{month:02d}_daily.csv"
+            saved_path = self.save_prediction_dataset(monthly_df, output_file)
+            
+            # Print summary
+            print(f"\n{'='*60}")
+            print(f"SUCCESS: Monthly dataset saved")
+            print(f"  File: {output_file}")
+            print(f"  Total rows: {len(monthly_df)}")
+            print(f"  Columns: {len(monthly_df.columns)}")
+            if 'timestamp' in monthly_df.columns:
+                print(f"  Date range: {monthly_df['timestamp'].min()} to {monthly_df['timestamp'].max()}")
+            if 'latitude' in monthly_df.columns and 'longitude' in monthly_df.columns:
+                print(f"  Lat range: {monthly_df['latitude'].min():.4f} to {monthly_df['latitude'].max():.4f}")
+                print(f"  Lon range: {monthly_df['longitude'].min():.4f} to {monthly_df['longitude'].max():.4f}")
+            print(f"{'='*60}\n")
+            
+            return saved_path
+            
+        except Exception as e:
+            print(f"ERROR combining chunks: {str(e)}")
+            traceback.print_exc()
+            return None
+        
+        finally:
+            # Clean up
+            self._clear_datasets()
+            
+            # Clean up temp files
+            try:
+                for f in chunk_files:
+                    if Path(f).exists():
+                        Path(f).unlink()
+                if temp_chunk_dir.exists():
+                    temp_chunk_dir.rmdir()
+            except:
+                pass
+            
+            # Clean up memory
+            del chunk_dataframes
+            gc.collect()
+    def process_year(self, variables, year, shapefile=None, output_dir=None, 
+                 days_per_chunk=10, save_monthly=True):
+        """
+        Process an entire year of daily ERA5-Land data.
+        
+        Parameters:
+        -----------
+        variables : list
+            List of variables to process
+        year : int
+            Year to process
+        shapefile : str, optional
+            Path to shapefile for region definition
+        output_dir : str or Path, optional
+            Directory to save the prediction datasets
+        days_per_chunk : int, optional
+            Days per chunk for memory management (default 10)
+        save_monthly : bool, optional
+            If True, save separate file for each month.
+            If False, combine entire year into single file.
+            
+        Returns:
+        --------
+        list or str
+            List of monthly file paths, or path to yearly file
+        """
+        import gc
+        
+        print(f"\n{'='*70}")
+        print(f"PROCESSING YEAR: {year}")
+        print(f"Time scale: {self.time_scale}")
+        print(f"Save monthly: {save_monthly}")
+        print(f"{'='*70}\n")
+        
+        # Setup output directory
+        if output_dir is None:
+            output_dir = config.PREDICTION_DIR / f"{year}_{self.time_scale}"
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
+        
+        monthly_files = []
+        monthly_dataframes = []
+        
+        # Process each month
+        for month in range(1, 13):
+            print(f"\n{'='*50}")
+            print(f"Processing {year}-{month:02d} ({month}/12)")
+            print(f"{'='*50}")
+            
+            try:
+                if save_monthly:
+                    # Save each month separately
+                    result = self.process_month_daily_chunked(
+                        variables, year, month,
+                        shapefile=shapefile,
+                        output_dir=output_dir,
+                        days_per_chunk=days_per_chunk
+                    )
+                    if result:
+                        monthly_files.append(result)
+                        print(f"✓ Month {month:02d} saved: {result}")
+                    else:
+                        print(f"✗ Month {month:02d} failed")
+                else:
+                    # Accumulate for yearly file
+                    month_df = self._process_month_to_dataframe(
+                        variables, year, month,
+                        shapefile=shapefile,
+                        days_per_chunk=days_per_chunk
+                    )
+                    if month_df is not None and not month_df.empty:
+                        monthly_dataframes.append(month_df)
+                        print(f"✓ Month {month:02d} loaded: {len(month_df)} rows")
+                    else:
+                        print(f"✗ Month {month:02d} no data")
+                
+                # Force garbage collection between months
+                gc.collect()
+                
+            except Exception as e:
+                print(f"ERROR processing {year}-{month:02d}: {e}")
+                traceback.print_exc()
+        
+        # Handle yearly file output
+        if not save_monthly and monthly_dataframes:
+            print(f"\n{'='*50}")
+            print(f"Combining {len(monthly_dataframes)} months into yearly file...")
+            print(f"{'='*50}")
+            
+            try:
+                yearly_df = pd.concat(monthly_dataframes, ignore_index=True)
+                
+                # Sort
+                sort_cols = []
+                if 'timestamp' in yearly_df.columns:
+                    yearly_df['timestamp'] = pd.to_datetime(yearly_df['timestamp'])
+                    sort_cols.append('timestamp')
+                if 'name' in yearly_df.columns:
+                    sort_cols.append('name')
+                if sort_cols:
+                    yearly_df = yearly_df.sort_values(sort_cols)
+                
+                # Remove duplicates
+                yearly_df = yearly_df.drop_duplicates()
+                
+                # Save yearly file
+                output_file = output_dir / f"prediction_{year}_{self.time_scale}.csv"
+                saved_path = self.save_prediction_dataset(yearly_df, output_file)
+                
+                print(f"\n✓ Yearly file saved: {output_file}")
+                print(f"  Total rows: {len(yearly_df)}")
+                
+                # Clean up
+                del monthly_dataframes, yearly_df
+                gc.collect()
+                
+                return saved_path
+                
+            except Exception as e:
+                print(f"ERROR combining yearly data: {e}")
+                traceback.print_exc()
+                return monthly_files if monthly_files else None
+        
+        # Summary for monthly files
+        if save_monthly:
+            print(f"\n{'='*70}")
+            print(f"YEAR {year} COMPLETE")
+            print(f"Successfully processed: {len(monthly_files)}/12 months")
+            print(f"Output directory: {output_dir}")
+            print(f"{'='*70}\n")
+            
+            return monthly_files
+        
+        return None
+
+
+    def _process_month_to_dataframe(self, variables, year, month, shapefile=None, days_per_chunk=10):
+        """
+        Process a month and return as DataFrame (without saving to file).
+        Helper method for yearly processing.
+        
+        Parameters:
+        -----------
+        variables : list
+            List of variables to process
+        year : int
+            Year to process
+        month : int
+            Month to process
+        shapefile : str, optional
+            Path to shapefile
+        days_per_chunk : int, optional
+            Days per chunk
+            
+        Returns:
+        --------
+        pandas.DataFrame or None
+            Monthly data as DataFrame
+        """
+        import calendar
+        import gc
+        
+        days_in_month = calendar.monthrange(year, month)[1]
+        chunk_dataframes = []
+        
+        for chunk_start_day in range(1, days_in_month + 1, days_per_chunk):
+            chunk_end_day = min(chunk_start_day + days_per_chunk - 1, days_in_month)
+            
+            try:
+                for day in range(chunk_start_day, chunk_end_day + 1):
+                    self._clear_datasets()
+                    gc.collect()
+                    
+                    self.load_variable_data(variables, year, month, day, shapefile=shapefile)
+                    self.mask_zero_values(threshold=1e-10)
+                    self.calculate_derived_variables()
+                    
+                    start_date = pd.Timestamp(year=year, month=month, day=day, tz='UTC')
+                    end_date = start_date + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                    
+                    df = self.create_prediction_dataset(
+                        start_date=start_date,
+                        end_date=end_date,
+                        use_existing_data=True
+                    )
+                    
+                    if df is not None and not df.empty:
+                        chunk_dataframes.append(df)
+                        
+            except Exception as e:
+                print(f"    Error processing days {chunk_start_day}-{chunk_end_day}: {e}")
+        
+        if chunk_dataframes:
+            monthly_df = pd.concat(chunk_dataframes, ignore_index=True)
+            del chunk_dataframes
+            gc.collect()
+            return monthly_df
+        
+        return None
+
+
+    def process_multiple_years(self, variables, years, months=None, shapefile=None, 
+                            output_dir=None, days_per_chunk=10, save_monthly=True):
+        """
+        Process multiple years of daily ERA5-Land data.
+        
+        Parameters:
+        -----------
+        variables : list
+            List of variables to process
+        years : list of int
+            List of years to process
+        months : list of int, optional
+            List of months to process (1-12). If None, processes all 12 months.
+        shapefile : str, optional
+            Path to shapefile for region definition
+        output_dir : str or Path, optional
+            Base directory to save the prediction datasets
+        days_per_chunk : int, optional
+            Days per chunk for memory management
+        save_monthly : bool, optional
+            If True, save separate file for each month
+            
+        Returns:
+        --------
+        dict
+            Dictionary mapping year -> list of output files
+        """
+        print(f"\n{'#'*70}")
+        print(f"BATCH PROCESSING: {len(years)} YEARS")
+        print(f"Years: {years}")
+        print(f"Months: {months if months else 'All (1-12)'}")
+        print(f"Time scale: {self.time_scale}")
+        print(f"{'#'*70}\n")
+        
+        # Setup base output directory
+        if output_dir is None:
+            output_dir = config.PREDICTION_DIR
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Default to all months if not specified
+        if months is None:
+            months = list(range(1, 13))
+        
+        results = {}
+        total_years = len(years)
+        
+        for year_idx, year in enumerate(years, 1):
+            print(f"\n{'#'*70}")
+            print(f"YEAR {year} ({year_idx}/{total_years})")
+            print(f"{'#'*70}")
+            
+            year_output_dir = output_dir / f"{year}_{self.time_scale}"
+            year_output_dir.mkdir(exist_ok=True, parents=True)
+            
+            year_files = []
+            
+            for month in months:
+                try:
+                    print(f"\n--- Processing {year}-{month:02d} ---")
+                    
+                    result = self.process_month_daily_chunked(
+                        variables, year, month,
+                        shapefile=shapefile,
+                        output_dir=year_output_dir,
+                        days_per_chunk=days_per_chunk
+                    )
+                    
+                    if result:
+                        year_files.append(result)
+                        print(f"✓ {year}-{month:02d} complete")
+                    else:
+                        print(f"✗ {year}-{month:02d} failed")
+                        
+                except Exception as e:
+                    print(f"ERROR {year}-{month:02d}: {e}")
+                    traceback.print_exc()
+            
+            results[year] = year_files
+            
+            # Summary for this year
+            print(f"\n--- Year {year} Summary ---")
+            print(f"  Months processed: {len(year_files)}/{len(months)}")
+            print(f"  Output directory: {year_output_dir}")
+        
+        # Final summary
+        print(f"\n{'#'*70}")
+        print("BATCH PROCESSING COMPLETE")
+        print(f"{'#'*70}")
+        
+        total_files = sum(len(files) for files in results.values())
+        total_expected = len(years) * len(months)
+        
+        print(f"Total files created: {total_files}/{total_expected}")
+        print(f"Output base directory: {output_dir}")
+        
+        for year, files in results.items():
+            print(f"  {year}: {len(files)} files")
+        
+        return results
+    def _download_gee_image_tiled(self, image, region, scale, band_name=None, max_tile_size=1024):
+        """
+        Download a large GEE image by splitting it into smaller tiles.
+        Robust to 1-pixel edge cases and geometry types.
+        
+        Parameters:
+        -----------
+        image : ee.Image
+            The image to download
+        region : ee.Geometry
+            Region to download
+        scale : float
+            Scale in meters
+        band_name : str, optional
+            Band to select (if None, uses first band)
+        max_tile_size : int
+            Maximum tile size in pixels (default 1024)
+            
+        Returns:
+        --------
+        tuple
+            (numpy_array, bounds_dict) where bounds_dict has lon_min, lon_max, lat_min, lat_max
+        """
+        import math
+        
+        # Constant for degree-to-meter conversion at equator (WGS84)
+        METERS_PER_DEGREE = 111320.0
+        
+        try:
+            # --- 1. Robust Bounds Parsing ---
+            bounds_info = region.bounds().getInfo()
+            if 'coordinates' in bounds_info:
+                coords = bounds_info['coordinates'][0]
+                lons = [c[0] for c in coords]
+                lats = [c[1] for c in coords]
+                lon_min, lon_max = min(lons), max(lons)
+                lat_min, lat_max = min(lats), max(lats)
+            elif 'bbox' in bounds_info:
+                lon_min, lat_min, lon_max, lat_max = bounds_info['bbox']
+            else:
+                lon_min, lat_min, lon_max, lat_max = bounds_info[0], bounds_info[1], bounds_info[2], bounds_info[3]
+
+            print(f"  Region bounds: lon=[{lon_min:.4f}, {lon_max:.4f}], lat=[{lat_min:.4f}, {lat_max:.4f}]")
+
+            # --- 2. Resolution Setup (Correct for EPSG:4326) ---
+            deg_per_pixel = scale / METERS_PER_DEGREE
+
+            # --- 3. Array Allocation (Use CEIL for safety) ---
+            total_width = int(math.ceil((lon_max - lon_min) / deg_per_pixel))
+            total_height = int(math.ceil((lat_max - lat_min) / deg_per_pixel))
+            
+            print(f"  Master Grid: {total_height} x {total_width} pixels")
+            print(f"  Resolution: {deg_per_pixel:.6f} deg/pixel ({scale}m at equator)")
+
+            # --- 4. Small Region Bypass (Optimization) ---
+            if total_height <= max_tile_size and total_width <= max_tile_size:
+                print(f"  Small region - downloading directly...")
+                tile_img = image.select(band_name) if band_name else image
+                
+                bbox_region = ee.Geometry.Rectangle(
+                    [lon_min, lat_min, lon_max, lat_max], None, False
+                )
+                
+                result = geemap.ee_to_numpy(tile_img, region=bbox_region, scale=scale)
+                
+                if result is not None:
+                    if result.ndim > 2:
+                        result = result.squeeze()
+                    # Handle edge cases
+                    if result.ndim == 0:
+                        result = np.array([[result]])
+                    elif result.ndim == 1:
+                        if total_height == 1:
+                            result = result.reshape(1, -1)
+                        else:
+                            result = result.reshape(-1, 1)
+                            
+                    print(f"  Download complete: {result.shape}")
+                    
+                return result, {
+                    'lon_min': lon_min, 'lon_max': lon_max,
+                    'lat_min': lat_min, 'lat_max': lat_max
+                }
+
+            # --- 5. Tiling Setup ---
+            output_array = np.full((total_height, total_width), np.nan, dtype=np.float32)
+            
+            n_tiles_y = int(math.ceil(total_height / max_tile_size))
+            n_tiles_x = int(math.ceil(total_width / max_tile_size))
+            total_tiles = n_tiles_y * n_tiles_x
+            tile_count = 0
+            successful_tiles = 0
+            
+            print(f"  Downloading in {n_tiles_y} x {n_tiles_x} tiles ({total_tiles} total)...")
+
+            # --- 6. Tiling Loop ---
+            for row_start in range(0, total_height, max_tile_size):
+                for col_start in range(0, total_width, max_tile_size):
+                    tile_count += 1
+                    
+                    row_end = min(row_start + max_tile_size, total_height)
+                    col_end = min(col_start + max_tile_size, total_width)
+                    
+                    # Calculate geographic bounds for this tile
+                    tile_lon_min = lon_min + (col_start * deg_per_pixel)
+                    tile_lon_max = lon_min + (col_end * deg_per_pixel)
+                    tile_lat_max = lat_max - (row_start * deg_per_pixel)
+                    tile_lat_min = lat_max - (row_end * deg_per_pixel)
+
+                    tile_region = ee.Geometry.Rectangle(
+                        [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max], 
+                        None, False
+                    )
+
+                    try:
+                        tile_img = image.select(band_name) if band_name else image
+                        
+                        tile_data = geemap.ee_to_numpy(
+                            tile_img,
+                            region=tile_region,
+                            scale=scale
+                        )
+
+                        if tile_data is None:
+                            continue
+
+                        # --- 7. Robust Shape Handling ---
+                        if tile_data.ndim > 2: 
+                            tile_data = tile_data.squeeze()
+                        
+                        # Handle 1x1 pixels becoming scalars
+                        if tile_data.ndim == 0:
+                            tile_data = np.array([[tile_data]])
+                        # Handle 1xN or Nx1 vectors
+                        elif tile_data.ndim == 1:
+                            expected_h = row_end - row_start
+                            expected_w = col_end - col_start
+                            if expected_h == 1:
+                                tile_data = tile_data.reshape(1, -1)
+                            else:
+                                tile_data = tile_data.reshape(-1, 1)
+
+                        actual_h, actual_w = tile_data.shape
+                        
+                        # Calculate safe insertion range (protects against ±1 pixel GEE rounding)
+                        ins_h = min(actual_h, total_height - row_start)
+                        ins_w = min(actual_w, total_width - col_start)
+                        
+                        output_array[row_start:row_start+ins_h, col_start:col_start+ins_w] = tile_data[:ins_h, :ins_w]
+                        successful_tiles += 1
+
+                    except Exception as tile_err:
+                        print(f"    Skip Tile [{row_start}, {col_start}]: {tile_err}")
+
+                    # Progress logging
+                    if tile_count % 10 == 0 or tile_count == total_tiles:
+                        print(f"    Processed {tile_count}/{total_tiles} tiles ({successful_tiles} successful)")
+
+            # --- 8. Final Summary ---
+            valid_pixels = np.sum(~np.isnan(output_array))
+            total_pixels = output_array.size
+            coverage = (valid_pixels / total_pixels) * 100
+            
+            print(f"  Tiled download complete: {output_array.shape}")
+            print(f"  Coverage: {valid_pixels}/{total_pixels} pixels ({coverage:.1f}%)")
+            
+            if successful_tiles == 0:
+                print("  WARNING: No tiles were successfully downloaded!")
+                return None, None
+
+            return output_array, {
+                'lon_min': lon_min, 'lon_max': lon_max, 
+                'lat_min': lat_min, 'lat_max': lat_max
+            }
+
+        except Exception as e:
+            print(f"Tiling failure: {e}")
+            traceback.print_exc()
+            return None, None
+    def read_shapefile(self, shapefile_path, simplify=True, use_bounds=False):
         """
         Read a shapefile and convert it to an ee.Geometry object.
         
@@ -289,6 +1344,10 @@ class ERA5LandGEEProcessor:
         -----------
         shapefile_path : str or Path
             Path to the shapefile
+        simplify : bool
+            Whether to simplify the geometry (reduce vertices)
+        use_bounds : bool
+            If True, just use the bounding box instead of the actual geometry
             
         Returns:
         --------
@@ -296,34 +1355,78 @@ class ERA5LandGEEProcessor:
             Earth Engine geometry object
         """
         try:
-            # Read the shapefile using geopandas
             gdf = gpd.read_file(shapefile_path)
             
-            # Check if CRS is WGS84, if not, reproject
+            # Check CRS
             if gdf.crs != "EPSG:4326":
                 gdf = gdf.to_crs("EPSG:4326")
-                print(f"Reprojected shapefile from {gdf.crs} to EPSG:4326")
+                print(f"Reprojected shapefile to EPSG:4326")
             
-            # If multiple features exist, use the union
-            if len(gdf) > 1:
-                print(f"Shapefile contains {len(gdf)} features. Using the union of all features.")
+            n_features = len(gdf)
+            print(f"Shapefile contains {n_features} features.")
+            
+            # For very complex shapefiles, use bounding box
+            if use_bounds or n_features > 1000:
+                print(f"Using bounding box due to complexity ({n_features} features)")
+                bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
+                ee_geometry = ee.Geometry.Rectangle(
+                [bounds[0], bounds[1], bounds[2], bounds[3]], 
+                None, 
+                False
+            )
+                return ee_geometry
+            
+            # Union all features
+            if n_features > 1:
+                print(f"Merging {n_features} features into single geometry...")
                 geometry = gdf.unary_union
             else:
                 geometry = gdf.geometry.iloc[0]
+            
+            # Simplify if requested
+            if simplify:
+                # Simplify with tolerance (in degrees, ~1km)
+                original_vertices = self._count_vertices(geometry)
+                tolerance = 0.01  # About 1km
+                geometry = geometry.simplify(tolerance, preserve_topology=True)
+                new_vertices = self._count_vertices(geometry)
+                print(f"Simplified geometry: {original_vertices} -> {new_vertices} vertices")
                 
-            # Convert shapely geometry to GeoJSON
+                # If still too complex, use bounding box
+                if new_vertices > 5000:
+                    print(f"Geometry still too complex, using bounding box")
+                    bounds = gdf.total_bounds
+                    ee_geometry = ee.Geometry.Rectangle([
+                        bounds[0], bounds[1], bounds[2], bounds[3]
+                    ], None, False)
+                    return ee_geometry
+            
+            # Convert to GeoJSON
             geo_json = geometry.__geo_interface__
             
-            # Create an ee.Geometry object
+            # Create ee.Geometry
             ee_geometry = ee.Geometry(geo_json)
             
             print(f"Successfully converted shapefile to ee.Geometry")
             return ee_geometry
+            
         except Exception as e:
             print(f"Error reading shapefile: {str(e)}")
-            import traceback
             traceback.print_exc()
             return None
+    
+    def _count_vertices(self, geometry):
+        """Count total vertices in a geometry."""
+        try:
+            if hasattr(geometry, 'geoms'):  # MultiPolygon
+                return sum(len(g.exterior.coords) + sum(len(r.coords) for r in g.interiors) 
+                          for g in geometry.geoms)
+            elif hasattr(geometry, 'exterior'):  # Polygon
+                return len(geometry.exterior.coords) + sum(len(r.coords) for r in geometry.interiors)
+            else:
+                return 0
+        except:
+            return 0
     def debug_coordinate_alignment(self):
       """Debug coordinate alignment issues by checking specific locations."""
       
@@ -445,13 +1548,20 @@ class ERA5LandGEEProcessor:
                         print(f"    Column indices: {constant_cols[:10]}...")
                         print(f"    Corresponding longitudes: {lons[constant_cols[:10]]}")
                 
-                # Test specific problematic location
-                test_lat, test_lon = 0, 10
+                # Test coordinate mapping - use center of actual data region
+                # Define region bounds if not already available
+                lat_min = config.DEFAULT_LAT_MIN if not hasattr(config, 'DEFAULT_LAT_MIN') else config.DEFAULT_LAT_MIN
+                lat_max = config.DEFAULT_LAT_MAX if not hasattr(config, 'DEFAULT_LAT_MAX') else config.DEFAULT_LAT_MAX
+                lon_min = config.DEFAULT_LON_MIN if not hasattr(config, 'DEFAULT_LON_MIN') else config.DEFAULT_LON_MIN
+                lon_max = config.DEFAULT_LON_MAX if not hasattr(config, 'DEFAULT_LON_MAX') else config.DEFAULT_LON_MAX
+                
+                test_lat = (lat_min + lat_max) / 2
+                test_lon = (lon_min + lon_max) / 2
                 lat_idx = np.argmin(np.abs(lats - test_lat))
                 lon_idx = np.argmin(np.abs(lons - test_lon))
-                
-                print(f"\nTest location ({test_lat}, {test_lon}):")
-                print(f"  Nearest indices: lat={lat_idx}, lon={lon_idx}")
+                print(f"Test location ({test_lat:.2f}, {test_lon:.2f}) maps to indices: lat_idx={lat_idx}, lon_idx={lon_idx}")
+                print(f"Actual coordinates at indices: ({lats[lat_idx]:.4f}, {lons[lon_idx]:.4f})")
+               
                 print(f"  Actual coordinates: ({lats[lat_idx]:.4f}, {lons[lon_idx]:.4f})")
                 
                 # Check values at this location
@@ -474,24 +1584,742 @@ class ERA5LandGEEProcessor:
         str
             Units for the variable
         """
-        # Map of variable names to their units
         units_map = {
             'temperature_2m': 'K',
             'dewpoint_temperature_2m': 'K',
-            'total_precipitation': 'm',
-            'surface_solar_radiation_downwards': 'j m-2',
+            'total_precipitation_hourly': 'm',
+            'surface_solar_radiation_downwards': 'J m-2',
             'u_component_of_wind_10m': 'm s-1',
             'v_component_of_wind_10m': 'm s-1',
             'surface_pressure': 'Pa',
             'total_evaporation': 'm of water equivalent',
-            'volumetric_soil_water_layer_1': 'm3 m-3',
-            'volumetric_soil_water_layer_2': 'm3 m-3',
-            'volumetric_soil_water_layer_3': 'm3 m-3',
-            'volumetric_soil_water_layer_4': 'm3 m-3',
+            'potential_evaporation': 'm',
+            'volumetric_soil_water_layer_1': 'Volume fraction (m3 m-3)',
+            'volumetric_soil_water_layer_2': 'Volume fraction (m3 m-3)',
+            'volumetric_soil_water_layer_3': 'Volume fraction (m3 m-3)',
+            'volumetric_soil_water_layer_4': 'Volume fraction (m3 m-3)',
+            'soil_temperature_level_1': 'K',
+            'soil_temperature_level_2': 'K',
+            'soil_temperature_level_3': 'K',
+            'soil_temperature_level_4': 'K',
         }
-        
         return units_map.get(gee_var, 'unknown')
-    def get_era5land_variable_from_gee(self, variable, year, month, day=None, hour=None, scale=None, shapefile=None, region=None):
+
+    def _align_timezone_for_slice(self, ds, time_var, start_date, end_date, use_utc=True):
+        """
+        Ensure dataset time coordinate and slice bounds have matching timezone awareness.
+        
+        Parameters:
+        -----------
+        ds : xarray.Dataset
+            Dataset with time coordinate
+        time_var : str
+            Name of the time coordinate variable
+        start_date : pd.Timestamp or None
+            Start date for slicing
+        end_date : pd.Timestamp or None
+            End date for slicing
+        use_utc : bool
+            If True, standardize to UTC-aware; if False, standardize to tz-naive
+            
+        Returns:
+        --------
+        tuple
+            (modified_ds, aligned_start, aligned_end)
+        """
+        import pandas as pd
+        
+        # Get the dataset's time coordinate
+        ds_times = pd.DatetimeIndex(ds[time_var].values)
+        
+        # Determine current timezone state of dataset
+        ds_is_tz_aware = ds_times.tz is not None
+        
+        # Determine timezone state of slice bounds
+        start_is_tz_aware = start_date is not None and start_date.tzinfo is not None
+        end_is_tz_aware = end_date is not None and end_date.tzinfo is not None
+        
+        # Decide target timezone state
+        if use_utc:
+            # Target: everything UTC-aware
+            target_tz = 'UTC'
+            
+            # Align dataset times
+            if not ds_is_tz_aware:
+                # Assume naive times are UTC, localize them
+                ds_times_aligned = ds_times.tz_localize('UTC')
+                ds = ds.assign_coords({time_var: ds_times_aligned})
+            elif str(ds_times.tz) != 'UTC':
+                # Convert to UTC
+                ds_times_aligned = ds_times.tz_convert('UTC')
+                ds = ds.assign_coords({time_var: ds_times_aligned})
+            
+            # Align start_date
+            if start_date is not None:
+                if not start_is_tz_aware:
+                    start_date = pd.Timestamp(start_date).tz_localize('UTC')
+                else:
+                    start_date = pd.Timestamp(start_date).tz_convert('UTC')
+            
+            # Align end_date
+            if end_date is not None:
+                if not end_is_tz_aware:
+                    end_date = pd.Timestamp(end_date).tz_localize('UTC')
+                else:
+                    end_date = pd.Timestamp(end_date).tz_convert('UTC')
+        
+        else:
+            # Target: everything tz-naive
+            
+            # Align dataset times
+            if ds_is_tz_aware:
+                # Convert to UTC first (if not already), then remove timezone
+                if str(ds_times.tz) != 'UTC':
+                    ds_times = ds_times.tz_convert('UTC')
+                ds_times_aligned = ds_times.tz_localize(None)
+                ds = ds.assign_coords({time_var: ds_times_aligned})
+            
+            # Align start_date
+            if start_date is not None and start_is_tz_aware:
+                start_date = pd.Timestamp(start_date).tz_convert('UTC').tz_localize(None)
+            
+            # Align end_date
+            if end_date is not None and end_is_tz_aware:
+                end_date = pd.Timestamp(end_date).tz_convert('UTC').tz_localize(None)
+        
+        return ds, start_date, end_date
+
+
+    def _safe_time_slice(self, ds, time_var, start_date, end_date, use_utc=True, dates_already_standardized=False):
+        """
+        Safely slice a dataset by time, handling timezone mismatches.
+        """
+        import pandas as pd
+        
+        if start_date is None and end_date is None:
+            return ds
+        
+        # Convert to pandas Timestamps if not already
+        if start_date is not None and not isinstance(start_date, pd.Timestamp):
+            start_date = pd.Timestamp(start_date)
+        if end_date is not None and not isinstance(end_date, pd.Timestamp):
+            end_date = pd.Timestamp(end_date)
+        
+        # --- Standardize dataset time coordinate (always needed) ---
+        ds_times_pd = pd.DatetimeIndex(ds[time_var].values)
+        ds_times_std = self.standardize_timestamps(ds_times_pd, use_utc=use_utc)
+        if ds_times_std is None or ds_times_std.empty:
+            print(f"Warning: Time standardization failed for dataset.")
+            return ds
+        ds = ds.assign_coords({time_var: ds_times_std})
+        
+        # --- Standardize slice bounds (skip if already done) ---
+        if not dates_already_standardized:
+            if start_date is not None:
+                start_idx = pd.DatetimeIndex([start_date])
+                start_date = self.standardize_timestamps(start_idx, use_utc=use_utc)[0]
+            
+            if end_date is not None:
+                end_idx = pd.DatetimeIndex([end_date])
+                end_date = self.standardize_timestamps(end_idx, use_utc=use_utc)[0]
+        
+        # Create and apply the slice
+        time_slice = slice(start_date, end_date)
+        
+        try:
+            ds_filtered = ds.sel({time_var: time_slice})
+            
+            if ds_filtered[time_var].size == 0:
+                print(f"Warning: Time slice returned empty dataset.")
+                print(f"  Dataset time range: {ds[time_var].values.min()} to {ds[time_var].values.max()}")
+                print(f"  Requested slice: {start_date} to {end_date}")
+            
+            return ds_filtered
+            
+        except Exception as e:
+            print(f"Error during time slicing: {e}")
+            return self._fallback_time_slice(ds, time_var, start_date, end_date)
+
+
+    def _fallback_time_slice(self, ds, time_var, start_date, end_date):
+        """Fallback time slicing using boolean indexing."""
+        import pandas as pd
+        
+        ds_times = pd.DatetimeIndex(ds[time_var].values)
+        mask = np.ones(len(ds_times), dtype=bool)
+        
+        if start_date is not None:
+            mask = mask & (ds_times >= start_date)
+        if end_date is not None:
+            mask = mask & (ds_times <= end_date)
+        
+        return ds.isel({time_var: mask})
+    def get_elevation_from_gee(self, region=None, shapefile=None, scale=None):
+        """
+        Get elevation data from ASTER DEM via Google Earth Engine.
+        Uses same storage format as climate data for consistent lookup.
+        """
+        if not self.ee_initialized:
+            self.initialize_gee()
+            if not self.ee_initialized:
+                print("Google Earth Engine not initialized. Cannot access elevation data.")
+                return None
+        
+        print("Accessing ASTER DEM elevation data from Google Earth Engine...")
+        
+        try:
+            # Get bounds from shapefile or defaults
+            if shapefile is not None:
+                gdf = gpd.read_file(shapefile)
+                if gdf.crs != "EPSG:4326":
+                    gdf = gdf.to_crs("EPSG:4326")
+                bounds = gdf.total_bounds
+                lon_min, lat_min, lon_max, lat_max = bounds
+                print(f"  Shapefile bounds: lon=[{lon_min:.2f}, {lon_max:.2f}], lat=[{lat_min:.2f}, {lat_max:.2f}]")
+            else:
+                lon_min = config.DEFAULT_LON_MIN
+                lon_max = config.DEFAULT_LON_MAX
+                lat_min = config.DEFAULT_LAT_MIN
+                lat_max = config.DEFAULT_LAT_MAX
+                print(f"  Default bounds: lon=[{lon_min:.2f}, {lon_max:.2f}], lat=[{lat_min:.2f}, {lat_max:.2f}]")
+            
+            region = ee.Geometry.Rectangle([lon_min, lat_min, lon_max, lat_max], None, False)
+            
+            if scale is None:
+                scale = 11132  # ~0.1 degree, match ERA5-Land resolution
+            
+            # Access ASTER DEM
+            aster_dem = ee.Image('NASA/NASADEM_HGT/001').select('elevation')
+            
+            # Use tiled download
+            elev_array, bounds_returned = self._download_gee_image_tiled(
+                aster_dem, region, scale, 
+                band_name='elevation',
+                max_tile_size=1024
+            )
+            elev_array = elev_array.astype(float)
+            # Filter NoData values
+            elev_array = np.where(elev_array <= -32000, np.nan, elev_array)  # -32768 is NoData
+            elev_array = np.where(elev_array > 9000, np.nan, elev_array)     # >9000m is invalid (Everest is ~8849m)
+            if elev_array is None:
+                print("Failed to download elevation data")
+                return None
+            
+            height, width = elev_array.shape
+            
+            # Create transform EXACTLY like climate data uses
+            # from_bounds(west, south, east, north, width, height)
+            from rasterio.transform import from_bounds
+            transform = from_bounds(
+                bounds_returned['lon_min'], bounds_returned['lat_min'],
+                bounds_returned['lon_max'], bounds_returned['lat_max'],
+                width, height
+            )
+            
+            # Store in SAME FORMAT as climate data
+            self.elevation_raw = {
+                'data': elev_array.astype(float),
+                'transform': transform,
+                'crs': 'EPSG:4326',
+                'height': height,
+                'width': width,
+                'nodata': None
+            }
+            
+            # Validation output
+            valid_data = elev_array[~np.isnan(elev_array)]
+            print(f"Successfully loaded raw elevation data:")
+            print(f"  Shape: {height} x {width}")
+            print(f"  Range: [{np.nanmin(valid_data):.1f}, {np.nanmax(valid_data):.1f}] m")
+            print(f"  Unique values: {len(np.unique(valid_data))}")
+            
+            return self.elevation_raw
+            
+        except Exception as e:
+            print(f"Error accessing elevation data from GEE: {str(e)}")
+            traceback.print_exc()
+            return None
+    def get_pft_from_gee(self, year, region=None, shapefile=None, scale=None):
+        """
+        Get Plant Functional Type (PFT) data from MODIS Land Cover via Google Earth Engine.
+        Uses same storage format as climate data for consistent lookup.
+        """
+        if not self.ee_initialized:
+            self.initialize_gee()
+            if not self.ee_initialized:
+                print("Google Earth Engine not initialized. Cannot access PFT data.")
+                return None
+        
+        print(f"Accessing MODIS Land Cover (PFT) data for year {year} from Google Earth Engine...")
+        
+        try:
+            # Get bounds from shapefile or defaults
+            if shapefile is not None:
+                gdf = gpd.read_file(shapefile)
+                if gdf.crs != "EPSG:4326":
+                    gdf = gdf.to_crs("EPSG:4326")
+                bounds = gdf.total_bounds
+                lon_min, lat_min, lon_max, lat_max = bounds
+                print(f"  Shapefile bounds: lon=[{lon_min:.2f}, {lon_max:.2f}], lat=[{lat_min:.2f}, {lat_max:.2f}]")
+            else:
+                lon_min = config.DEFAULT_LON_MIN
+                lon_max = config.DEFAULT_LON_MAX
+                lat_min = config.DEFAULT_LAT_MIN
+                lat_max = config.DEFAULT_LAT_MAX
+                print(f"  Default bounds: lon=[{lon_min:.2f}, {lon_max:.2f}], lat=[{lat_min:.2f}, {lat_max:.2f}]")
+            
+            region = ee.Geometry.Rectangle([lon_min, lat_min, lon_max, lat_max], None, False)
+            
+            if scale is None:
+                scale = 11132
+            
+            # Access MODIS Land Cover
+            modis_lc = ee.ImageCollection('MODIS/061/MCD12Q1') \
+                .filterDate(f'{year}-01-01', f'{year}-12-31') \
+                .first() \
+                .select('LC_Type1') \
+                #.resample('mode')
+            
+            # Use tiled download
+            pft_array, bounds_returned = self._download_gee_image_tiled(
+                modis_lc, region, scale,
+                band_name='LC_Type1',
+                max_tile_size=1024
+            )
+            
+            if pft_array is None:
+                print("Failed to download PFT data")
+                return None
+            
+            height, width = pft_array.shape
+            
+            # Create transform EXACTLY like climate data uses
+            from rasterio.transform import from_bounds
+            transform = from_bounds(
+                bounds_returned['lon_min'], bounds_returned['lat_min'],
+                bounds_returned['lon_max'], bounds_returned['lat_max'],
+                width, height
+            )
+            
+            # Store in SAME FORMAT as climate data
+            self.pft_raw = {
+                'data': pft_array.astype(float),
+                'transform': transform,
+                'crs': 'EPSG:4326',
+                'height': height,
+                'width': width,
+                'nodata': 255,
+                'year': year,
+                'class_descriptions': {
+                    1: 'ENF', 2: 'EBF', 3: 'DNF', 4: 'DBF', 5: 'MF',
+                    6: 'CSH', 7: 'OSH', 8: 'WSA', 9: 'SAV', 10: 'GRA',
+                    11: 'WET', 12: 'CRO', 13: 'URB', 14: 'CNV', 15: 'SNO',
+                    16: 'BSV', 17: 'WAT'
+                }
+            }
+            
+            # Validation output
+            valid_data = pft_array[~np.isnan(pft_array) & (pft_array != 255)]
+            unique_classes = np.unique(valid_data).astype(int)
+            print(f"Successfully loaded raw PFT data:")
+            print(f"  Shape: {height} x {width}")
+            print(f"  PFT classes present: {unique_classes.tolist()}")
+            print(f"  Unique values: {len(unique_classes)}")
+            
+            return self.pft_raw
+            
+        except Exception as e:
+            print(f"Error accessing PFT data from GEE: {str(e)}")
+            traceback.print_exc()
+            return None
+
+    def get_canopy_height_from_gee(self, region=None, shapefile=None, scale=None):
+        """
+        Get canopy height data from Meta/Facebook dataset via Google Earth Engine.
+        Uses same storage format as climate data for consistent lookup.
+        """
+        if not self.ee_initialized:
+            self.initialize_gee()
+            if not self.ee_initialized:
+                print("Google Earth Engine not initialized. Cannot access canopy height data.")
+                return None
+        
+        print("Accessing Meta canopy height data from Google Earth Engine...")
+        
+        try:
+            # Get bounds from shapefile or defaults
+            if shapefile is not None:
+                gdf = gpd.read_file(shapefile)
+                if gdf.crs != "EPSG:4326":
+                    gdf = gdf.to_crs("EPSG:4326")
+                bounds = gdf.total_bounds
+                lon_min, lat_min, lon_max, lat_max = bounds
+                print(f"  Shapefile bounds: lon=[{lon_min:.2f}, {lon_max:.2f}], lat=[{lat_min:.2f}, {lat_max:.2f}]")
+            else:
+                lon_min = config.DEFAULT_LON_MIN
+                lon_max = config.DEFAULT_LON_MAX
+                lat_min = config.DEFAULT_LAT_MIN
+                lat_max = config.DEFAULT_LAT_MAX
+                print(f"  Default bounds: lon=[{lon_min:.2f}, {lon_max:.2f}], lat=[{lat_min:.2f}, {lat_max:.2f}]")
+            
+            region = ee.Geometry.Rectangle([lon_min, lat_min, lon_max, lat_max], None, False)
+            
+            if scale is None:
+                scale = 11132
+            
+            # Try different dataset paths
+            dataset_paths = [
+                ('ImageCollection', 'projects/meta-forest-monitoring-okw37/assets/CanopyHeight'),
+                ('Image', 'projects/sat-io/open-datasets/META/GLOBCANOPYHEIGHT'),
+            ]
+            
+            canopy_height = None
+            successful_path = None
+            
+            for ds_type, ds_path in dataset_paths:
+                try:
+                    print(f"  Trying {ds_type}: {ds_path}")
+                    if ds_type == 'ImageCollection':
+                        canopy_height = ee.ImageCollection(ds_path).mosaic()
+                    else:
+                        canopy_height = ee.Image(ds_path)
+                    
+                    _ = canopy_height.bandNames().getInfo()
+                    successful_path = ds_path
+                    print(f"  Successfully connected to: {ds_path}")
+                    break
+                except Exception as e:
+                    print(f"  Failed: {str(e)[:50]}...")
+                    canopy_height = None
+            
+            if canopy_height is None:
+                print("Error: Could not access any canopy height dataset")
+                return None
+            
+            # Select band
+            band_names = canopy_height.bandNames().getInfo()
+            if 'canopy_height' in band_names:
+                band_name = 'canopy_height'
+            elif 'b1' in band_names:
+                band_name = 'b1'
+            else:
+                band_name = band_names[0]
+            
+            # Use tiled download
+            ch_array, bounds_returned = self._download_gee_image_tiled(
+                canopy_height, region, scale,
+                band_name=band_name,
+                max_tile_size=1024
+            )
+            
+            if ch_array is None:
+                print("Failed to download canopy height data")
+                return None
+            
+            # Handle invalid values
+            ch_array = ch_array.astype(float)
+            ch_array = np.where((ch_array < 0) | (ch_array > 100), np.nan, ch_array)
+            
+            height, width = ch_array.shape
+            
+            # Create transform EXACTLY like climate data uses
+            from rasterio.transform import from_bounds
+            transform = from_bounds(
+                bounds_returned['lon_min'], bounds_returned['lat_min'],
+                bounds_returned['lon_max'], bounds_returned['lat_max'],
+                width, height
+            )
+            
+            # Store in SAME FORMAT as climate data
+            self.canopy_height_raw = {
+                'data': ch_array,
+                'transform': transform,
+                'crs': 'EPSG:4326',
+                'height': height,
+                'width': width,
+                'nodata': np.nan,
+                'source': successful_path
+            }
+            
+            # Validation output
+            valid_data = ch_array[~np.isnan(ch_array)]
+            print(f"Successfully loaded raw canopy height data:")
+            print(f"  Shape: {height} x {width}")
+            if len(valid_data) > 0:
+                print(f"  Range: [{valid_data.min():.1f}, {valid_data.max():.1f}] m")
+                print(f"  Unique values: {len(np.unique(valid_data))}")
+            else:
+                print("  WARNING: No valid data points!")
+            
+            return self.canopy_height_raw
+            
+        except Exception as e:
+            print(f"Error accessing canopy height data from GEE: {str(e)}")
+            traceback.print_exc()
+            return None
+    def load_lai_data_raw(self, year, month, day=None, region=None, shapefile=None):
+        """
+        Load LAI data from local GLOBMAP files as raw data.
+        Uses same storage format as climate data for consistent lookup.
+        
+        Parameters:
+        -----------
+        year : int
+            Year of data
+        month : int
+            Month of data
+        day : int, optional
+            Day of data. If None, loads data for entire month
+        region : dict, optional
+            Region bounds
+        shapefile : str, optional
+            Path to shapefile for region definition
+            
+        Returns:
+        --------
+        dict
+            Raw LAI data dictionary with 'data', 'times', and 'transform'
+        """
+        if day is not None:
+            print(f"Loading raw GLOBMAP LAI data for {year}-{month:02d}-{day:02d}")
+            start_date = datetime(year, month, day)
+            end_date = start_date + timedelta(days=1)
+        else:
+            print(f"Loading raw GLOBMAP LAI data for entire month {year}-{month:02d}")
+            start_date = datetime(year, month, 1)
+            if month == 12:
+                end_date = datetime(year + 1, 1, 1)
+            else:
+                end_date = datetime(year, month + 1, 1)
+        
+        try:
+            # Get region bounds
+            if shapefile:
+                gdf = gpd.read_file(shapefile)
+                if gdf.crs != "EPSG:4326":
+                    gdf = gdf.to_crs("EPSG:4326")
+                bounds = gdf.total_bounds
+                lon_min, lat_min, lon_max, lat_max = bounds
+                print(f"  Shapefile bounds: lon=[{lon_min:.2f}, {lon_max:.2f}], lat=[{lat_min:.2f}, {lat_max:.2f}]")
+            elif region:
+                lon_min = region.get('lon_min', config.DEFAULT_LON_MIN)
+                lon_max = region.get('lon_max', config.DEFAULT_LON_MAX)
+                lat_min = region.get('lat_min', config.DEFAULT_LAT_MIN)
+                lat_max = region.get('lat_max', config.DEFAULT_LAT_MAX)
+            else:
+                lon_min = config.DEFAULT_LON_MIN
+                lon_max = config.DEFAULT_LON_MAX
+                lat_min = config.DEFAULT_LAT_MIN
+                lat_max = config.DEFAULT_LAT_MAX
+            
+            # Find LAI files
+            lai_files = list(glob.glob(str(self.lai_data_dir / "GlobMapLAIV3.A*.Global.LAI.tif")))
+            if not lai_files:
+                lai_files = list(glob.glob(str(self.lai_data_dir / "*LAI*.tif")))
+            
+            if not lai_files:
+                print(f"Error: No LAI files found in {self.lai_data_dir}")
+                self.lai_raw = None
+                return None
+            
+            print(f"  Found {len(lai_files)} LAI files in {self.lai_data_dir}")
+            
+            # Parse filenames
+            def parse_globmap_filename(filepath):
+                filename = Path(filepath).name
+                try:
+                    parts = filename.split('.')
+                    for part in parts:
+                        if part.startswith('A') and len(part) == 8:
+                            file_year = int(part[1:5])
+                            file_doy = int(part[5:8])
+                            file_date = datetime(file_year, 1, 1) + timedelta(days=file_doy - 1)
+                            return file_year, file_doy, file_date
+                except (ValueError, IndexError):
+                    pass
+                return None, None, None
+            
+            # Find relevant files with buffer
+            buffer_days = 16
+            search_start = start_date - timedelta(days=buffer_days)
+            search_end = end_date + timedelta(days=buffer_days)
+            
+            relevant_files = []
+            for lai_file in lai_files:
+                file_year, file_doy, file_date = parse_globmap_filename(lai_file)
+                if file_date is None:
+                    continue
+                if search_start <= file_date <= search_end:
+                    relevant_files.append({
+                        'path': lai_file,
+                        'date': file_date
+                    })
+            
+            relevant_files.sort(key=lambda x: x['date'])
+            
+            if not relevant_files:
+                # Find nearest file
+                target_mid = start_date + (end_date - start_date) / 2
+                min_diff = float('inf')
+                best_file = None
+                
+                for lai_file in lai_files:
+                    _, _, file_date = parse_globmap_filename(lai_file)
+                    if file_date is None:
+                        continue
+                    diff = abs((file_date - target_mid).days)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_file = {'path': lai_file, 'date': file_date}
+                
+                if best_file:
+                    relevant_files = [best_file]
+                    print(f"  Using nearest file: {Path(best_file['path']).name} ({min_diff} days from target)")
+                else:
+                    print("Error: Could not find any suitable LAI files")
+                    self.lai_raw = None
+                    return None
+            
+            print(f"  Loading {len(relevant_files)} LAI files:")
+            
+            # Load all files
+            lai_arrays = []
+            lai_dates = []
+            transform_ref = None
+            
+            for file_info in relevant_files:
+                lai_file = file_info['path']
+                file_date = file_info['date']
+                
+                try:
+                    with rasterio.open(lai_file) as src:
+                        # Create window from bounds
+                        window = from_bounds(lon_min, lat_min, lon_max, lat_max, src.transform)
+                        window = window.intersection(rasterio.windows.Window(0, 0, src.width, src.height))
+                        
+                        if window.width <= 0 or window.height <= 0:
+                            print(f"    Skipping {Path(lai_file).name}: No overlap with region")
+                            continue
+                        
+                        # Read data within window
+                        lai_array = src.read(1, window=window)
+                        
+                        # Get transform for this window - SAME AS CLIMATE DATA
+                        window_transform = rasterio.windows.transform(window, src.transform)
+                        
+                        if transform_ref is None:
+                            transform_ref = window_transform
+                        
+                        nodata = src.nodata
+                        
+                        # Handle nodata
+                        lai_array = lai_array.astype(float)
+                        if nodata is not None:
+                            lai_array = np.where(lai_array == nodata, np.nan, lai_array)
+                        
+                        # Apply scaling if needed
+                        valid_data = lai_array[~np.isnan(lai_array)]
+                        if len(valid_data) > 0:
+                            data_max = np.nanmax(valid_data)
+                            if data_max > 700:
+                                lai_array = lai_array * 0.01
+                            elif data_max > 70:
+                                lai_array = lai_array * 0.1
+                        
+                        # Validate range (LAI typically 0-10)
+                        lai_array = np.where((lai_array < 0) | (lai_array > 10), np.nan, lai_array)
+                        
+                        lai_arrays.append(lai_array)
+                        lai_dates.append(file_date)
+                        
+                        valid_after = lai_array[~np.isnan(lai_array)]
+                        print(f"    - {Path(lai_file).name}: shape={lai_array.shape}, "
+                            f"valid={len(valid_after)}, range=[{valid_after.min():.2f}, {valid_after.max():.2f}]" if len(valid_after) > 0 else "no valid data")
+                        
+                except Exception as e:
+                    print(f"    Error loading {Path(lai_file).name}: {e}")
+                    continue
+            
+            if not lai_arrays:
+                print("Error: Failed to load any LAI data")
+                self.lai_raw = None
+                return None
+            
+            # Stack into 3D array (n_times, height, width)
+            lai_stack = np.stack(lai_arrays, axis=0)
+            
+            # Store in SAME FORMAT as climate data
+            self.lai_raw = {
+                'data': lai_stack,
+                'times': lai_dates,
+                'transform': transform_ref,
+                'crs': 'EPSG:4326',
+                'height': lai_stack.shape[1],
+                'width': lai_stack.shape[2],
+                'nodata': np.nan,
+                'source': 'GLOBMAP LAI V3'
+            }
+            
+            # Validation output
+            valid_lai = lai_stack[~np.isnan(lai_stack)]
+            print(f"Successfully loaded raw LAI data:")
+            print(f"  Shape: {lai_stack.shape} (times, lat, lon)")
+            print(f"  Time range: {min(lai_dates)} to {max(lai_dates)}")
+            if len(valid_lai) > 0:
+                print(f"  Value range: [{valid_lai.min():.2f}, {valid_lai.max():.2f}]")
+                print(f"  Unique values: {len(np.unique(valid_lai))}")
+            
+            return self.lai_raw
+            
+        except Exception as e:
+            print(f"Error loading LAI data: {str(e)}")
+            traceback.print_exc()
+            self.lai_raw = None
+            return None
+
+    def load_static_datasets(self, year, shapefile=None, region=None):
+        """
+        Load all static datasets (elevation, PFT, canopy height, LAI).
+        
+        Parameters:
+        -----------
+        year : int
+            Year for time-varying static data (PFT, LAI)
+        shapefile : str, optional
+            Path to shapefile for region definition
+        region : dict, optional
+            Region bounds
+            
+        Returns:
+        --------
+        dict
+            Dictionary of loaded static datasets
+        """
+        print("\n===== Loading Static Datasets =====")
+        
+        static_data = {}
+        
+        # Load elevation
+        elev = self.get_elevation_from_gee(shapefile=shapefile)
+        if elev is not None:
+            static_data['elevation'] = elev
+        
+        # Load PFT
+        pft = self.get_pft_from_gee(year, shapefile=shapefile)
+        if pft is not None:
+            static_data['pft'] = pft
+        
+        # Load canopy height
+        ch = self.get_canopy_height_from_gee(shapefile=shapefile)
+        if ch is not None:
+            static_data['canopy_height'] = ch
+        
+        # Load LAI (will need month as well for temporal matching)
+        # This is loaded separately per time period in load_variable_data
+        
+        print(f"Loaded {len(static_data)} static datasets")
+        return static_data
+    def get_era5land_variable_from_gee(self, variable, year, month=None, day=None, hour=None, scale=None, shapefile=None, region=None):
             """
             Access ERA5-Land data from Google Earth Engine for a specific time period.
             Modified to properly handle region bounds and coordinate extraction.
@@ -502,7 +2330,7 @@ class ERA5LandGEEProcessor:
                 Variable name (e.g., '2m_temperature')
             year : int
                 Year to access
-            month : int
+            month : int, optional
                 Month to access
             day : int, optional
                 Day to access (if None, access all days in month)
@@ -581,7 +2409,10 @@ class ERA5LandGEEProcessor:
                     end_date = ee.Date.fromYMD(year + 1, 1, 1)
                 
                 # Access ERA5-Land collection
-                era5land = ee.ImageCollection('ECMWF/ERA5_LAND/HOURLY')
+                if self.time_scale == 'hourly':
+                    era5land = ee.ImageCollection('ECMWF/ERA5_LAND/HOURLY')
+                else:
+                    era5land = ee.ImageCollection('ECMWF/ERA5_LAND/DAILY_AGGR')
                 
                 # Filter by date and select the variable
                 era5land = era5land.filterDate(start_date, end_date).select(gee_var)
@@ -704,6 +2535,13 @@ class ERA5LandGEEProcessor:
                             scale=scale
                         )
                         
+                        # Handle ERA5-Land NoData values
+                        # Common NoData sentinels: 9999, 9.999e20, -9999
+                        nodata_values = [9999, 9.999e20, -9999, 9999.0]
+                        for nodata in nodata_values:
+                            if np.any(np.isclose(img_array, nodata, rtol=1e-5)):
+                                img_array = np.where(np.isclose(img_array, nodata, rtol=1e-5), np.nan, img_array)
+                                print(f"  Replaced NoData value ~{nodata} with NaN")
                         # Check and handle extra dimensions
                         if img_array.ndim > 2:
                             if img_array.shape[0] == 1:
@@ -918,20 +2756,19 @@ class ERA5LandGEEProcessor:
         dict
             Dictionary where keys are variable names and values are the processed xarray.Dataset objects.
         """
-        if not rioxarray:
-            print("ERROR: rioxarray library is required for shapefile masking. Please install it.")
-            # Optionally raise an error: raise ImportError("rioxarray not found")
-            # Or proceed without masking capability:
-            if shapefile:
-                print("WARNING: Cannot perform shapefile masking because rioxarray is missing. Only bounding box extraction will occur.")
-                # shapefile = None # Disable shapefile processing further down
-
-        if not gpd and shapefile:
-            print("ERROR: GeoPandas library is required for shapefile processing. Please install it.")
-            # Optionally raise an error: raise ImportError("geopandas not found")
-            # Or proceed without masking capability:
-            print("WARNING: Cannot perform shapefile masking because geopandas is missing. Only bounding box extraction will occur.")
-            # shapefile = None # Disable shapefile processing further down
+        try:
+            import rioxarray
+        except ImportError:
+            raise ImportError("rioxarray library is required for shapefile masking. Please install it.")
+        
+        try:
+            import geopandas as gpd
+        except ImportError:
+            raise ImportError("geopandas library is required for shapefile processing. Please install it.")
+            
+        if not shapefile:
+            shapefile = None
+            raise ValueError("A shapefile path must be provided for region clipping.")
 
         # Clear existing datasets before loading new ones
         time_str = f"{year}-{month:02d}"
@@ -991,8 +2828,7 @@ class ERA5LandGEEProcessor:
                 'lon_max': config.DEFAULT_LON_MAX
             }
             print("Using default global region.")
-
-        # Load each variable
+        # Load each ERA5 variable
         for var_name in variables:
             var_desc = f"{var_name} for {time_str}"
             print(f"\nProcessing variable: {var_desc}...")
@@ -1051,7 +2887,7 @@ class ERA5LandGEEProcessor:
                                                 all_touched=True)
 
                         # Check if clipping resulted in an empty dataset
-                        if masked_ds.nbytes == 0 or all(dim == 0 for dim in masked_ds.dims.values()):
+                        if masked_ds.nbytes == 0 or all(dim == 0 for dim in masked_ds.sizes.values()):
                             print(f"    WARNING: Clipping {var_name} resulted in an empty dataset. Shapefile might not overlap the data region.")
                             print(f"    Storing the bounding-box extracted data for {var_name} instead of empty mask.")
                         else:
@@ -1079,6 +2915,47 @@ class ERA5LandGEEProcessor:
             else: # If ds was None initially
                 print(f"  --> Failed to load initial data for {var_name}. Skipping further processing.")
 
+        # At the END of load_variable_data, AFTER all ERA5 variables are loaded:
+        # ============================================================
+        # MASK ZERO VALUES (NEW - Add this section)
+        # ============================================================
+        print("\nApplying zero-value mask to ERA5-Land data...")
+        self.mask_zero_values(threshold=1e-10)
+        # Load raw static datasets (only once)
+        if not hasattr(self, '_static_raw_loaded') or not self._static_raw_loaded:
+            print("\nLoading raw static datasets...")
+            self.load_static_datasets(year, shapefile=shapefile)
+            self._static_raw_loaded = True
+        
+        # Load raw LAI data
+        self.load_lai_data_raw(year, month, day, shapefile=shapefile)
+        
+        # Now resample all static data to match ERA5 grid
+        # Get target coordinates from loaded ERA5 data
+        target_lats = None
+        target_lons = None
+        target_times = None
+        
+        if self.datasets:
+            ref_ds_key = next(iter(self.datasets))
+            ref_ds = self.datasets[ref_ds_key]
+            
+            for coord in ref_ds.coords:
+                coord_lower = coord.lower()
+                if coord_lower in ('latitude', 'lat') and target_lats is None:
+                    target_lats = ref_ds[coord].values
+                elif coord_lower in ('longitude', 'lon') and target_lons is None:
+                    target_lons = ref_ds[coord].values
+                elif coord_lower in ('time', 'datetime') and target_times is None:
+                    target_times = ref_ds[coord].values
+        
+        # Resample static data to ERA5 grid
+        self.resample_static_data(
+            target_lats=target_lats,
+            target_lons=target_lons,
+            target_times=target_times
+        )
+        
         print("\nFinished loading all variables.")
         return self.datasets
     
@@ -1299,7 +3176,148 @@ class ERA5LandGEEProcessor:
                 import traceback
                 traceback.print_exc()
         
-       # Calculate PAR-related variables if solar radiation is available
+        # Calculate Precipitation / PET ratio if both are available
+        if 'total_precipitation' in self.datasets and 'potential_evaporation' in self.datasets:
+            print("Calculating precipitation/PET ratio...")
+            try:
+                precip_ds = self.datasets['total_precipitation']
+                pet_ds = self.datasets['potential_evaporation']
+                
+                precip_var = list(precip_ds.data_vars)[0]
+                pet_var = list(pet_ds.data_vars)[0]
+                
+                if 'time' in precip_ds.dims:
+                    times = precip_ds.coords['time'].values
+                    lat_var = [v for v in precip_ds.dims if v.lower() in ('latitude', 'lat')][0]
+                    lon_var = [v for v in precip_ds.dims if v.lower() in ('longitude', 'lon')][0]
+                    
+                    precip_pet_chunks = []
+                    chunk_coords = {
+                        'time': [], 
+                        'latitude': precip_ds[lat_var].values, 
+                        'longitude': precip_ds[lon_var].values
+                    }
+                    
+                    for t_idx in range(len(times)):
+                        precip_slice = precip_ds[precip_var].isel(time=t_idx).values
+                        pet_slice = pet_ds[pet_var].isel(time=t_idx).values
+                        
+                        # PET from ERA5 is negative (evaporation is loss)
+                        # Convert to positive values
+                        pet_slice = np.abs(pet_slice)
+                        
+                        # Avoid division by zero
+                        pet_slice = np.where(pet_slice < 1e-10, 1e-10, pet_slice)
+                        
+                        # Calculate ratio
+                        ratio_slice = precip_slice / pet_slice
+                        
+                        # Clip to reasonable range
+                        ratio_slice = np.clip(ratio_slice, 0, 10)
+                        
+                        precip_pet_chunks.append(ratio_slice)
+                        chunk_coords['time'].append(times[t_idx])
+                    
+                    precip_pet_array = np.stack(precip_pet_chunks)
+                    precip_pet_da = xr.DataArray(
+                        precip_pet_array,
+                        dims=['time', lat_var, lon_var],
+                        coords=chunk_coords,
+                        name='precip_pet_ratio'
+                    )
+                    
+                    precip_pet_ds = precip_pet_da.to_dataset()
+                    precip_pet_ds['precip_pet_ratio'].attrs['units'] = 'ratio'
+                    precip_pet_ds['precip_pet_ratio'].attrs['long_name'] = 'Precipitation to PET ratio'
+                    
+                    self.datasets['precip_pet_ratio'] = precip_pet_ds
+                    print("Precipitation/PET ratio calculated successfully")
+                    
+            except Exception as e:
+                print(f"Error calculating precipitation/PET ratio: {str(e)}")
+                traceback.print_exc()
+        elif 'total_precipitation' in self.datasets:
+            # If no PET available, estimate it using Hargreaves method
+            print("PET not available, estimating using temperature-based method...")
+            try:
+                if 'temperature_2m' in self.datasets:
+                    precip_ds = self.datasets['total_precipitation']
+                    temp_ds = self.datasets['temperature_2m']
+                    
+                    precip_var = list(precip_ds.data_vars)[0]
+                    temp_var = list(temp_ds.data_vars)[0]
+                    
+                    if 'time' in precip_ds.dims:
+                        times = precip_ds.coords['time'].values
+                        lat_var = [v for v in precip_ds.dims if v.lower() in ('latitude', 'lat')][0]
+                        lon_var = [v for v in precip_ds.dims if v.lower() in ('longitude', 'lon')][0]
+                        
+                        lats = precip_ds[lat_var].values
+                        
+                        precip_pet_chunks = []
+                        chunk_coords = {
+                            'time': [], 
+                            'latitude': lats, 
+                            'longitude': precip_ds[lon_var].values
+                        }
+                        
+                        for t_idx in range(len(times)):
+                            precip_slice = precip_ds[precip_var].isel(time=t_idx).values
+                            temp_slice = temp_ds[temp_var].isel(time=t_idx).values - 273.15  # K to C
+                            
+                            # Get day of year for solar radiation estimate
+                            timestamp = pd.Timestamp(times[t_idx])
+                            doy = timestamp.dayofyear
+                            
+                            # Simple Hargreaves-Samani PET estimate (mm/day)
+                            # PET = 0.0023 * Ra * (T + 17.8) * sqrt(TD)
+                            # Simplified version using temperature only
+                            lat_rad = np.deg2rad(lats)[:, np.newaxis]
+                            
+                            # Extraterrestrial radiation estimate
+                            dr = 1 + 0.033 * np.cos(2 * np.pi * doy / 365)
+                            delta = 0.409 * np.sin(2 * np.pi * doy / 365 - 1.39)
+                            ws = np.arccos(-np.tan(lat_rad) * np.tan(delta))
+                            ws = np.clip(ws, 0, np.pi)
+                            
+                            Ra = (24 * 60 / np.pi) * 0.082 * dr * (
+                                ws * np.sin(lat_rad) * np.sin(delta) +
+                                np.cos(lat_rad) * np.cos(delta) * np.sin(ws)
+                            )
+                            
+                            # Simplified PET (mm/hour, assuming hourly data)
+                            pet_slice = 0.0023 * Ra * (temp_slice + 17.8) * np.sqrt(np.maximum(temp_slice, 0) + 1) / 24
+                            pet_slice = np.maximum(pet_slice, 1e-10)
+                            
+                            # Precipitation is in meters, convert to mm for ratio
+                            precip_mm = precip_slice * 1000
+                            
+                            ratio_slice = precip_mm / pet_slice
+                            ratio_slice = np.clip(ratio_slice, 0, 10)
+                            
+                            precip_pet_chunks.append(ratio_slice)
+                            chunk_coords['time'].append(times[t_idx])
+                        
+                        precip_pet_array = np.stack(precip_pet_chunks)
+                        precip_pet_da = xr.DataArray(
+                            precip_pet_array,
+                            dims=['time', lat_var, lon_var],
+                            coords=chunk_coords,
+                            name='precip_pet_ratio'
+                        )
+                        
+                        precip_pet_ds = precip_pet_da.to_dataset()
+                        precip_pet_ds['precip_pet_ratio'].attrs['units'] = 'ratio'
+                        precip_pet_ds['precip_pet_ratio'].attrs['long_name'] = 'Precipitation to PET ratio (estimated)'
+                        
+                        self.datasets['precip_pet_ratio'] = precip_pet_ds
+                        print("Precipitation/PET ratio estimated successfully using Hargreaves method")
+                        
+            except Exception as e:
+                print(f"Error estimating precipitation/PET ratio: {str(e)}")
+                traceback.print_exc()
+        
+        # Calculate PAR-related variables if solar radiation is available
         if 'surface_solar_radiation_downwards' in self.datasets:
             print("Calculating PAR-related variables from solar radiation...")
             try:
@@ -1311,10 +3329,18 @@ class ERA5LandGEEProcessor:
                 if sr_var:
                     # Check if the data needs time differencing (for accumulated values)
                     is_accumulated = False
-                    if hasattr(sr_ds[sr_var], 'units'):
-                        units = sr_ds[sr_var].attrs.get('units', '').lower()
-                        # J m-2 indicates accumulated energy over time period
-                        is_accumulated = 'j m-2' in units or 'j/m2' in units
+
+                    if self.time_scale == 'daily':
+                        is_accumulated = False
+                    elif self.time_scale == 'hourly':
+                        # if variable name contains 'hourly', assume instantaneous
+                        # otherwise, assume accumulated
+                        if 'hourly' in sr_var.lower():
+                            is_accumulated = False
+                            print("  > Detected 'hourly' in variable name, treating solar radiation as instantaneous values.")
+                        else:
+                            is_accumulated = True
+                            print("  > Treating solar radiation as accumulated values needing conversion to instantaneous.")
                     
                     # Process with time chunking if we have time dimension
                     if 'time' in sr_ds.dims:
@@ -1337,25 +3363,29 @@ class ERA5LandGEEProcessor:
                             time_diff_seconds = np.append(time_diff_seconds[0] if len(time_diff_seconds) > 0 else 3600, 
                                                     time_diff_seconds)
                         
-                        # CONVERT ACCUMULATED SOLAR RADIATION TO INSTANTANEOUS IF NEEDED
+                        # ============================================================
+                        # HANDLE ACCUMULATED -> INSTANTANEOUS CONVERSION (HOURLY ONLY)
+                        # ============================================================
                         if is_accumulated:
-                            print(f"Converting accumulated solar radiation data to instantaneous values...")
+                            print(f"Converting accumulated solar radiation to instantaneous values...")
                             
-                            # Create new array for instantaneous values
                             inst_values = np.zeros_like(sr_ds[sr_var].values)
-                            
-                            # Process all time steps after the first
-                            for t_idx in range(1, len(times)):
+
+                            for t_idx in range(len(times)):
                                 current = sr_ds[sr_var].isel(time=t_idx).values
-                                previous = sr_ds[sr_var].isel(time=t_idx-1).values
-                                dt = time_diff_seconds[t_idx]
                                 
-                                # Ensure we're not dividing by zero or very small values
-                                if dt < 1.0:
-                                    dt = 3600.0  # Fall back to assuming hourly data
+                                if t_idx == 0:
+                                    # First timestep: accumulated value is energy since 00:00
+                                    dt = time_diff_seconds[0]
+                                    inst_values[0] = current / dt
+                                else:
+                                    previous = sr_ds[sr_var].isel(time=t_idx-1).values
+                                    dt = time_diff_seconds[t_idx]
+                                    diff = current - previous
                                     
-                                # Calculate instantaneous value and validate
-                                inst_values[t_idx] = (current - previous) / dt
+                                    # Reset detection: if diff < 0, we crossed 00:00 UTC
+                                    # In that case, 'current' is the fresh accumulation for this hour
+                                    inst_values[t_idx] = np.where(diff < 0, current, diff) / dt
                                 
                                 # Check for unrealistic values
                                 if np.any(inst_values[t_idx] > 1500) or np.any(inst_values[t_idx] < -10):
@@ -1363,10 +3393,6 @@ class ERA5LandGEEProcessor:
                                     print(f"Range: {np.min(inst_values[t_idx])} to {np.max(inst_values[t_idx])}")
                                     # Clip to realistic values
                                     inst_values[t_idx] = np.clip(inst_values[t_idx], 0, 1500)
-                            
-                            # Handle first time step (copy second time step or use average)
-                            if len(times) > 1:
-                                inst_values[0] = inst_values[1]
                             
                             # Create new DataArray and Dataset
                             new_sr_da = xr.DataArray(
@@ -1386,8 +3412,32 @@ class ERA5LandGEEProcessor:
                             self.datasets['surface_solar_radiation_downwards'] = new_sr_ds
                             print("Successfully converted accumulated solar radiation to instantaneous values")
                         
+                        else:
+                            # ============================================================
+                            # CONVERT J/m² TO W/m² (NON-ACCUMULATED DATA)
+                            # ============================================================
+                            if self.time_scale == 'daily':
+                                dt_seconds = 86400.0
+                            elif self.time_scale == 'hourly':
+                                dt_seconds = 3600.0
+                            else:
+                                dt_seconds = 3600.0  # Default fallback
+                            
+                            print(f"  > Converting Energy (J/m²) to Power (W/m²) using dt={dt_seconds}s")
+                            
+                            # Create a new dataset to hold the converted values
+                            new_sr_ds = sr_ds.copy()
+                            new_sr_ds[sr_var] = sr_ds[sr_var] / dt_seconds
+                            new_sr_ds[sr_var].attrs['units'] = 'W m-2'
+                            
+                            # Update the stored dataset
+                            self.datasets['surface_solar_radiation_downwards'] = new_sr_ds
+                            sr_ds = new_sr_ds
+                            print("Successfully converted solar radiation from J/m² to W/m²")
+                        
+                        # ============================================================
                         # MEMORY OPTIMIZATION: Process in spatial chunks
-                        # Define chunk size for processing
+                        # ============================================================
                         LAT_CHUNK_SIZE = min(100, num_lats)  # Process up to 100 latitude points at a time
                         
                         # Initialize final result arrays
@@ -1401,10 +3451,122 @@ class ERA5LandGEEProcessor:
                             'longitude': lon_values
                         }
                         
-                        # For extraterrestrial radiation calculation
-                        if lat_var:
-                            # Enhanced extraterrestrial radiation calculation based on solaR R package
+                        # PAR conversion constants
+                        PAR_FRACTION = 0.45
+                        PPFD_CONVERSION = 4.6
+                        
+                        # Solar constant (W/m²)
+                        Gsc = 1367.0
+                        
+                        # ============================================================
+                        # BRANCH: DAILY vs HOURLY CALCULATION
+                        # ============================================================
+                        if self.time_scale == 'daily':
+                            # ========================================================
+                            # DAILY CALCULATION: FAO-56 integrated formula for ext_rad
+                            # ========================================================
+                            print("Calculating DAILY extraterrestrial radiation using FAO-56 formula...")
+                            
+                            try:
+                                for t_idx in range(len(times)):
+                                    # Get the converted solar radiation (now in W/m²)
+                                    sr_slice_full = sr_ds[sr_var].isel(time=t_idx).values
+                                    
+                                    # Get day of year
+                                    timestamp = pd.Timestamp(times[t_idx])
+                                    doy = timestamp.dayofyear
+                                    
+                                    # ----- Earth-Sun distance correction (dr) -----
+                                    dr = 1 + 0.033 * np.cos(2 * np.pi * doy / 365)
+                                    
+                                    # ----- Solar declination (Spencer's formula) -----
+                                    day_angle = 2 * np.pi * (doy - 1) / 365
+                                    declination = (0.006918 
+                                                - 0.399912 * np.cos(day_angle) 
+                                                + 0.070257 * np.sin(day_angle)
+                                                - 0.006758 * np.cos(2 * day_angle) 
+                                                + 0.000907 * np.sin(2 * day_angle)
+                                                - 0.002697 * np.cos(3 * day_angle) 
+                                                + 0.001480 * np.sin(3 * day_angle))
+                                    
+                                    # Process in latitude chunks for memory efficiency
+                                    for lat_chunk_start in range(0, num_lats, LAT_CHUNK_SIZE):
+                                        lat_chunk_end = min(lat_chunk_start + LAT_CHUNK_SIZE, num_lats)
+                                        lat_chunk_size = lat_chunk_end - lat_chunk_start
+                                        
+                                        # Extract chunk of solar radiation data
+                                        sr_slice = sr_slice_full[lat_chunk_start:lat_chunk_end, :]
+                                        
+                                        # Data validation
+                                        sr_slice = np.where(sr_slice < 0, 0.0, sr_slice)
+                                        
+                                        # ----- PPFD Calculation -----
+                                        ppfd_slice = sr_slice * PAR_FRACTION * PPFD_CONVERSION
+                                        ppfd_slice = np.clip(ppfd_slice, 0.0, 2500.0)
+                                        ppfd_array[t_idx, lat_chunk_start:lat_chunk_end, :] = ppfd_slice
+                                        
+                                        # ----- Daily ext_rad using FAO-56 -----
+                                        ext_rad_slice = np.zeros((lat_chunk_size, num_lons), dtype=np.float32)
+                                        lat_chunk_values = lat_values[lat_chunk_start:lat_chunk_end]
+                                        
+                                        for i, lat in enumerate(lat_chunk_values):
+                                            lat_rad = np.deg2rad(lat)
+                                            
+                                            # Sunset hour angle (ωs)
+                                            tan_product = -np.tan(lat_rad) * np.tan(declination)
+                                            
+                                            # Handle polar day/night
+                                            if tan_product < -1:
+                                                ws = np.pi  # Polar day: sun never sets
+                                            elif tan_product > 1:
+                                                ws = 0  # Polar night: sun never rises
+                                            else:
+                                                ws = np.arccos(np.clip(tan_product, -1, 1))
+                                            
+                                            # Daily extraterrestrial radiation (FAO-56 Eq. 21)
+                                            # Ra = (24×60/π) × Gsc × dr × [ωs×sin(φ)×sin(δ) + cos(φ)×cos(δ)×sin(ωs)]
+                                            # Result is in W·min/m²/day
+                                            Ra = (24 * 60 / np.pi) * Gsc * dr * (
+                                                ws * np.sin(lat_rad) * np.sin(declination) +
+                                                np.cos(lat_rad) * np.cos(declination) * np.sin(ws)
+                                            )
+                                            
+                                            # Convert to daily mean W/m² (divide by minutes per day)
+                                            Ra_mean_wm2 = Ra / (24 * 60)
+                                            
+                                            # Store (broadcast to all longitudes in this chunk)
+                                            ext_rad_slice[i, :] = Ra_mean_wm2
+                                        
+                                        ext_rad_array[t_idx, lat_chunk_start:lat_chunk_end, :] = ext_rad_slice
+                                        
+                                        # Clean up memory
+                                        del sr_slice, ppfd_slice, ext_rad_slice
+                                    
+                                    # Progress update
+                                    if t_idx % max(1, len(times)//10) == 0 or t_idx == len(times) - 1:
+                                        print(f"    Processed daily PAR variables for day {t_idx+1}/{len(times)}")
+                                
+                                print("Daily PAR-related variables calculated successfully")
+                                
+                            except Exception as daily_err:
+                                print(f"Error in daily PAR calculation: {str(daily_err)}")
+                                traceback.print_exc()
+                                
+                                # Fallback: use simple approximation
+                                print("Falling back to simple approximation for daily ext_rad...")
+                                for t_idx in range(len(times)):
+                                    sr_slice = sr_ds[sr_var].isel(time=t_idx).values
+                                    sr_slice = np.maximum(sr_slice, 0.0)
+                                    
+                                    ppfd_array[t_idx, :, :] = np.clip(sr_slice * PAR_FRACTION * PPFD_CONVERSION, 0.0, 2500.0)
+                                    ext_rad_array[t_idx, :, :] = np.clip(sr_slice * 1.5, 0.0, 1500.0)
+                        
+                        else:
+                            # ========================================================
+                            # HOURLY CALCULATION: Instantaneous values (ORIGINAL CODE)
+                            # ========================================================
                             print("Calculating extraterrestrial radiation using enhanced algorithm with spatial chunking...")
+                            
                             try:
                                 # Define helper functions for conversion
                                 def d2r(degrees):
@@ -1424,27 +3586,14 @@ class ERA5LandGEEProcessor:
                                 dn = time_dt.dayofyear
                                 
                                 # Calculate Julian days since 2000-01-01 12:00:00
-                                # Define a timezone-naive origin for compatibility with time_values
-                                origin = pd.Timestamp('2000-01-01 12:00:00')  # No timezone specification
-                                
-                                # Alternative implementation that doesn't rely on datetime subtraction
                                 def datetime_to_julian(dt):
                                     """Convert datetime to Julian day since 2000-01-01 12:00:00"""
-                                    # Convert to Python datetime if it's numpy datetime64
                                     dt = pd.Timestamp(dt).to_pydatetime()
-                                    
-                                    # Calculate the Julian day
                                     a = (14 - dt.month) // 12
                                     y = dt.year + 4800 - a
                                     m = dt.month + 12 * a - 3
-                                    
-                                    # Basic Julian day calculation
                                     jdn = dt.day + ((153 * m + 2) // 5) + 365 * y + y // 4 - y // 100 + y // 400 - 32045
-                                    
-                                    # Add time of day
                                     jd = jdn + (dt.hour - 12) / 24.0 + dt.minute / 1440.0 + dt.second / 86400.0
-                                    
-                                    # Days since 2000-01-01 12:00:00 (JD 2451545.0)
                                     return jd - 2451545.0
                                 
                                 # Calculate Julian days for each timestamp
@@ -1473,19 +3622,16 @@ class ERA5LandGEEProcessor:
                                         sr_slice = sr_slice_full[lat_chunk_start:lat_chunk_end, :]
                                         
                                         # Data validation - replace NaNs and negative values
-                                        sr_slice = np.nan_to_num(sr_slice, nan=0.0)
-                                        sr_slice = np.maximum(sr_slice, 0.0)  # No negative radiation
+                                        sr_slice = np.where(sr_slice < 0, 0.0, sr_slice)
                                         
                                         # Calculate PAR (Photosynthetically Active Radiation)
-                                        par_fraction = 0.45
-                                        par_wm2 = sr_slice * par_fraction
+                                        par_wm2 = sr_slice * PAR_FRACTION
                                         
                                         # Convert PAR from W/m2 to μmol/m2/s
-                                        conversion_factor = 4.6
-                                        ppfd_slice = par_wm2 * conversion_factor
+                                        ppfd_slice = par_wm2 * PPFD_CONVERSION
                                         
                                         # Validate and constrain to physical limits
-                                        ppfd_slice = np.clip(ppfd_slice, 0.0, 2500.0)  # Max realistic PPFD
+                                        ppfd_slice = np.clip(ppfd_slice, 0.0, 2500.0)
                                         
                                         # Check for extreme values (debug)
                                         if t_idx == 0 and lat_chunk_start == 0:
@@ -1503,48 +3649,39 @@ class ERA5LandGEEProcessor:
                                         
                                         # Calculate declination based on method
                                         if method == 'cooper':
-                                            # Cooper method
                                             decl = d2r(23.45 * np.sin(2 * np.pi * (dn[t_idx] + 284) / 365))
                                         elif method == 'spencer':
-                                            # Spencer method
                                             decl = 0.006918 - 0.399912 * np.cos(X) + 0.070257 * np.sin(X) - 0.006758 * np.cos(2 * X) \
                                                 + 0.000907 * np.sin(2 * X) - 0.002697 * np.cos(3 * X) + 0.001480 * np.sin(3 * X)
                                         elif method == 'strous':
-                                            # Strous method
                                             meanAnomaly = (357.5291 + 0.98560028 * jd) % 360
                                             coefC = np.array([1.9148, 0.02, 0.0003])
-                                            
                                             C = 0
                                             for i in range(3):
                                                 C += coefC[i] * np.sin(d2r((i + 1) * meanAnomaly))
-                                            
                                             trueAnomaly = (meanAnomaly + C) % 360
                                             eclipLong = (trueAnomaly + 282.9372) % 360
                                             excen = 23.435
-                                            
                                             decl = np.arcsin(np.sin(d2r(eclipLong)) * np.sin(d2r(excen)))
                                         else:  # 'michalsky' (default)
-                                            # Michalsky method
                                             meanLong = (280.460 + 0.9856474 * jd) % 360
                                             meanAnomaly = (357.528 + 0.9856003 * jd) % 360
-                                            
                                             eclipLong = (meanLong + 1.915 * np.sin(d2r(meanAnomaly)) + 
                                                         0.02 * np.sin(d2r(2 * meanAnomaly))) % 360
                                             excen = 23.439 - 0.0000004 * jd
-                                            
                                             decl = np.arcsin(np.sin(d2r(eclipLong)) * np.sin(d2r(excen)))
                                         
                                         # Calculate Earth-Sun distance factor (eo)
                                         if method == 'cooper':
                                             eo = 1 + 0.033 * np.cos(2 * np.pi * day_of_year / 365)
-                                        else:  # spencer, michalsky, strous all use the same formula
+                                        else:
                                             eo = (1.000110 + 0.034221 * np.cos(X) + 0.001280 * np.sin(X) +
                                                 0.000719 * np.cos(2 * X) + 0.000077 * np.sin(2 * X))
                                         
                                         # Calculate Equation of Time (minutes)
                                         M = 2 * np.pi / 365.24 * day_of_year
                                         EoT_min = 229.18 * (-0.0334 * np.sin(M) + 0.04184 * np.sin(2 * M + 3.5884))
-                                        EoT_hours = EoT_min / 60  # Convert to hours
+                                        EoT_hours = EoT_min / 60
                                         
                                         # Get hour of day for this timestamp
                                         timestamp = pd.Timestamp(t_value)
@@ -1593,11 +3730,10 @@ class ERA5LandGEEProcessor:
                                     
                                     # Status update
                                     if t_idx % max(1, len(times)//10) == 0 or t_idx == len(times) - 1:
-                                        print(f"Processed PAR variables for time {t_idx+1}/{len(times)}")
-                                    
+                                        print(f"    Processed PAR variables for time {t_idx+1}/{len(times)}")
+                                        
                             except Exception as e:
                                 print(f"Error in extraterrestrial radiation calculation: {str(e)}")
-                                import traceback
                                 traceback.print_exc()
                                 
                                 # Fall back to simpler method if error occurs in custom calculation
@@ -1609,88 +3745,33 @@ class ERA5LandGEEProcessor:
                                 
                                 # Process each time step with simplified approach
                                 for t_idx in range(len(times)):
-                                    # Get the corrected instantaneous solar radiation
                                     sr_slice_full = sr_ds[sr_var].isel(time=t_idx).values
                                     
-                                    # Process in chunks to reduce memory usage
                                     for lat_chunk_start in range(0, num_lats, LAT_CHUNK_SIZE):
                                         lat_chunk_end = min(lat_chunk_start + LAT_CHUNK_SIZE, num_lats)
                                         
-                                        # Extract chunk
                                         sr_slice = sr_slice_full[lat_chunk_start:lat_chunk_end, :]
-                                        
-                                        # Data validation - replace NaNs and negative values
                                         sr_slice = np.nan_to_num(sr_slice, nan=0.0)
-                                        sr_slice = np.maximum(sr_slice, 0.0)  # No negative radiation
+                                        sr_slice = np.maximum(sr_slice, 0.0)
                                         
-                                        # Calculate PAR
-                                        par_fraction = 0.45
-                                        par_wm2 = sr_slice * par_fraction
-                                        ppfd_slice = par_wm2 * 4.6
-                                        
-                                        # Validate and constrain to physical limits
+                                        par_wm2 = sr_slice * PAR_FRACTION
+                                        ppfd_slice = par_wm2 * PPFD_CONVERSION
                                         ppfd_slice = np.clip(ppfd_slice, 0.0, 2500.0)
                                         
-                                        # Simple extraterrestrial radiation approximation
                                         ext_rad_slice = sr_slice * 1.5
                                         ext_rad_slice = np.clip(ext_rad_slice, 0.0, 1500.0)
                                         
-                                        # Store in final arrays
                                         ppfd_array[t_idx, lat_chunk_start:lat_chunk_end, :] = ppfd_slice
                                         ext_rad_array[t_idx, lat_chunk_start:lat_chunk_end, :] = ext_rad_slice
                                         
-                                        # Clean up memory
                                         del sr_slice, par_wm2, ppfd_slice, ext_rad_slice
                                     
-                                    # Status update
                                     if t_idx % max(1, len(times)//10) == 0 or t_idx == len(times) - 1:
-                                        print(f"Processed PAR variables for time {t_idx+1}/{len(times)} (simplified method)")
-                        else:
-                            # If no lat_var found, use simpler approach
-                            print("Latitude coordinate not found, using solar radiation as proxy for ext_rad")
-                            
-                            # Initialize arrays
-                            ppfd_array = np.zeros((len(times), num_lats, num_lons), dtype=np.float32)
-                            ext_rad_array = np.zeros((len(times), num_lats, num_lons), dtype=np.float32)
-                            
-                            # Process each time step with simplified approach
-                            for t_idx in range(len(times)):
-                                # Get the corrected instantaneous solar radiation
-                                sr_slice_full = sr_ds[sr_var].isel(time=t_idx).values
-                                
-                                # Process in chunks
-                                for lat_chunk_start in range(0, num_lats, LAT_CHUNK_SIZE):
-                                    lat_chunk_end = min(lat_chunk_start + LAT_CHUNK_SIZE, num_lats)
-                                    
-                                    # Extract chunk
-                                    sr_slice = sr_slice_full[lat_chunk_start:lat_chunk_end, :]
-                                    
-                                    # Data validation - replace NaNs and negative values
-                                    sr_slice = np.nan_to_num(sr_slice, nan=0.0)
-                                    sr_slice = np.maximum(sr_slice, 0.0)  # No negative radiation
-                                    
-                                    # Calculate PAR
-                                    par_fraction = 0.45
-                                    par_wm2 = sr_slice * par_fraction
-                                    ppfd_slice = par_wm2 * 4.6
-                                    
-                                    # Validate and constrain to physical limits
-                                    ppfd_slice = np.clip(ppfd_slice, 0.0, 2500.0)
-                                    
-                                    # Simple extraterrestrial radiation approximation
-                                    ext_rad_slice = sr_slice * 1.5
-                                    ext_rad_slice = np.clip(ext_rad_slice, 0.0, 1500.0)
-                                    
-                                    # Store in final arrays
-                                    ppfd_array[t_idx, lat_chunk_start:lat_chunk_end, :] = ppfd_slice
-                                    ext_rad_array[t_idx, lat_chunk_start:lat_chunk_end, :] = ext_rad_slice
-                                    
-                                    # Clean up memory
-                                    del sr_slice, par_wm2, ppfd_slice, ext_rad_slice
-                                
-                                # Status update
-                                if t_idx % max(1, len(times)//10) == 0 or t_idx == len(times) - 1:
-                                    print(f"Processed PAR variables for time {t_idx+1}/{len(times)}")
+                                        print(f"    Processed PAR variables for time {t_idx+1}/{len(times)} (simplified method)")
+                        
+                        # ============================================================
+                        # CREATE OUTPUT DATASETS (common for both daily and hourly)
+                        # ============================================================
                         
                         # Create PPFD dataset
                         ppfd_da = xr.DataArray(
@@ -1702,7 +3783,7 @@ class ERA5LandGEEProcessor:
                         ppfd_ds = ppfd_da.to_dataset()
                         ppfd_ds['ppfd_in'].attrs['units'] = 'μmol m-2 s-1'
                         ppfd_ds['ppfd_in'].attrs['long_name'] = 'Photosynthetic Photon Flux Density'
-                        ppfd_ds['ppfd_in'].attrs['description'] = 'Calculated from instantaneous solar radiation'
+                        ppfd_ds['ppfd_in'].attrs['description'] = f'Calculated from {self.time_scale} solar radiation'
                         self.datasets['ppfd_in'] = ppfd_ds
                         
                         # Create extraterrestrial radiation dataset
@@ -1714,30 +3795,37 @@ class ERA5LandGEEProcessor:
                         )
                         ext_rad_ds = ext_rad_da.to_dataset()
                         ext_rad_ds['ext_rad'].attrs['units'] = 'W m-2'
-                        ext_rad_ds['ext_rad'].attrs['long_name'] = 'Extraterrestrial Radiation'
+                        if self.time_scale == 'daily':
+                            ext_rad_ds['ext_rad'].attrs['long_name'] = 'Daily Mean Extraterrestrial Radiation (FAO-56)'
+                        else:
+                            ext_rad_ds['ext_rad'].attrs['long_name'] = 'Instantaneous Extraterrestrial Radiation'
                         self.datasets['ext_rad'] = ext_rad_ds
                         
-                        print("PAR-related variables calculated successfully with chunked approach")
+                        print(f"PAR-related variables calculated successfully ({self.time_scale} mode)")
+                        
+                        # Validation output
+                        valid_ppfd = ppfd_array[~np.isnan(ppfd_array)]
+                        valid_ext = ext_rad_array[~np.isnan(ext_rad_array)]
+                        if len(valid_ppfd) > 0:
+                            print(f"  PPFD range: [{valid_ppfd.min():.1f}, {valid_ppfd.max():.1f}] μmol/m²/s")
+                        if len(valid_ext) > 0:
+                            print(f"  ext_rad range: [{valid_ext.min():.1f}, {valid_ext.max():.1f}] W/m²")
+                    
                     else:
-                        # For datasets without time dimension
-                        # Standard approach using named variables
+                        # ============================================================
+                        # NO TIME DIMENSION: Single snapshot (original fallback)
+                        # ============================================================
+                        print("Processing single-time solar radiation data (no time dimension)...")
                         solar_rad = sr_ds[sr_var]
                         
                         # Data validation
                         solar_rad = solar_rad.where(solar_rad >= 0, 0)
                         
-                        # Calculate PAR (Photosynthetically Active Radiation)
-                        par_fraction = 0.45
-                        par_wm2 = solar_rad * par_fraction
-                        
-                        # Convert PAR from W/m2 to μmol/m2/s
-                        conversion_factor = 4.6
-                        ppfd = par_wm2 * conversion_factor
-                        
-                        # Validate and constrain to physical limits
+                        # Calculate PAR
+                        par_wm2 = solar_rad * 0.45
+                        ppfd = par_wm2 * 4.6
                         ppfd = ppfd.where(ppfd <= 2500.0, 2500.0)
                         
-                        # Create new datasets
                         ppfd_ds = xr.Dataset(
                             data_vars={'ppfd_in': ppfd},
                             coords=sr_ds.coords,
@@ -1746,52 +3834,25 @@ class ERA5LandGEEProcessor:
                         ppfd_ds['ppfd_in'].attrs['units'] = 'μmol m-2 s-1'
                         ppfd_ds['ppfd_in'].attrs['long_name'] = 'Photosynthetic Photon Flux Density'
                         
-                        # Also calculate extraterrestrial radiation
-                        lat_var = None
-                        for var in sr_ds.coords:
-                            if var.lower() in ['latitude', 'lat']:
-                                lat_var = var
-                        
-                        if lat_var:
-                            # Use original enhanced calculation
-                            try:
-                                # Full calculation from original (this won't run in no-time case,
-                                # but keeping for logical consistency with original)
-                                print("Calculating extraterrestrial radiation using enhanced algorithm...")
-                                # ... original calculation code would be here ...
-                                # But since we're in the no-time-dimension case, this won't actually execute
-                                raise NotImplementedError("Enhanced calculation requires time dimension")
-                            except Exception as inner_e:
-                                print(f"Error in enhanced calculation: {str(inner_e)}")
-                                print("Falling back to simpler method")
-                                ext_rad = solar_rad * 1.5  # Simple approximation
-                                ext_rad = ext_rad.where(ext_rad <= 1500.0, 1500.0)
-                                ext_rad_ds = xr.Dataset(
-                                    data_vars={'ext_rad': ext_rad},
-                                    coords=sr_ds.coords,
-                                    attrs={'units': 'W m-2', 'long_name': 'Extraterrestrial Radiation (approximated)'}
-                                )
-                        else:
-                            print("Latitude coordinate not found, using solar radiation as proxy for ext_rad")
-                            ext_rad = solar_rad * 1.5  # Simple approximation
-                            ext_rad = ext_rad.where(ext_rad <= 1500.0, 1500.0)
-                            ext_rad_ds = xr.Dataset(
-                                data_vars={'ext_rad': ext_rad},
-                                coords=sr_ds.coords,
-                                attrs={'units': 'W m-2', 'long_name': 'Extraterrestrial Radiation (approximated)'}
-                            )
-                        
+                        # Simple ext_rad approximation (no time info available for proper calculation)
+                        ext_rad = solar_rad * 1.5
+                        ext_rad = ext_rad.where(ext_rad <= 1500.0, 1500.0)
+                        ext_rad_ds = xr.Dataset(
+                            data_vars={'ext_rad': ext_rad},
+                            coords=sr_ds.coords,
+                            attrs={'units': 'W m-2', 'long_name': 'Extraterrestrial Radiation (approximated)'}
+                        )
                         ext_rad_ds['ext_rad'].attrs['units'] = 'W m-2'
                         ext_rad_ds['ext_rad'].attrs['long_name'] = 'Extraterrestrial Radiation (approximated)'
                         
                         self.datasets['ppfd_in'] = ppfd_ds
                         self.datasets['ext_rad'] = ext_rad_ds
-                        print(f"PAR-related variables calculated successfully from variable: {sr_var}")
+                        print(f"PAR-related variables calculated successfully (single-time mode, ext_rad approximated)")
                 else:
                     print("Could not identify solar radiation variable")
+                    
             except Exception as e:
                 print(f"Error calculating PAR-related variables: {str(e)}")
-                import traceback
                 traceback.print_exc()
                 
                 return self.datasets
@@ -1937,7 +3998,7 @@ class ERA5LandGEEProcessor:
             traceback.print_exc()
             return None, None
 
-    def get_climate_at_location_direct(self, lon, lat, temp_climate=None, precip_climate=None, max_distance=0.1):
+    def get_climate_at_location_direct(self, lon, lat, temp_climate=None, precip_climate=None, max_distance=0.05):
         """
         KD-tree approach for climate data lookup with improved boundary handling.
         
@@ -1974,8 +4035,8 @@ class ERA5LandGEEProcessor:
         lats = np.array([lat]) if single_point else np.asarray(lat)
         
         # Default values
-        temperatures = np.full_like(lons, 15.0, dtype=float)
-        precipitations = np.full_like(lats, 800.0, dtype=float)
+        temperatures = np.full_like(lons, np.nan, dtype=float)
+        precipitations = np.full_like(lats, np.nan, dtype=float)
         
         # Process temperature data
         if temp_climate and 'data' in temp_climate:
@@ -2136,6 +4197,128 @@ class ERA5LandGEEProcessor:
             return float(temperatures[0]), float(precipitations[0])
         else:
             return temperatures, precipitations
+    def get_raster_at_location_direct(self, lon, lat, raster_data, max_distance=0.1, default_value=np.nan):
+        """
+        Generic KD-tree approach for raster data lookup - same approach as climate data.
+        Works for elevation, PFT, canopy height, LAI, etc.
+        
+        Parameters:
+        -----------
+        lon, lat : float or array-like
+            Coordinates of the location(s)
+        raster_data : dict
+            Raster data dictionary with 'data', 'transform', and optionally 'nodata'
+        max_distance : float, optional
+            Maximum distance (in degrees) to accept a valid data point.
+        default_value : float, optional
+            Default value for points outside valid data range.
+                
+        Returns:
+        --------
+        numpy.ndarray or float
+            Values at the specified locations
+        """
+        from scipy.spatial import cKDTree
+        
+        if raster_data is None or 'data' not in raster_data:
+            print("Warning: No raster data available for lookup")
+            single_point = np.isscalar(lon) and np.isscalar(lat)
+            if single_point:
+                return default_value
+            else:
+                return np.full_like(np.asarray(lon), default_value, dtype=float)
+        
+        # Convert inputs to arrays
+        single_point = np.isscalar(lon) and np.isscalar(lat)
+        lons = np.array([lon]) if single_point else np.asarray(lon).flatten()
+        lats = np.array([lat]) if single_point else np.asarray(lat).flatten()
+        
+        # Default values
+        values = np.full_like(lons, default_value, dtype=float)
+        
+        try:
+            # Get raster dimensions
+            data = raster_data['data']
+            height, width = data.shape
+            
+            # Extract raster extent using transform (SAME AS CLIMATE DATA)
+            transform = raster_data['transform']
+            xmin, ymax = transform * (0, 0)
+            xmax, ymin = transform * (width, height)
+            
+            print(f"    Raster extent: lon=[{xmin:.4f}, {xmax:.4f}], lat=[{ymin:.4f}, {ymax:.4f}]")
+            print(f"    Query points: lon=[{lons.min():.4f}, {lons.max():.4f}], lat=[{lats.min():.4f}, {lats.max():.4f}]")
+            
+            # Check for overlap
+            if (lons.max() < xmin or lons.min() > xmax or 
+                lats.max() < ymin or lats.min() > ymax):
+                print("    WARNING: No overlap between raster and query points!")
+                return values[0] if single_point else values
+            
+            # Create a regular grid of pixel center coordinates (SAME AS CLIMATE DATA)
+            pixel_lons = np.zeros(width)
+            pixel_lats = np.zeros(height)
+            
+            # Compute coordinates for each pixel center
+            for c in range(width):
+                pixel_lons[c], _ = transform * (c + 0.5, 0)
+            
+            for r in range(height):
+                _, pixel_lats[r] = transform * (0, r + 0.5)
+            
+            # Create full coordinate grids using meshgrid
+            lon_grid, lat_grid = np.meshgrid(pixel_lons, pixel_lats)
+            
+            # Flatten for KD-tree
+            points = np.vstack((lon_grid.flatten(), lat_grid.flatten())).T
+            data_values = data.flatten().astype(float)
+            
+            # Only include valid data points
+            nodata = raster_data.get('nodata')
+            if nodata is not None:
+                valid_mask = (data_values != nodata) & (~np.isnan(data_values))
+            else:
+                valid_mask = ~np.isnan(data_values)
+            
+            num_valid = np.sum(valid_mask)
+            if num_valid == 0:
+                print("    WARNING: No valid data points found in raster")
+                return values[0] if single_point else values
+            
+            # Create KD-tree only with valid points
+            valid_points = points[valid_mask]
+            valid_values = data_values[valid_mask]
+            
+            print(f"    Valid data points: {num_valid}, unique values: {len(np.unique(valid_values))}")
+            
+            # Build tree and query
+            tree = cKDTree(valid_points)
+            query_points = np.vstack((lons, lats)).T
+            distances, indices = tree.query(query_points, k=1)
+            
+            # Extract values with distance check
+            valid_distance = distances <= max_distance
+            values[valid_distance] = valid_values[indices[valid_distance]]
+            
+            num_within_distance = np.sum(valid_distance)
+            print(f"    Points within max_distance ({max_distance}): {num_within_distance} / {len(lons)}")
+            
+            if num_within_distance > 0:
+                result_unique = len(np.unique(values[valid_distance]))
+                print(f"    Result unique values: {result_unique}")
+            
+            if num_within_distance < len(lons):
+                print(f"    Points using default value: {len(lons) - num_within_distance}")
+            
+        except Exception as e:
+            print(f"Error in raster KD-tree lookup: {str(e)}")
+            traceback.print_exc()
+        
+        if single_point:
+            return float(values[0])
+        else:
+            return values
+    
     def resample_climate_data(self, target_lat=None, target_lon=None):
         """
         Resample climate data from GeoTIFF files to match a target resolution.
@@ -2224,48 +4407,336 @@ class ERA5LandGEEProcessor:
             import traceback
             traceback.print_exc()
             return None, None
-
+        
+    def resample_static_data(self, target_lats=None, target_lons=None, target_times=None):
+        """
+        Resample all static data to match ERA5 grid coordinates.
+        Uses EXACT same approach as resample_climate_data() and get_climate_at_location_direct().
+        
+        Parameters:
+        -----------
+        target_lats : array-like, optional
+            Target latitude array from ERA5
+        target_lons : array-like, optional
+            Target longitude array from ERA5
+        target_times : array-like, optional
+            Target time array from ERA5 (for LAI temporal alignment)
+            
+        Returns:
+        --------
+        dict
+            Dictionary of resampled static DataArrays
+        """
+        # Get target coordinates from ERA5 if not provided
+        if target_lats is None or target_lons is None:
+            if not self.datasets:
+                print("Error: No ERA5 datasets loaded and no target coordinates provided")
+                return None
+            
+            ref_ds_key = next(iter(self.datasets))
+            ref_ds = self.datasets[ref_ds_key]
+            
+            for coord in ref_ds.coords:
+                coord_lower = coord.lower()
+                if coord_lower in ('latitude', 'lat') and target_lats is None:
+                    target_lats = ref_ds[coord].values
+                elif coord_lower in ('longitude', 'lon') and target_lons is None:
+                    target_lons = ref_ds[coord].values
+                elif coord_lower in ('time', 'datetime') and target_times is None:
+                    target_times = ref_ds[coord].values
+        
+        if target_lats is None or target_lons is None:
+            print("Error: Could not determine target coordinates")
+            return None
+        
+        print(f"\n{'='*60}")
+        print(f"RESAMPLING STATIC DATA TO ERA5 GRID")
+        print(f"Target grid: {len(target_lats)} lat x {len(target_lons)} lon")
+        print(f"Target lat range: [{target_lats.min():.4f}, {target_lats.max():.4f}]")
+        print(f"Target lon range: [{target_lons.min():.4f}, {target_lons.max():.4f}]")
+        print(f"{'='*60}")
+        
+        # Create coordinate meshgrid - SAME AS CLIMATE DATA
+        lon_grid, lat_grid = np.meshgrid(target_lons, target_lats)
+        flat_lons = lon_grid.flatten()
+        flat_lats = lat_grid.flatten()
+        
+        print(f"Total query points: {len(flat_lons)}")
+        
+        resampled = {}
+        
+        # ========== ELEVATION ==========
+        if self.elevation_raw is not None:
+            print(f"\n--- Resampling ELEVATION using climate data approach ---")
+            elev_values = self.get_raster_at_location_direct(
+                flat_lons, flat_lats, 
+                self.elevation_raw,
+                max_distance=0.05,
+            )
+            elev_grid = elev_values.reshape(len(target_lats), len(target_lons))
+            
+            self.elevation_data = xr.DataArray(
+                elev_grid,
+                dims=['latitude', 'longitude'],
+                coords={'latitude': target_lats, 'longitude': target_lons},
+                name='elevation'
+            )
+            self.elevation_data.attrs['units'] = 'm'
+            self.elevation_data.attrs['long_name'] = 'Elevation from ASTER DEM'
+            resampled['elevation'] = self.elevation_data
+            
+            valid_elev = elev_grid[~np.isnan(elev_grid)]
+            print(f"  RESULT: shape={elev_grid.shape}, range=[{valid_elev.min():.1f}, {valid_elev.max():.1f}] m, "
+                f"unique={len(np.unique(valid_elev))}")
+        else:
+            print("\n--- ELEVATION: Raw data not available, skipping ---")
+        
+        # ========== PFT ==========
+        if self.pft_raw is not None:
+            print(f"\n--- Resampling PFT using climate data approach ---")
+            pft_values = self.get_raster_at_location_direct(
+                flat_lons, flat_lats,
+                self.pft_raw,
+                max_distance=0.05,
+            )
+            pft_grid = pft_values.reshape(len(target_lats), len(target_lons))
+            
+            self.pft_data = xr.DataArray(
+                pft_grid.astype(int),
+                dims=['latitude', 'longitude'],
+                coords={'latitude': target_lats, 'longitude': target_lons},
+                name='pft'
+            )
+            self.pft_data.attrs['units'] = 'class'
+            self.pft_data.attrs['long_name'] = 'Plant Functional Type from MODIS'
+            resampled['pft'] = self.pft_data
+            
+            valid_pft = pft_grid[~np.isnan(pft_grid)]
+            unique_classes = np.unique(valid_pft).astype(int)
+            print(f"  RESULT: shape={pft_grid.shape}, classes={unique_classes.tolist()}, "
+                f"unique={len(unique_classes)}")
+        else:
+            print("\n--- PFT: Raw data not available, skipping ---")
+        
+        # ========== CANOPY HEIGHT ==========
+        if self.canopy_height_raw is not None:
+            print(f"\n--- Resampling CANOPY HEIGHT using climate data approach ---")
+            ch_values = self.get_raster_at_location_direct(
+                flat_lons, flat_lats,
+                self.canopy_height_raw,
+                max_distance=0.05,
+            )
+            ch_grid = ch_values.reshape(len(target_lats), len(target_lons))
+            
+            self.canopy_height_data = xr.DataArray(
+                ch_grid,
+                dims=['latitude', 'longitude'],
+                coords={'latitude': target_lats, 'longitude': target_lons},
+                name='canopy_height'
+            )
+            self.canopy_height_data.attrs['units'] = 'm'
+            self.canopy_height_data.attrs['long_name'] = 'Canopy Height from Meta'
+            resampled['canopy_height'] = self.canopy_height_data
+            
+            valid_ch = ch_grid[~np.isnan(ch_grid)]
+            if len(valid_ch) > 0:
+                print(f"  RESULT: shape={ch_grid.shape}, range=[{valid_ch.min():.1f}, {valid_ch.max():.1f}] m, "
+                    f"unique={len(np.unique(valid_ch))}")
+            else:
+                print(f"  RESULT: shape={ch_grid.shape}, WARNING: no valid data!")
+        else:
+            print("\n--- CANOPY HEIGHT: Raw data not available, skipping ---")
+        
+        # ========== LAI ==========
+        if self.lai_raw is not None:
+            print(f"\n--- Resampling LAI using climate data approach ---")
+            lai_data = self.lai_raw['data']  # Shape: (n_times, height, width)
+            lai_times = self.lai_raw['times']
+            n_lai_times = len(lai_times)
+            
+            print(f"  LAI has {n_lai_times} time slices")
+            
+            # Resample each LAI time slice spatially using same approach
+            lai_resampled_times = []
+            for t_idx in range(n_lai_times):
+                # Create temporary dict for this time slice (same format as climate data)
+                lai_slice_dict = {
+                    'data': lai_data[t_idx],
+                    'transform': self.lai_raw['transform'],
+                    'nodata': self.lai_raw.get('nodata')
+                }
+                
+                if t_idx == 0:
+                    print(f"  Processing LAI time slice {t_idx} ({lai_times[t_idx]}):")
+                
+                lai_values = self.get_raster_at_location_direct(
+                    flat_lons, flat_lats, 
+                    lai_slice_dict,
+                    max_distance=0.05,
+                    default_value=np.nan
+                )
+                lai_grid = lai_values.reshape(len(target_lats), len(target_lons))
+                lai_resampled_times.append(lai_grid)
+                
+                if t_idx == 0:
+                    valid_lai_slice = lai_grid[~np.isnan(lai_grid)]
+                    if len(valid_lai_slice) > 0:
+                        print(f"    First slice result: range=[{valid_lai_slice.min():.2f}, {valid_lai_slice.max():.2f}], "
+                            f"unique={len(np.unique(valid_lai_slice))}")
+            
+            lai_resampled_stack = np.stack(lai_resampled_times, axis=0)
+            print(f"  Stacked LAI shape: {lai_resampled_stack.shape}")
+            
+            # Temporal alignment to ERA5 times
+            if target_times is not None and len(target_times) > 0:
+                print(f"  Aligning LAI temporally to {len(target_times)} ERA5 timestamps...")
+                target_times_pd = pd.DatetimeIndex(target_times)
+                
+                # Make timezone naive for comparison
+                if target_times_pd.tz is not None:
+                    target_times_pd = target_times_pd.tz_localize(None)
+                
+                lai_times_pd = pd.DatetimeIndex(lai_times)
+                
+                # Find nearest LAI time for each target time
+                lai_indices = []
+                for target_time in target_times_pd:
+                    time_diffs = np.abs((lai_times_pd - target_time).total_seconds())
+                    nearest_idx = np.argmin(time_diffs)
+                    lai_indices.append(nearest_idx)
+                
+                # Create aligned LAI array
+                lai_aligned = lai_resampled_stack[lai_indices, :, :]
+                
+                self.lai_data = xr.DataArray(
+                    lai_aligned,
+                    dims=['time', 'latitude', 'longitude'],
+                    coords={
+                        'time': target_times_pd,
+                        'latitude': target_lats,
+                        'longitude': target_lons
+                    },
+                    name='LAI'
+                )
+                print(f"  Temporally aligned LAI shape: {lai_aligned.shape}")
+            else:
+                # No target times - keep original LAI times
+                self.lai_data = xr.DataArray(
+                    lai_resampled_stack,
+                    dims=['time', 'latitude', 'longitude'],
+                    coords={
+                        'time': pd.DatetimeIndex(lai_times),
+                        'latitude': target_lats,
+                        'longitude': target_lons
+                    },
+                    name='LAI'
+                )
+            
+            self.lai_data.attrs['units'] = 'm2/m2'
+            self.lai_data.attrs['long_name'] = 'Leaf Area Index from GLOBMAP'
+            resampled['LAI'] = self.lai_data
+            
+            # Final LAI stats
+            valid_lai = self.lai_data.values[~np.isnan(self.lai_data.values)]
+            if len(valid_lai) > 0:
+                print(f"  RESULT: shape={self.lai_data.shape}, range=[{valid_lai.min():.2f}, {valid_lai.max():.2f}], "
+                    f"unique={len(np.unique(valid_lai))}")
+            else:
+                print(f"  RESULT: shape={self.lai_data.shape}, WARNING: no valid LAI data!")
+        else:
+            print("\n--- LAI: Raw data not available, skipping ---")
+        
+        print(f"\n{'='*60}")
+        print(f"STATIC DATA RESAMPLING COMPLETE")
+        print(f"Resampled {len(resampled)} datasets: {list(resampled.keys())}")
+        print(f"{'='*60}\n")
+        
+        return resampled
         
     def add_time_features(self, df):
         """
-        Add cyclical time features to the DataFrame.
+        Add Local Solar Time (LST) and derived cyclical features.
         
         Parameters:
         -----------
         df : pandas.DataFrame
-            DataFrame with datetime index
+            DataFrame with 'timestamp' and 'longitude' columns
             
         Returns:
         --------
         pandas.DataFrame
-            DataFrame with added time features
+            DataFrame with 'solar_timestamp' and cyclical features
         """
-        if not isinstance(df.index, pd.DatetimeIndex):
-            try:
-                df.index = pd.to_datetime(df.index)
-            except:
-                print("Cannot convert index to datetime")
+        # 1. Validate Input
+        if 'timestamp' not in df.columns:
+            # If timestamp is the index, reset it to a column
+            if isinstance(df.index, pd.DatetimeIndex):
+                df = df.reset_index()
+                df = df.rename(columns={'index': 'timestamp'})
+            else:
+                print("Error: 'timestamp' missing for solar time calculation.")
                 return df
-        
-        # Extract time components
-        timestamp_s = df.index.map(pd.Timestamp.timestamp)
-        
-        # Define cycles in seconds
-        day = 24 * 60 * 60  # seconds in a day
-        week = 7 * day      # seconds in a week
-        month = 30.44 * day # seconds in a month (average)
-        year = 365.2425 * day  # seconds in a year (average)
-        
-        # Create cyclical features
-        df['Day sin'] = np.sin(timestamp_s * (2 * np.pi / day))
-        df['Day cos'] = np.cos(timestamp_s * (2 * np.pi / day))
-        df['Week sin'] = np.sin(timestamp_s * (2 * np.pi / week))
-        df['Week cos'] = np.cos(timestamp_s * (2 * np.pi / week))
-        df['Month sin'] = np.sin(timestamp_s * (2 * np.pi / month))
-        df['Month cos'] = np.cos(timestamp_s * (2 * np.pi / month))
-        df['Year sin'] = np.sin(timestamp_s * (2 * np.pi / year))
-        df['Year cos'] = np.cos(timestamp_s * (2 * np.pi / year))
-        
+                
+        if 'longitude' not in df.columns:
+            print("Error: 'longitude' column missing. Cannot calculate solar time.")
+            return df
+            
+        try:
+            # Ensure proper types
+            times_utc = pd.to_datetime(df['timestamp'], utc=True)
+            lons = df['longitude'].astype(float)
+            
+            # --- 2. Calculate Equation of Time (EoT) ---
+            # EoT accounts for Earth's elliptical orbit and axial tilt.
+            # Formula approximation (minutes): E = 9.87*sin(2B) - 7.53*cos(B) - 1.5*sin(B)
+            # Where B = 360/365 * (d - 81), d is day of year.
+            
+            doy = times_utc.dt.dayofyear
+            B = (360.0 / 365.0) * (doy - 81) * (np.pi / 180.0) # Convert degrees to radians
+            
+            eot_minutes = 9.87 * np.sin(2 * B) - 7.53 * np.cos(B) - 1.5 * np.sin(B)
+            
+            # --- 3. Calculate Local Solar Time (LST) ---
+            # Formula: LST = UTC + (Longitude * 4 min/deg) + EoT_minutes
+            
+            lon_offset_minutes = lons * 4.0
+            total_offset_minutes = lon_offset_minutes + eot_minutes
+            
+            # Create the solar timestamp
+            # We add the offset to the UTC time
+            df['solar_timestamp'] = times_utc + pd.to_timedelta(total_offset_minutes, unit='m')
+            
+            # --- 4. Generate Cyclical Features based on SOLAR Time ---
+            
+            # A. Daily Cycle (Based on Solar Hour)
+            # We convert solar time to "seconds from solar midnight"
+            solar_dt = df['solar_timestamp'].dt
+            solar_seconds = solar_dt.hour * 3600 + solar_dt.minute * 60 + solar_dt.second
+            seconds_in_day = 24 * 60 * 60.0
+            
+            df['Day sin'] = np.sin(2 * np.pi * solar_seconds / seconds_in_day)
+            #df['Day cos'] = np.cos(2 * np.pi * solar_seconds / seconds_in_day)
+            
+            # B. Yearly Cycle (Seasonality)
+            # Using Solar Day of Year ensures seasonality aligns with sun position
+            solar_doy = solar_dt.dayofyear
+            # Include fraction of day for smoother transition
+            solar_year_fraction = solar_doy + (solar_seconds / seconds_in_day)
+            days_in_year = 365.25
+            
+            df['Year sin'] = np.sin(2 * np.pi * solar_year_fraction / days_in_year)
+            #df['Year cos'] = np.cos(2 * np.pi * solar_year_fraction / days_in_year)
+            
+            # Optional: Remove the intermediate solar_timestamp if not needed for output
+            # df = df.drop(columns=['solar_timestamp'])
+            
+            print("Successfully added Solar Time features.")
+            
+        except Exception as e:
+            print(f"Error calculating solar time features: {e}")
+            import traceback
+            traceback.print_exc()
+            
         return df
     def standardize_timestamps(self, timestamps, use_utc=True):
         """
@@ -2428,11 +4899,18 @@ class ERA5LandGEEProcessor:
                     return None # Cannot proceed without time range
 
                 # Concatenate all time indices and standardize
-                combined_times = pd.Index([])
+                # Standardize each time index BEFORE combining to avoid tz-aware/naive mixing
+                combined_times = pd.DatetimeIndex([])
                 for idx in all_times_pd:
-                    combined_times = combined_times.union(idx) # union handles duplicates
+                    # Standardize this index first
+                    standardized_idx = self.standardize_timestamps(idx, use_utc=use_utc)
+                    if standardized_idx is not None and not standardized_idx.empty:
+                        if combined_times.empty:
+                            combined_times = standardized_idx
+                        else:
+                            combined_times = combined_times.union(standardized_idx)
 
-                standardized_times = self.standardize_timestamps(combined_times, use_utc=use_utc)
+                standardized_times = combined_times  # Already standardized
 
                 if standardized_times is not None and not standardized_times.empty:
                     if start_date is None:
@@ -2499,247 +4977,363 @@ class ERA5LandGEEProcessor:
 
         print(f"Using variables for processing (Original/Source Name -> Model Name): {prediction_vars_map}")
         original_vars_to_process = list(prediction_vars_map.keys())
-
-        # --- Processing Logic ---
+        
         if points:
-            # --- POINTS-BASED APPROACH with enhanced coordinate validation ---
+            # --- POINTS-BASED APPROACH with static data extraction ---
             print("Processing specific points...")
-            all_data = [] # List to hold DataFrames, one per point
+            all_data = []
 
-            # Vectorized climate data lookup for all points
+            # Vectorized lookups for all points at once
             point_lons = np.array([p['lon'] for p in points])
             point_lats = np.array([p['lat'] for p in points])
+            n_points = len(points)
+            
+            # ============================================
+            # CLIMATE DATA LOOKUP (existing)
+            # ============================================
             temps, precips = None, None
             climate_data_available = False
-            # Check if climate data attributes exist and are not None
+            
             if hasattr(self, 'temp_climate_data') and self.temp_climate_data is not None and \
                hasattr(self, 'precip_climate_data') and self.precip_climate_data is not None:
                 try:
-                    print(f"Getting climate data for {len(point_lons)} points using vectorized approach...")
+                    print(f"Getting climate data for {n_points} points...")
                     temps, precips = self.get_climate_at_location_direct(
                         point_lons, point_lats,
                         self.temp_climate_data, self.precip_climate_data
                     )
                     climate_data_available = True
-                    print("Successfully retrieved climate data for points.")
+                    print(f"  Climate data retrieved successfully")
                 except Exception as e:
-                    print(f"Warning: Error in batch climate data retrieval for points: {e}")
+                    print(f"  Warning: Error in climate data retrieval: {e}")
+            else:
+                print("Warning: Climate data not loaded, will use defaults")
+            
+            # ============================================
+            # STATIC DATA LOOKUP (using same approach as climate data)
+            # ============================================
+            elevations = None
+            pfts = None
+            canopy_heights = None
+
+            # Elevation lookup - using same method as climate data
+            if hasattr(self, 'elevation_raw') and self.elevation_raw is not None:
+                try:
+                    print(f"Getting elevation data for {n_points} points...")
+                    elevations = self.get_raster_at_location_direct(
+                        point_lons, point_lats, self.elevation_raw,
+                        max_distance=0.05
+                    )
+                    valid_elev = elevations[~np.isnan(elevations)]
+                    if len(valid_elev) > 0:
+                        print(f"  Elevation range: [{valid_elev.min():.1f}, {valid_elev.max():.1f}] m")
+                        print(f"  Unique values: {len(np.unique(valid_elev))}")
+                except Exception as e:
+                    print(f"  Warning: Error in elevation lookup: {e}")
                     traceback.print_exc()
             else:
-                print("Warning: Climate data not loaded or attributes missing, will use defaults for points.")
+                print("Warning: Elevation data not loaded")
 
-            # Process each point
+            # PFT lookup - using same method as climate data
+            if hasattr(self, 'pft_raw') and self.pft_raw is not None:
+                try:
+                    print(f"Getting PFT data for {n_points} points...")
+                    pfts = self.get_raster_at_location_direct(
+                        point_lons, point_lats, self.pft_raw,
+                        max_distance=0.05
+                    )
+                    pfts = pfts.astype(int)
+                    print(f"  PFT classes: {np.unique(pfts).tolist()}")
+                    print(f"  Unique values: {len(np.unique(pfts))}")
+                except Exception as e:
+                    print(f"  Warning: Error in PFT lookup: {e}")
+                    traceback.print_exc()
+            else:
+                print("Warning: PFT data not loaded")
+
+            # Canopy height lookup - using same method as climate data
+            if hasattr(self, 'canopy_height_raw') and self.canopy_height_raw is not None:
+                try:
+                    print(f"Getting canopy height data for {n_points} points...")
+                    canopy_heights = self.get_raster_at_location_direct(
+                        point_lons, point_lats, self.canopy_height_raw,
+                        max_distance=0.05,
+                    )
+                    valid_ch = canopy_heights[~np.isnan(canopy_heights)]
+                    if len(valid_ch) > 0:
+                        print(f"  Canopy height range: [{valid_ch.min():.1f}, {valid_ch.max():.1f}] m")
+                        print(f"  Unique values: {len(np.unique(valid_ch))}")
+                except Exception as e:
+                    print(f"  Warning: Error in canopy height lookup: {e}")
+                    traceback.print_exc()
+            else:
+                print("Warning: Canopy height data not loaded")
+            
+            # ============================================
+            # LAI DATA LOOKUP (time-varying) - using same approach as climate data
+            # ============================================
+            # LAI needs special handling because it varies with time
+            # We'll extract LAI time series for each point
+            lai_point_data = {}  # Dict mapping point index to LAI time series
+
+            if hasattr(self, 'lai_raw') and self.lai_raw is not None:
+                try:
+                    print(f"Getting LAI data for {n_points} points...")
+                    lai_data = self.lai_raw['data']  # Shape: (n_times, height, width)
+                    lai_times = self.lai_raw['times']
+                    n_lai_times = len(lai_times)
+                    
+                    print(f"  LAI has {n_lai_times} time slices")
+                    
+                    # Extract LAI at each point for each LAI time
+                    for t_idx in range(n_lai_times):
+                        lai_slice_dict = {
+                            'data': lai_data[t_idx],
+                            'transform': self.lai_raw['transform'],
+                            'nodata': self.lai_raw.get('nodata', np.nan)
+                        }
+                        
+                        # Use same method as climate data
+                        lai_values_t = self.get_raster_at_location_direct(
+                            point_lons, point_lats, lai_slice_dict,
+                            max_distance=0.05, default_value=np.nan
+                        )
+                        
+                        # Store for each point
+                        for p_idx in range(n_points):
+                            if p_idx not in lai_point_data:
+                                lai_point_data[p_idx] = {
+                                    'times': [],
+                                    'values': []
+                                }
+                            lai_point_data[p_idx]['times'].append(lai_times[t_idx])
+                            lai_point_data[p_idx]['values'].append(lai_values_t[p_idx])
+                        
+                        # Print debug info for first time slice
+                        if t_idx == 0:
+                            valid_lai = lai_values_t[~np.isnan(lai_values_t)]
+                            if len(valid_lai) > 0:
+                                print(f"    First time slice: range=[{valid_lai.min():.2f}, {valid_lai.max():.2f}], "
+                                    f"unique={len(np.unique(valid_lai))}")
+                    
+                    print(f"  LAI data extracted for {n_lai_times} time slices")
+                    
+                except Exception as e:
+                    print(f"  Warning: Error in LAI lookup: {e}")
+                    traceback.print_exc()
+            else:
+                print("Warning: LAI data not loaded")
+
+            # ============================================
+            # PROCESS EACH POINT
+            # ============================================
             for i, point in enumerate(points):
-                point_data_dict = {} # Holds scalar data for this point
-                point_series_list = [] # Holds time series data for this point
+                point_data_dict = {}
+                point_series_list = []
                 point_lat = point['lat']
                 point_lon = point['lon']
                 point_name = point.get('name', f"Point_{point_lat}_{point_lon}")
 
-                print(f"\nProcessing point ({point_lat}, {point_lon}) - {point_name}")
+                print(f"\nProcessing point {i+1}/{n_points}: ({point_lat}, {point_lon}) - {point_name}")
 
+                # Basic info
                 point_data_dict['name'] = point_name
                 point_data_dict['latitude'] = point_lat
                 point_data_dict['longitude'] = point_lon
 
-                # Assign climate data
-                if climate_data_available and temps is not None and precips is not None and i < len(temps):
-                    point_data_dict['annual_mean_temperature'] = float(temps[i])
-                    point_data_dict['annual_precipitation'] = float(precips[i])
+                # Climate data
+                if climate_data_available and temps is not None and precips is not None:
+                    point_data_dict['mean_annual_temp'] = float(temps[i])
+                    point_data_dict['mean_annual_precip'] = float(precips[i])
                 else:
-                    # Fallback to default values if batch failed, data wasn't loaded, or index issue
-                    print(f"Using default climate data for point {point_name}")
-                    point_data_dict['annual_mean_temperature'] = 15.0 # Example default
-                    point_data_dict['annual_precipitation'] = 800.0 # Example default
+                    point_data_dict['mean_annual_temp'] = 15.0  # Default
+                    point_data_dict['mean_annual_precip'] = 800.0  # Default
+                
+                # Static data
+                if elevations is not None:
+                    point_data_dict['elevation'] = float(elevations[i])
+                else:
+                    point_data_dict['elevation'] = 0.0  # Default
+                
+                if pfts is not None:
+                    point_data_dict['pft'] = int(pfts[i])
+                else:
+                    point_data_dict['pft'] = 11  # Barren as default
+                
+                if canopy_heights is not None:
+                    point_data_dict['canopy_height'] = float(canopy_heights[i])
+                else:
+                    point_data_dict['canopy_height'] = 0.0  # Default
 
-                # Extract time series for each required variable at the point
-                common_time_index = None # Track the index from the first successful series
+                # ============================================
+                # Extract ERA5 time series for this point
+                # ============================================
+                common_time_index = None
+                
                 for original_var_name in original_vars_to_process:
-                    model_name = prediction_vars_map[original_var_name] # Get target name
+                    model_name = prediction_vars_map[original_var_name]
                     if original_var_name not in self.datasets:
-                        print(f"Warning: Dataset for '{original_var_name}' not found for point {point_name}. Skipping.")
+                        print(f"  Warning: Dataset for '{original_var_name}' not found. Skipping.")
                         continue
+                    
                     try:
                         ds = self.datasets[original_var_name]
-                        # Robustly find the data variable within the dataset
+                        
+                        # Find data variable
                         data_var_key = None
-                        potential_keys = [k for k in ds.data_vars if k not in ds.coords] # Exclude coord variables
+                        potential_keys = [k for k in ds.data_vars if k not in ds.coords]
                         if len(potential_keys) == 1:
                             data_var_key = potential_keys[0]
-                        elif model_name in potential_keys: # Check if derived var name matches
+                        elif model_name in potential_keys:
                             data_var_key = model_name
-                        elif original_var_name in potential_keys: # Check if original name matches
+                        elif original_var_name in potential_keys:
                             data_var_key = original_var_name
-                        else: # Fallback if naming is unexpected
+                        else:
                             if potential_keys:
                                 data_var_key = potential_keys[0]
-                                print(f"Warning: Could not definitively identify data variable for '{original_var_name}', using first found: '{data_var_key}'")
-
 
                         if not data_var_key:
-                            print(f"Warning: Could not find data variable in dataset for '{original_var_name}'. Skipping.")
+                            print(f"  Warning: Could not find data variable for '{original_var_name}'. Skipping.")
                             continue
 
-                        # Find spatial and time coordinates robustly
+                        # Find coordinates
                         lat_coord_point, lon_coord_point, time_dim_point = None, None, None
-                        for name in list(ds.coords) + list(ds.dims): # Check both coords and dims
+                        for name in list(ds.coords) + list(ds.dims):
                             lname = name.lower()
-                            if lname in ['lat', 'latitude'] and lat_coord_point is None: lat_coord_point = name
-                            if lname in ['lon', 'longitude'] and lon_coord_point is None: lon_coord_point = name
-                            if lname in ['time', 'datetime'] and time_dim_point is None: time_dim_point = name
+                            if lname in ['lat', 'latitude'] and lat_coord_point is None:
+                                lat_coord_point = name
+                            if lname in ['lon', 'longitude'] and lon_coord_point is None:
+                                lon_coord_point = name
+                            if lname in ['time', 'datetime'] and time_dim_point is None:
+                                time_dim_point = name
 
                         if not all([lat_coord_point, lon_coord_point, time_dim_point]):
-                             print(f"Warning: Missing coordinates in dataset for '{original_var_name}' (lat:{lat_coord_point}, lon:{lon_coord_point}, time:{time_dim_point}). Skipping.")
-                             continue
+                            print(f"  Warning: Missing coordinates for '{original_var_name}'. Skipping.")
+                            continue
 
-                        # Enhanced coordinate validation before extraction
-                        if lat_coord_point in ds.coords and lon_coord_point in ds.coords:
-                            lats = ds[lat_coord_point].values
-                            lons = ds[lon_coord_point].values
+                        # Extract time series at point using nearest neighbor
+                        ts_point = ds[data_var_key].sel(
+                            {lat_coord_point: point_lat, lon_coord_point: point_lon},
+                            method='nearest'
+                        )
 
-                            # Validate coordinate ordering
-                            lat_order = 'descending' if lats[0] > lats[-1] else 'ascending'
-                            lon_order = 'ascending' if lons[0] < lons[-1] else 'descending' # Lon usually ascending
-                            if lat_order == 'ascending':
-                                print(f"  INFO: Latitude is in ascending order for {original_var_name}")
-
-                            # Find nearest indices with validation
-                            # Use np.argmin(np.abs(...)) for finding nearest index
-                            lat_idx = np.argmin(np.abs(lats - point_lat))
-                            lon_idx = np.argmin(np.abs(lons - point_lon))
-
-                            actual_lat = lats[lat_idx]
-                            actual_lon = lons[lon_idx]
-
-                            print(f"  {original_var_name}: Requested ({point_lat:.4f}, {point_lon:.4f}) -> Nearest grid point ({actual_lat:.4f}, {actual_lon:.4f}) at indices ({lat_idx}, {lon_idx})")
-
-                            # Use isel for precise extraction based on index
-                            selection_dict = {lat_coord_point: lat_idx, lon_coord_point: lon_idx}
-                            ts_point = ds[data_var_key].isel(**selection_dict)
-
-                            # --- Start: Debugging/Fallback for constant values ---
-                            unique_values = np.unique(ts_point.values)
-                            if len(unique_values) <= 3: # Threshold for 'few' unique values
-                                print(f"  WARNING: {original_var_name} has very few unique values ({len(unique_values)}) at this location!")
-                                print(f"  Unique values: {unique_values}")
-
-                                # Try using .sel with method='nearest' as an alternative
-                                try:
-                                    print("  Attempting alternative extraction with sel(method='nearest')...")
-                                    alt_selection_dict = {lat_coord_point: point_lat, lon_coord_point: point_lon}
-                                    alt_ts_point = ds[data_var_key].sel(**alt_selection_dict, method='nearest')
-                                    alt_unique_values = np.unique(alt_ts_point.values)
-                                    if len(alt_unique_values) > len(unique_values):
-                                        print("  Alternative method yielded more unique values. Using sel() result.")
-                                        ts_point = alt_ts_point
-                                    else:
-                                        print("  Alternative method did not yield more unique values. Sticking with isel().")
-                                except Exception as alt_sel_err:
-                                    print(f"  Alternative extraction with sel() failed: {alt_sel_err}")
-                            # --- End: Debugging/Fallback ---
-
-                        else:
-                             # Fallback to original method if coords aren't available for isel index finding
-                             print(f"  INFO: Using sel(method='nearest') for {original_var_name} as lat/lon not in coords.")
-                             selection_dict = {lat_coord_point: point_lat, lon_coord_point: point_lon}
-                             ts_point = ds[data_var_key].sel(**selection_dict, method='nearest')
-
-
-                        # Apply time filtering using standardized dates
+                        # Standardize times
                         current_times_pd = pd.DatetimeIndex(ts_point[time_dim_point].values)
                         current_times_std = self.standardize_timestamps(current_times_pd, use_utc=use_utc)
 
                         if current_times_std is None or current_times_std.empty:
-                             print(f"Warning: Time standardization failed for '{original_var_name}' at point {point_name}. Skipping.")
-                             continue
-
-                        ts_point = ts_point.assign_coords({time_dim_point: current_times_std}) # Ensure coord is standardized
-
-                        # Apply slice only if start/end dates are valid
-                        time_slice_point = slice(start_date_std if start_date_std else None,
-                                                 end_date_std if end_date_std else None)
-
-                        # Check if slice is non-trivial before applying
-                        if time_slice_point.start is not None or time_slice_point.stop is not None:
-                             ts_point_filtered = ts_point.sel({time_dim_point: time_slice_point})
-                        else:
-                             ts_point_filtered = ts_point # No filtering needed
-
-
-                        # Check if data remains after slicing
-                        if ts_point_filtered.size == 0:
-                            print(f"Warning: No data remains for '{original_var_name}' at point {point_name} after time slicing.")
+                            print(f"  Warning: Time standardization failed for '{original_var_name}'. Skipping.")
                             continue
 
-                        # Convert to Pandas Series with standardized time index
-                        times_final_point = self.standardize_timestamps(pd.DatetimeIndex(ts_point_filtered[time_dim_point].values), use_utc=use_utc)
-                        values_point = ts_point_filtered.values
+                        ts_point = ts_point.assign_coords({time_dim_point: current_times_std})
 
-                        if times_final_point is None or times_final_point.empty:
-                             print(f"Warning: Final time index is empty for '{original_var_name}' at point {point_name}. Skipping.")
-                             continue
+                        # Apply time slice
+                        time_slice_point = slice(
+                            start_date_std if start_date_std else None,
+                            end_date_std if end_date_std else None
+                        )
+                        
+                        if time_slice_point.start is not None or time_slice_point.stop is not None:
+                            ts_point_filtered = ts_point.sel({time_dim_point: time_slice_point})
+                        else:
+                            ts_point_filtered = ts_point
+
+                        if ts_point_filtered.size == 0:
+                            print(f"  Warning: No data for '{original_var_name}' after time slicing. Skipping.")
+                            continue
+
+                        # Convert to Series
+                        times_final_point = self.standardize_timestamps(
+                            pd.DatetimeIndex(ts_point_filtered[time_dim_point].values),
+                            use_utc=use_utc
+                        )
+                        values_point = ts_point_filtered.values
 
                         series = pd.Series(values_point, index=times_final_point, name=model_name)
 
-                        # Store the first valid time index
                         if common_time_index is None and not series.empty:
                             common_time_index = series.index
 
                         point_series_list.append(series)
 
                     except Exception as e:
-                        print(f"Error extracting '{original_var_name}' (as {model_name}) for point {point_name}: {e}")
+                        print(f"  Error extracting '{original_var_name}' for point {point_name}: {e}")
                         traceback.print_exc()
 
+                # ============================================
+                # Create LAI time series for this point
+                # ============================================
+                if i in lai_point_data and common_time_index is not None:
+                    try:
+                        lai_times = lai_point_data[i]['times']
+                        lai_values = lai_point_data[i]['values']
+                        
+                        # Create LAI series aligned to common_time_index using nearest neighbor
+                        lai_times_pd = pd.DatetimeIndex(lai_times)
+                        
+                        # Make timezone consistent
+                        if common_time_index.tz is not None and lai_times_pd.tz is None:
+                            lai_times_pd = lai_times_pd.tz_localize(common_time_index.tz)
+                        elif common_time_index.tz is None and lai_times_pd.tz is not None:
+                            lai_times_pd = lai_times_pd.tz_localize(None)
+                        
+                        # Create temporary series with LAI times
+                        lai_series_raw = pd.Series(lai_values, index=lai_times_pd)
+                        
+                        # Align to common time index using nearest neighbor
+                        lai_aligned = []
+                        for target_time in common_time_index:
+                            # Find nearest LAI time
+                            time_diffs = np.abs((lai_times_pd - target_time).total_seconds())
+                            nearest_idx = np.argmin(time_diffs)
+                            lai_aligned.append(lai_values[nearest_idx])
+                        
+                        lai_series = pd.Series(lai_aligned, index=common_time_index, name='LAI')
+                        point_series_list.append(lai_series)
+                        
+                    except Exception as e:
+                        print(f"  Warning: Could not create LAI series for point {point_name}: {e}")
 
-                # Create DataFrame for the point if any series were extracted
+                # ============================================
+                # Create DataFrame for this point
+                # ============================================
                 if point_series_list and common_time_index is not None and not common_time_index.empty:
                     try:
-                        # Create DF from series, ensuring alignment to the common index
                         point_df = pd.DataFrame(index=common_time_index)
-                        print(f"Creating DataFrame for point {point_name} with index length {len(common_time_index)}")
+                        
                         for s in point_series_list:
                             if s.name in point_df.columns:
-                                print(f"Warning: Duplicate column name '{s.name}' encountered for point {point_name}. Overwriting.")
-                            # Reindex each series to the common index before assigning
-                            # Use nearest neighbor with a tolerance (e.g., 1 hour) to handle slight time misalignments
-                            point_df[s.name] = s.reindex(common_time_index, method='nearest', tolerance=pd.Timedelta('1 hour'))
+                                print(f"  Warning: Duplicate column '{s.name}'. Overwriting.")
+                            point_df[s.name] = s.reindex(
+                                common_time_index,
+                                method='nearest',
+                                tolerance=pd.Timedelta('1 hour')
+                            )
 
-                        # Check for columns that are all NaN after reindex (indicates poor alignment)
-                        nan_cols = point_df.columns[point_df.isnull().all()].tolist()
-                        if nan_cols:
-                            print(f"Warning: Columns {nan_cols} are all NaN after reindexing for point {point_name}. Original series might not overlap well with common_time_index.")
-
-                        # Add scalar data (lat, lon, name, climate)
+                        # Add scalar data (broadcast to all rows)
                         for key, value in point_data_dict.items():
-                            point_df[key] = value # Broadcast scalar values
+                            point_df[key] = value
 
-                        point_df.index.name = 'timestamp' # Ensure index has a name
+                        point_df.index.name = 'timestamp'
 
-                        # Add time features
-                        time_feature_config = getattr(config, 'TIME_FEATURES', False) # Default to False
-                        if time_feature_config:
-                            # Ensure index is DatetimeIndex before passing
-                             if isinstance(point_df.index, pd.DatetimeIndex):
-                                point_df = self.add_time_features(point_df)
-                             else:
-                                print(f"Warning: Cannot add time features for point {point_name}, index is not DatetimeIndex.")
+                        # Add time features if configured
+                        time_feature_config = getattr(config, 'TIME_FEATURES', False)
+                        if time_feature_config and isinstance(point_df.index, pd.DatetimeIndex):
+                            point_df = self.add_time_features(point_df)
 
-
-                        # Reset index to make timestamp a column
+                        # Reset index
                         point_df = point_df.reset_index()
                         all_data.append(point_df)
-                        print(f"Successfully created DataFrame for point {point_name} with columns: {point_df.columns.tolist()}")
-
+                        
+                        print(f"  Created DataFrame with {len(point_df)} rows, columns: {point_df.columns.tolist()}")
 
                     except Exception as e:
-                        print(f"Error creating DataFrame for point {point_name}: {e}")
+                        print(f"  Error creating DataFrame for point {point_name}: {e}")
                         traceback.print_exc()
                 else:
-                    print(f"No valid time series data extracted or common index found for point {point_name}. Cannot create DataFrame.")
+                    print(f"  No valid data for point {point_name}")
 
-            print(f"\nFinished processing {len(points)} points.")
-            # For points, return the list of DataFrames
+            print(f"\nFinished processing {len(points)} points. Created {len(all_data)} DataFrames.")
             return all_data if all_data else None
 
         else:
@@ -2867,22 +5461,16 @@ class ERA5LandGEEProcessor:
                      continue
 
                 try:
-                    # --- 4a. Standardize Time Coordinate ---
-                    current_times_pd = pd.DatetimeIndex(ds[current_time_var].values)
-                    current_times_std = self.standardize_timestamps(current_times_pd, use_utc=use_utc)
-                    if current_times_std is None or current_times_std.empty:
-                         print(f"Warning: Time standardization failed for '{original_var_name}'. Skipping.")
-                         continue
-                    ds = ds.assign_coords({current_time_var: current_times_std})
 
                     # --- 4b. Apply Time Slice ---
-                    # Check if slice is non-trivial before applying
-                    if time_slice.start is not None or time_slice.stop is not None:
-                         ds_filtered = ds.sel({current_time_var: time_slice})
-                    else:
-                         ds_filtered = ds # No filtering needed
-
-                    if ds_filtered.dims[current_time_var] == 0:
+                    ds_filtered = self._safe_time_slice(
+                        ds, 
+                        current_time_var, 
+                        start_date_std,  # These come from earlier in the method
+                        end_date_std,
+                        use_utc=use_utc
+                        )
+                    if ds_filtered[current_time_var].size == 0:
                         print(f"Info: No data remaining for '{original_var_name}' after time slicing. Skipping.")
                         continue
 
@@ -2980,52 +5568,390 @@ class ERA5LandGEEProcessor:
                 except Exception as climate_add_err:
                      print(f"Warning: Error adding climate data after merge: {climate_add_err}")
                      traceback.print_exc()
+            # --- 6b. Add Static Datasets (elevation, PFT, canopy height, LAI) ---
+            print("\nAdding static datasets to merged dataset...")
 
+            time_coord = 'timestamp' if 'timestamp' in merged_ds.dims else 'time'
+            has_time = time_coord in merged_ds.dims
+            n_times = len(merged_ds[time_coord]) if has_time else 1
 
+            # Get the EXACT coordinates from merged dataset
+            merged_lats = merged_ds['latitude'].values
+            merged_lons = merged_ds['longitude'].values
+            n_lats = len(merged_lats)
+            n_lons = len(merged_lons)
+
+            print(f"  Merged dataset dimensions: time={n_times}, lat={n_lats}, lon={n_lons}")
+            print(f"  Merged lat range: [{merged_lats.min():.4f}, {merged_lats.max():.4f}]")
+            print(f"  Merged lon range: [{merged_lons.min():.4f}, {merged_lons.max():.4f}]")
+
+            # Track which static variables were successfully added
+            static_vars_added = []
+
+            def add_static_var_to_merged(raw_data_dict, var_name, default_value=np.nan, is_categorical=False):
+                """
+                Add static data to merged dataset using the SAME lookup approach as climate data.
+                This ensures coordinates match exactly.
+                
+                Parameters:
+                -----------
+                raw_data_dict : dict
+                    Raw data dictionary with 'data', 'transform', etc. (same format as climate data)
+                var_name : str
+                    Name of the variable
+                default_value : float
+                    Default value for missing data
+                is_categorical : bool
+                    If True, convert to int after lookup
+                    
+                Returns:
+                --------
+                bool
+                    True if successfully added
+                """
+                if raw_data_dict is None:
+                    print(f"  Skipping {var_name}: raw data not available")
+                    return False
+                
+                try:
+                    print(f"  Processing {var_name}...")
+                    
+                    # Create meshgrid from merged dataset coordinates (SAME AS CLIMATE DATA APPROACH)
+                    lon_grid, lat_grid = np.meshgrid(merged_lons, merged_lats)
+                    flat_lons = lon_grid.flatten()
+                    flat_lats = lat_grid.flatten()
+                    
+                    # Use the same lookup method as climate data
+                    values = self.get_raster_at_location_direct(
+                        flat_lons, flat_lats,
+                        raw_data_dict,
+                        max_distance=0.05,
+                        default_value=default_value
+                    )
+                    
+                    # Reshape to grid
+                    values_grid = values.reshape(n_lats, n_lons)
+                    
+                    if is_categorical:
+                        values_grid = np.nan_to_num(values_grid, nan=default_value).astype(int)
+                    
+                    # Broadcast to time dimension if needed
+                    if has_time:
+                        broadcast_values = np.broadcast_to(
+                            values_grid[np.newaxis, :, :],
+                            (n_times, n_lats, n_lons)
+                        ).copy()  # .copy() to make it writable
+                        
+                        data_array = xr.DataArray(
+                            broadcast_values,
+                            dims=[time_coord, 'latitude', 'longitude'],
+                            coords={
+                                time_coord: merged_ds[time_coord],
+                                'latitude': merged_lats,
+                                'longitude': merged_lons
+                            },
+                            name=var_name
+                        )
+                    else:
+                        data_array = xr.DataArray(
+                            values_grid,
+                            dims=['latitude', 'longitude'],
+                            coords={
+                                'latitude': merged_lats,
+                                'longitude': merged_lons
+                            },
+                            name=var_name
+                        )
+                    
+                    # Add to merged dataset
+                    merged_ds[var_name] = data_array
+                    
+                    # Print validation info
+                    valid_values = values_grid[~np.isnan(values_grid)] if not is_categorical else values_grid.flatten()
+                    if len(valid_values) > 0:
+                        if is_categorical:
+                            unique_vals = np.unique(valid_values)
+                            print(f"    Added {var_name}: shape={data_array.shape}, classes={unique_vals.tolist()[:10]}{'...' if len(unique_vals) > 10 else ''}")
+                        else:
+                            print(f"    Added {var_name}: shape={data_array.shape}, range=[{valid_values.min():.2f}, {valid_values.max():.2f}], unique={len(np.unique(valid_values))}")
+                    else:
+                        print(f"    Added {var_name}: shape={data_array.shape}, WARNING: no valid values!")
+                    
+                    return True
+                    
+                except Exception as e:
+                    print(f"  Warning: Could not add {var_name}: {e}")
+                    traceback.print_exc()
+                    return False
+
+            def add_lai_to_merged(lai_raw_dict):
+                """
+                Add LAI data to merged dataset with temporal alignment.
+                Uses the SAME lookup approach as climate data.
+                
+                Parameters:
+                -----------
+                lai_raw_dict : dict
+                    Raw LAI data dictionary with 'data' (3D: time, lat, lon), 'times', 'transform'
+                    
+                Returns:
+                --------
+                bool
+                    True if successfully added
+                """
+                if lai_raw_dict is None:
+                    print(f"  Skipping LAI: raw data not available")
+                    return False
+                
+                try:
+                    print(f"  Processing LAI (time-varying)...")
+                    
+                    lai_data = lai_raw_dict['data']  # Shape: (n_lai_times, height, width)
+                    lai_times = lai_raw_dict['times']
+                    n_lai_times = len(lai_times)
+                    
+                    print(f"    LAI has {n_lai_times} time slices")
+                    
+                    # Create meshgrid from merged dataset coordinates
+                    lon_grid, lat_grid = np.meshgrid(merged_lons, merged_lats)
+                    flat_lons = lon_grid.flatten()
+                    flat_lats = lat_grid.flatten()
+                    
+                    # Resample each LAI time slice spatially
+                    lai_resampled_times = []
+                    for t_idx in range(n_lai_times):
+                        # Create temporary dict for this time slice
+                        lai_slice_dict = {
+                            'data': lai_data[t_idx],
+                            'transform': lai_raw_dict['transform'],
+                            'nodata': lai_raw_dict.get('nodata', np.nan)
+                        }
+                        
+                        # Use same lookup method as climate data
+                        lai_values = self.get_raster_at_location_direct(
+                            flat_lons, flat_lats,
+                            lai_slice_dict,
+                            max_distance=0.05,
+                            default_value=np.nan
+                        )
+                        lai_grid = lai_values.reshape(n_lats, n_lons)
+                        lai_resampled_times.append(lai_grid)
+                        
+                        # Debug first slice
+                        if t_idx == 0:
+                            valid_lai = lai_grid[~np.isnan(lai_grid)]
+                            if len(valid_lai) > 0:
+                                print(f"    First time slice: range=[{valid_lai.min():.2f}, {valid_lai.max():.2f}], unique={len(np.unique(valid_lai))}")
+                    
+                    lai_resampled_stack = np.stack(lai_resampled_times, axis=0)
+                    print(f"    LAI resampled stack shape: {lai_resampled_stack.shape}")
+                    
+                    # Temporal alignment to merged dataset times
+                    if has_time:
+                        merged_times = merged_ds[time_coord].values
+                        merged_times_pd = pd.DatetimeIndex(merged_times)
+                        
+                        # Make timezone naive for comparison
+                        if merged_times_pd.tz is not None:
+                            merged_times_pd = merged_times_pd.tz_localize(None)
+                        
+                        lai_times_pd = pd.DatetimeIndex(lai_times)
+                        if lai_times_pd.tz is not None:
+                            lai_times_pd = lai_times_pd.tz_localize(None)
+                        
+                        print(f"    Aligning LAI to {len(merged_times_pd)} merged timestamps...")
+                        
+                        # Find nearest LAI time for each merged time
+                        lai_indices = []
+                        for target_time in merged_times_pd:
+                            time_diffs = np.abs((lai_times_pd - target_time).total_seconds())
+                            nearest_idx = np.argmin(time_diffs)
+                            lai_indices.append(nearest_idx)
+                        
+                        # Create aligned LAI array
+                        lai_aligned = lai_resampled_stack[lai_indices, :, :]
+                        
+                        lai_da = xr.DataArray(
+                            lai_aligned,
+                            dims=[time_coord, 'latitude', 'longitude'],
+                            coords={
+                                time_coord: merged_ds[time_coord],
+                                'latitude': merged_lats,
+                                'longitude': merged_lons
+                            },
+                            name='LAI'
+                        )
+                    else:
+                        # No time dimension - use mean of all LAI times
+                        lai_mean = np.nanmean(lai_resampled_stack, axis=0)
+                        lai_da = xr.DataArray(
+                            lai_mean,
+                            dims=['latitude', 'longitude'],
+                            coords={
+                                'latitude': merged_lats,
+                                'longitude': merged_lons
+                            },
+                            name='LAI'
+                        )
+                    
+                    lai_da.attrs['units'] = 'm2/m2'
+                    lai_da.attrs['long_name'] = 'Leaf Area Index'
+                    
+                    # Add to merged dataset
+                    merged_ds['LAI'] = lai_da
+                    
+                    # Print validation info
+                    valid_lai = lai_da.values[~np.isnan(lai_da.values)]
+                    if len(valid_lai) > 0:
+                        print(f"    Added LAI: shape={lai_da.shape}, range=[{valid_lai.min():.2f}, {valid_lai.max():.2f}], unique={len(np.unique(valid_lai))}")
+                    else:
+                        print(f"    Added LAI: shape={lai_da.shape}, WARNING: no valid values!")
+                    
+                    return True
+                    
+                except Exception as e:
+                    print(f"  Warning: Could not add LAI: {e}")
+                    traceback.print_exc()
+                    return False
+
+            # ========== ADD ELEVATION ==========
+            if hasattr(self, 'elevation_raw') and self.elevation_raw is not None:
+                if add_static_var_to_merged(self.elevation_raw, 'elevation', default_value=0.0):
+                    static_vars_added.append('elevation')
+            else:
+                print("  Skipping elevation: raw data not loaded")
+
+            # ========== ADD PFT ==========
+            if hasattr(self, 'pft_raw') and self.pft_raw is not None:
+                if add_static_var_to_merged(self.pft_raw, 'pft', default_value=0, is_categorical=True):
+                    static_vars_added.append('pft')
+            else:
+                print("  Skipping pft: raw data not loaded")
+
+            # ========== ADD CANOPY HEIGHT ==========
+            if hasattr(self, 'canopy_height_raw') and self.canopy_height_raw is not None:
+                if add_static_var_to_merged(self.canopy_height_raw, 'canopy_height', default_value=0.0):
+                    static_vars_added.append('canopy_height')
+            else:
+                print("  Skipping canopy_height: raw data not loaded")
+
+            # ========== ADD LAI ==========
+            if hasattr(self, 'lai_raw') and self.lai_raw is not None:
+                if add_lai_to_merged(self.lai_raw):
+                    static_vars_added.append('LAI')
+            else:
+                print("  Skipping LAI: raw data not loaded")
+
+            print(f"\nStatic variables added to merged dataset: {static_vars_added}")
+            # --- 6c. Propagate NaN mask from ERA5 variables to static variables ---
+            print("\nPropagating NaN mask from ERA5 data to static variables...")
+
+            # Find a reference ERA5 variable that has the NaN mask (from shapefile clipping)
+            era5_reference_var = None
+            for var_name in ['ta', 'temperature_2m', 'ws', 'wind_speed', 'sw_in', 
+                            'surface_solar_radiation_downwards_hourly']:
+                if var_name in merged_ds.data_vars:
+                    era5_reference_var = var_name
+                    break
+
+            if era5_reference_var is not None:
+                # Get the NaN mask from ERA5 data
+                era5_data = merged_ds[era5_reference_var].values
+                nan_mask = np.isnan(era5_data)
+                nan_count = np.sum(nan_mask)
+                print(f"  Reference variable: {era5_reference_var}")
+                print(f"  NaN pixels to propagate: {nan_count}")
+                
+                # Apply mask to static variables
+                static_vars_to_mask = ['elevation', 'pft', 'canopy_height', 'LAI']
+                
+                for static_var in static_vars_to_mask:
+                    if static_var in merged_ds.data_vars:
+                        # Get current values
+                        static_data = merged_ds[static_var].values.copy()
+                        
+                        # Handle dimension mismatch (static may be 2D, ERA5 is 3D with time)
+                        if static_data.ndim == 2 and nan_mask.ndim == 3:
+                            # Use mask from first timestep (mask should be same for all times)
+                            mask_2d = nan_mask[0, :, :]
+                            static_data = np.where(mask_2d, np.nan, static_data)
+                        elif static_data.ndim == 3 and nan_mask.ndim == 3:
+                            # Same dimensions - apply directly
+                            static_data = np.where(nan_mask, np.nan, static_data)
+                        else:
+                            # Broadcast mask to match static data shape
+                            static_data = np.where(nan_mask, np.nan, static_data)
+                        
+                        # Update the dataset
+                        merged_ds[static_var].values = static_data
+                        new_nan_count = np.sum(np.isnan(static_data))
+                        print(f"  {static_var}: Applied mask, now has {new_nan_count} NaN values")
+            else:
+                print("  WARNING: Could not find ERA5 reference variable for NaN mask propagation")
             # --- 7. Rename variables to final model names ---
             print("Renaming variables to final model names...")
             rename_dict_final = {}
-            final_expected_vars = [] # Track vars we expect based on config + climate
-            if 'annual_mean_temperature' in merged_ds: final_expected_vars.append('annual_mean_temperature')
-            if 'annual_precipitation' in merged_ds: final_expected_vars.append('annual_precipitation')
-
-            # Iterate through the original map used for processing
+            final_expected_vars = []
+            checked_var = []
+            # Add climate variables
+            if 'annual_mean_temperature' in merged_ds.data_vars:
+                final_expected_vars.append('annual_mean_temperature')
+            if 'annual_precipitation' in merged_ds.data_vars:
+                final_expected_vars.append('annual_precipitation')
+            
+            # Add static variables that were successfully added
+            for static_var in static_vars_added:
+                if static_var not in final_expected_vars:
+                    final_expected_vars.append(static_var)
+            
+            # Process ERA5 variables from prediction_vars_map
             for original_name, model_name in prediction_vars_map.items():
-                 # The variable in merged_ds should match original_name (or model_name if derived)
-                 var_to_check = original_name if original_name in merged_ds.data_vars else model_name
+                possible_names = [original_name, f"{original_name}_hourly", f"{original_name}_sum"]
 
-                 if var_to_check in merged_ds.data_vars:
-                     # If the final model name is different from the current name, add to rename dict
-                     if var_to_check != model_name:
-                         rename_dict_final[var_to_check] = model_name
-                     # Add the target model name to the list of expected vars
-                     if model_name not in final_expected_vars:
-                         final_expected_vars.append(model_name)
-                 else:
-                     print(f"Warning: Expected variable '{var_to_check}' (from {original_name} -> {model_name}) not found in merged dataset after alignment/merge.")
+                for var_to_check in possible_names:
+                    if var_to_check in merged_ds.data_vars:
+                        checked_var.append(var_to_check)
 
+                        if var_to_check != model_name:
+                            rename_dict_final[var_to_check] = model_name
+                        if model_name not in final_expected_vars:
+                            final_expected_vars.append(model_name)
+                        break
+                print(f"Renamed {checked_var} to {final_expected_vars}'")
 
             print(f"Final rename dictionary: {rename_dict_final}")
-            if rename_dict_final: # Only rename if needed
+            if rename_dict_final:
                 merged_ds = merged_ds.rename(rename_dict_final)
 
             print(f"Expected final variables: {final_expected_vars}")
 
             # --- 8. Filter dataset to keep only the final required variables ---
             try:
-                # Ensure all expected final vars actually exist after rename
+                # Get all data variables currently in the dataset
+                all_current_vars = list(merged_ds.data_vars)
+                print(f"All variables in merged dataset: {all_current_vars}")
+                
+                # Keep variables that are in final_expected_vars
                 vars_to_keep_actual = [v for v in final_expected_vars if v in merged_ds.data_vars]
+                
+                # Also keep static variables even if not in final_expected_vars
+                # (this is a safety check)
+                for static_var in ['elevation', 'pft', 'canopy_height', 'LAI']:
+                    if static_var in merged_ds.data_vars and static_var not in vars_to_keep_actual:
+                        vars_to_keep_actual.append(static_var)
+                        print(f"Note: Adding {static_var} to keep list (was missing from expected)")
+                
                 missing_final_vars = [v for v in final_expected_vars if v not in vars_to_keep_actual]
                 if missing_final_vars:
-                    print(f"Warning: Not all expected final variables found in merged dataset. Missing: {missing_final_vars}")
+                    print(f"Warning: Not all expected final variables found. Missing: {missing_final_vars}")
 
                 if not vars_to_keep_actual:
                     print("Error: No variables left to keep after renaming/filtering.")
                     return None
 
-                # Keep only the available final variables
                 merged_ds = merged_ds[vars_to_keep_actual]
-                print(f"Variables available after final filter: {list(merged_ds.data_vars)}")
+                print(f"Variables after final filter: {list(merged_ds.data_vars)}")
+                
             except Exception as filter_err:
                 print(f"Error during final variable filtering: {filter_err}")
                 print(f"Available variables were: {list(merged_ds.data_vars)}")
@@ -3071,26 +5997,33 @@ class ERA5LandGEEProcessor:
 
 
             # --- 10. Add Time Features (if configured) ---
-            time_feature_config = getattr(config, 'TIME_FEATURES', False)
+            time_feature_config = getattr(config, 'TIME_FEATURES', True)
+
             if time_feature_config:
-                print("Adding time features...")
-                if final_time_coord_name in final_df.columns:
+                print("Adding solar time features...")
+                
+                # Check for required columns BEFORE any index manipulation
+                # final_time_coord_name = 'timestamp', final_lon_coord_name = 'longitude'
+                has_timestamp = final_time_coord_name in final_df.columns
+                has_longitude = final_lon_coord_name in final_df.columns
+                
+                if has_timestamp and has_longitude:
                     try:
                         # Ensure timestamp column is datetime type
                         final_df[final_time_coord_name] = pd.to_datetime(final_df[final_time_coord_name])
-                        # Temporarily set timestamp as index for the function
-                        final_df = final_df.set_index(final_time_coord_name)
-                        final_df = self.add_time_features(final_df) # Assumes add_time_features works on index
-                        final_df = final_df.reset_index() # Put timestamp back as column
-                        print("Successfully added time features.")
+                        
+                        # Call the time features method (it handles index internally)
+                        final_df = self.add_time_features(final_df)
+                        
+                        print("Successfully added solar time features.")
+                        
                     except Exception as time_feat_err:
                         print(f"Warning: Could not add time features: {time_feat_err}")
                         traceback.print_exc()
-                        # Ensure timestamp is still a column if error occurred after set_index
-                        if final_time_coord_name not in final_df.columns and final_df.index.name == final_time_coord_name:
-                            final_df = final_df.reset_index()
                 else:
-                    print(f"Warning: '{final_time_coord_name}' column not found, cannot add time features.")
+                    print(f"Warning: Cannot add solar features. "
+                        f"timestamp present: {has_timestamp}, longitude present: {has_longitude}")
+                    print(f"Available columns: {final_df.columns.tolist()[:10]}...")  # Debug info
 
 
             # --- 11. Add Name column ---
@@ -3106,8 +6039,40 @@ class ERA5LandGEEProcessor:
                  print(f"Unexpected error creating 'name' column: {general_name_err}")
                  traceback.print_exc()
 
+            # --- 12. One-Hot Encode Specific PFT Classes ---
+            if 'pft' in final_df.columns:
+                print("One-hot encoding PFT variable (Target classes only)...")
 
-            # --- 12. Final Checks and Return ---
+                # 1. Define ONLY the classes you need
+                target_pft_classes = {
+                    1: 'ENF',  # Evergreen Needleleaf Forests
+                    2: 'EBF',  # Evergreen Broadleaf Forests
+                    3: 'DNF',  # Deciduous Needleleaf Forests
+                    4: 'DBF',  # Deciduous Broadleaf Forests
+                    5: 'MF',   # Mixed Forests
+                    8: 'WSA',  # Woody Savannas
+                    9: 'SAV',  # Savannas
+                    11: 'WET',  # Permanent Wetlands
+                }
+
+                # 2. Clean the PFT data
+                # Convert to numeric, turn NaNs to 0, round to nearest int (safety for interpolation artifacts), convert to int
+                # Any class NOT in your list (like Urban, Water, Barren) effectively becomes "0" here or just doesn't match below.
+                pft_series = pd.to_numeric(final_df['pft'], errors='coerce').fillna(0).round().astype(int)
+
+                # 3. Create One-Hot Columns Manually
+                # This guarantees that ALL these columns exist in every single output file,
+                # even if a specific day/location doesn't contain that specific tree type.
+                for code, label in target_pft_classes.items():
+                    col_name = label  # Result: ENF, EBF, etc.
+                    # Create binary column: 1 if match, 0 if not
+                    final_df[col_name] = (pft_series == code).astype(int)
+
+                # 4. Drop the original raw 'pft' column
+                final_df = final_df.drop(columns=['pft'])
+
+                print(f"PFT encoding complete. Created {len(target_pft_classes)} columns: {[f'{v}' for v in target_pft_classes.values()]}")
+            # --- 13. Final Checks and Return ---
             end_grid_proc_time = time.time()
             print(f"\nFinished creating grid dataset in {end_grid_proc_time - start_grid_proc_time:.2f} seconds.")
 
@@ -3280,120 +6245,111 @@ class ERA5LandGEEProcessor:
             gc.collect()
 
     def _process_day_with_hourly_parallel(self, variables, year, month, day, 
-                                    shapefile=None, num_workers=None, 
-                                    output_dir=None):
+                                        shapefile=None, num_workers=None, 
+                                        output_dir=None):
         """
-        Process a single day of ERA5-Land data with parallel processing of individual hours.
-        
-        Parameters:
-        -----------
-        variables : list
-            List of variables to process
-        year : int
-            Year to process
-        month : int
-            Month to process
-        day : int
-            Day to process
-        shapefile : str, optional
-            Path to shapefile for region definition
-        num_workers : int, optional
-            Number of parallel worker processes (defaults to CPU count - 1)
-        output_dir : str or Path, optional
-            Directory to save daily prediction datasets
-                    
-        Returns:
-        --------
-        str
-            Path to the daily prediction dataset file
+        Parallel orchestrator for a single day. 
+        Fixes Fix #4 (No resizing) and Fix #7 (Disk-based transfer).
         """
         import multiprocessing as mp
+        import gc
         
-        # Set number of worker processes (default to CPU count - 1)
+        # 1. Setup Parallelism
         if num_workers is None:
             num_workers = max(1, mp.cpu_count() - 1)
-        else:
-            num_workers = max(1, min(num_workers, mp.cpu_count()))
         
-        print(f"Processing {year}-{month:02d}-{day:02d} using {num_workers} parallel processes for hourly data")
+        print(f"\n{'='*60}")
+        print(f"PARALLEL DAY PROCESSOR: {year}-{month:02d}-{day:02d}")
+        print(f"Workers: {num_workers} | Temp Dir: {self.temp_dir}")
+        print(f"{'='*60}\n")
         
-        # Create output directory
-        if output_dir is None:
-            output_dir = config.PREDICTION_DIR / f"{year}_{month:02d}_daily"
-        
-        output_dir = Path(output_dir)
-        output_dir.mkdir(exist_ok=True, parents=True)
-        
-        # Create a temporary directory for hourly processing
-        temp_dir = self.temp_dir
-        temp_dir.mkdir(exist_ok=True, parents=True)
-        
-        # Prepare arguments for each hour's processing
+        # 2. Prepare Worker Arguments
         process_args = []
         for hour in range(24):
-            # Each item is (year, month, day, hour, variables, shapefile, output_dir, temp_dir)
-            process_args.append((year, month, day, hour, variables, shapefile, output_dir, temp_dir))
+            process_args.append((
+                year, month, day, hour, 
+                variables, shapefile, 
+                str(output_dir), str(self.temp_dir)
+            ))
         
-        # Print confirmation before starting parallel processing
-        print(f"Starting parallel processing for 24 hours with {num_workers} workers")
-        
-        # Use a process pool to process hours in parallel
-        with mp.Pool(processes=num_workers) as pool:
-            # Map the processing function to all hours with their arguments
+        # 3. Execute Pool
+        # We use 'spawn' or 'forkserver' on Linux for cleaner memory if available
+        try:
+            ctx = mp.get_context('spawn') # Enforce isolation (Good for GEE)
+        except AttributeError:
+            ctx = mp # Fallback for older Pythons
+            
+        # PASS global_worker_init HERE
+        with ctx.Pool(processes=num_workers, initializer=global_worker_init) as pool:
             results = pool.map(_hour_processing_worker, process_args)
         
-        # Filter out failed results
-        successful_results = [r for r in results if r and r.get('success', False)]
+        # 4. Collect successfully produced file paths
+        # We sort by hour to ensure chronological order before merging
+        successful_results = sorted([r for r in results if r.get('success')], key=lambda x: x['hour'])
+        temp_files = [r['file_path'] for r in successful_results]
         
-        print(f"Successfully processed {len(successful_results)} out of 24 hours")
+        if not temp_files:
+            print("ERROR: No hourly files were produced. Check GEE authentication/connectivity.")
+            return None
+
+        print(f"\nMerging {len(temp_files)} hourly segments...")
         
-        if successful_results:
-            # Combine hourly datasets into a single daily dataset
-            try:
-                # Collect all dataframes
-                hourly_dfs = [result['data'] for result in successful_results if 'data' in result]
-                
-                if hourly_dfs:
-                    # Concatenate all hourly dataframes
-                    combined_df = pd.concat(hourly_dfs)
-                    
-                    # Sort by timestamp and location
-                    sort_columns = []
-                    if combined_df.index.name == 'timestamp':
-                        combined_df = combined_df.sort_index()
-                    else:
-                        if 'timestamp' in combined_df.columns:
-                            sort_columns.append('timestamp')
-                    
-                    if 'name' in combined_df.columns:
-                        sort_columns.append('name')
-                    else:
-                        if 'latitude' in combined_df.columns:
-                            sort_columns.append('latitude')
-                        if 'longitude' in combined_df.columns:
-                            sort_columns.append('longitude')
-                    
-                    if sort_columns:
-                        combined_df = combined_df.sort_values(sort_columns)
-                    
-                    # Save the combined daily dataset
-                    output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}.csv"
-                    self.save_prediction_dataset(combined_df, output_file)
-                    
-                    print(f"Saved combined daily dataset with {len(combined_df)} rows to {output_file}")
-                    
-                    
-                    return str(output_file)
-                else:
-                    print("No hourly data found to combine")
-                    return None
-            except Exception as e:
-                print(f"Error combining hourly data: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                return None
-        else:
-            print("No successful hourly data to combine")
+        try:
+            # 5. Merge DataFrames from Disk
+            # We use a generator to keep memory usage low during concatenation
+            def frame_generator(files):
+                for f in files:
+                    yield pd.read_csv(f)
+            
+            combined_df = pd.concat(frame_generator(temp_files), ignore_index=True)
+            
+            # Ensure timestamp is datetime type for sorting/saving
+            if 'timestamp' in combined_df.columns:
+                combined_df['timestamp'] = pd.to_datetime(combined_df['timestamp'])
+            
+            # 6. Final Sort: Primary by timestamp, secondary by location
+            sort_cols = []
+            if 'timestamp' in combined_df.columns: sort_cols.append('timestamp')
+            if 'name' in combined_df.columns: sort_cols.append('name')
+            
+            if sort_cols:
+                combined_df = combined_df.sort_values(sort_cols)
+
+            # 7. Save Final Daily File
+            if output_dir is None:
+                output_dir = config.PREDICTION_DIR / f"{year}_{month:02d}_daily"
+            
+            output_dir = Path(output_dir)
+            output_dir.mkdir(exist_ok=True, parents=True)
+            
+            output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}.csv"
+            
+            # Use our standard save utility (handles Kelvin to Celsius conversion)
+            self.save_prediction_dataset(combined_df, output_file)
+            
+            # 8. CLEANUP: Delete hourly temp files and their folders
+            print("Cleaning up temporary worker files...")
+            for f_path in temp_files:
+                p = Path(f_path)
+                try:
+                    if p.exists():
+                        p.unlink()       # Delete the file
+                        p.parent.rmdir() # Delete the worker's folder
+                except Exception as e:
+                    print(f"Warning: Could not delete temp file/folder {p.parent}: {e}")
+
+            # Explicitly clear memory
+            del combined_df
+            gc.collect()
+            
+            print(f"SUCCESS: Day {year}-{month:02d}-{day:02d} complete.")
+            print(f"Result saved to: {output_file}\n")
+            
+            return str(output_file)
+
+        except Exception as e:
+            print(f"CRITICAL ERROR during day aggregation: {e}")
+            traceback.print_exc()
             return None
 
 
@@ -3612,7 +6568,7 @@ class ERA5LandGEEProcessor:
         process_args = []
         for day in range(1, days_in_month + 1):
             # Each item is (year, month, day, variables, shapefile, output_dir, processor)
-            process_args.append((year, month, day, variables, shapefile, output_dir, self))
+            process_args.append((year, month, day, variables, shapefile, output_dir))
         
         # Print confirmation before starting parallel processing
         print(f"Starting parallel processing for {len(process_args)} days with {num_workers} workers")
@@ -3633,82 +6589,248 @@ class ERA5LandGEEProcessor:
 
 def main():
     """
-    Main function for ERA5-Land processing with parallel processing options.
+    Main function for ERA5-Land processing with multi-year support.
     """
     import argparse
 
-    parser = argparse.ArgumentParser(description='Process ERA5-Land data from GEE for sap velocity prediction')
-    parser.add_argument('--year', type=int, required=True, help='Year to process')
-    parser.add_argument('--month', type=int, required=True, help='Month to process')
-    parser.add_argument('--day', type=int, help='Day to process (for single-day processing)')
-    parser.add_argument('--parallel', action='store_true', help='Process using parallel processing')
-    parser.add_argument('--hourly-parallel', action='store_true', help='Process with hour-level parallelization')
-    parser.add_argument('--num-workers', type=int, help='Number of parallel worker processes')
-    parser.add_argument('--output', type=str, help='Output directory path')
-    parser.add_argument('--shapefile', type=str, default=None, help='Path to shapefile for region definition')
-    parser.add_argument('--gee-scale', type=float, default=11132, help='Scale in meters for GEE export (default ~9km)')
-    parser.add_argument('--days-per-batch', type=int, default=1, help='Days to process in each batch (for memory management)')
-
+    parser = argparse.ArgumentParser(
+        description='Process ERA5-Land data from GEE for sap velocity prediction',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process single month
+  python script.py --year 2023 --month 6 --time-scale daily
+  
+  # Process entire year (all 12 months)
+  python script.py --year 2023 --time-scale daily
+  
+  # Process multiple years
+  python script.py --years 2020 2021 2022 2023 --time-scale daily
+  
+  # Process specific months across multiple years
+  python script.py --years 2020 2021 --months 6 7 8 --time-scale daily
+  
+  # Process year range
+  python script.py --year-range 2018 2023 --time-scale daily
+  
+  # Save yearly files instead of monthly
+  python script.py --year 2023 --time-scale daily --yearly-output
+        """
+    )
+    
+    # Year arguments (mutually exclusive group)
+    year_group = parser.add_mutually_exclusive_group(required=True)
+    year_group.add_argument('--year', type=int, 
+                           help='Single year to process')
+    year_group.add_argument('--years', type=int, nargs='+',
+                           help='List of years to process (e.g., --years 2020 2021 2022)')
+    year_group.add_argument('--year-range', type=int, nargs=2, metavar=('START', 'END'),
+                           help='Range of years to process (e.g., --year-range 2018 2023)')
+    
+    # Month arguments
+    parser.add_argument('--month', type=int, 
+                        help='Single month to process (1-12). If omitted, processes all months.')
+    parser.add_argument('--months', type=int, nargs='+',
+                        help='List of months to process (e.g., --months 1 2 3 or --months 6 7 8)')
+    
+    # Day argument (for single day processing)
+    parser.add_argument('--day', type=int, 
+                        help='Day to process (for single-day processing)')
+    
+    # Processing options
+    parser.add_argument('--time-scale', type=str, default='daily', choices=['hourly', 'daily'],
+                        help='Time scale of the data: hourly or daily (default: daily)')
+    parser.add_argument('--parallel', action='store_true', 
+                        help='Process using parallel processing')
+    parser.add_argument('--hourly-parallel', action='store_true', 
+                        help='Process with hour-level parallelization')
+    parser.add_argument('--num-workers', type=int, 
+                        help='Number of parallel worker processes')
+    parser.add_argument('--days-per-chunk', type=int, default=15,
+                        help='Days per chunk for memory management (default: 15)')
+    
+    # Output options
+    parser.add_argument('--output', type=str, 
+                        help='Output directory path')
+    parser.add_argument('--yearly-output', action='store_true',
+                        help='Save entire year to single file instead of monthly files')
+    parser.add_argument('--monthly-output', action='store_true',
+                        help='Explicitly save monthly files (default behavior)')
+    
+    # Region options
+    parser.add_argument('--shapefile', type=str, default=None, 
+                        help='Path to shapefile for region definition')
+    parser.add_argument('--gee-scale', type=float, default=11132, 
+                        help='Scale in meters for GEE export (default: ~10km)')
+    
     args = parser.parse_args()
 
-    try:
-        # Initialize the processor
-        processor = ERA5LandGEEProcessor()
-        
-        output_dir = args.output or config.PREDICTION_DIR / f"{args.year}_{args.month:02d}_daily"
-        
-        if args.parallel or args.hourly_parallel:
-            if args.day is not None:
-                # Process a single day with appropriate parallelization
-                processor.process_single_day(
-                    config.REQUIRED_VARIABLES, args.year, args.month, args.day,
-                    shapefile=args.shapefile,
-                    output_dir=output_dir,
-                    hourly_parallel=args.hourly_parallel,
-                    num_workers=args.num_workers
-                )
-            else:
-                # Process the entire month with appropriate parallelization
-                processor.process_month_parallel(
-                    config.REQUIRED_VARIABLES, args.year, args.month,
-                    shapefile=args.shapefile,
-                    num_workers=args.num_workers,
-                    output_dir=output_dir,
-                    hourly_parallel=args.hourly_parallel,
-                    days_per_batch=args.days_per_batch
-                )
-        else:
-            # Non-parallel processing
-            if args.day is not None:
-                # Process a single day
-                processor.process_single_day(
-                    config.REQUIRED_VARIABLES, args.year, args.month, args.day, 
-                    shapefile=args.shapefile, output_dir=output_dir
-                )
-            else:
-                # Process normally (whole month at once)
-                processor.load_variable_data(
-                    config.REQUIRED_VARIABLES, args.year, args.month, None, 
-                    shapefile=args.shapefile
-                )
-                
-                # Calculate derived variables
-                processor.calculate_derived_variables()
-                
-                # Create prediction dataset
-                df = processor.create_prediction_dataset()
-                
-                if df is not None:
-                    # Save the dataset
-                    output_path = args.output or f"era5land_gee_prediction_{args.year}_{args.month:02d}.csv"
-                    processor.save_prediction_dataset(df, output_path)
+    # ============================================================
+    # RESOLVE YEARS
+    # ============================================================
+    if args.year is not None:
+        years = [args.year]
+    elif args.years is not None:
+        years = sorted(args.years)
+    elif args.year_range is not None:
+        start_year, end_year = args.year_range
+        if start_year > end_year:
+            start_year, end_year = end_year, start_year
+        years = list(range(start_year, end_year + 1))
+    else:
+        print("Error: Must specify --year, --years, or --year-range")
+        return
     
-    finally:
-        # Clean up
-        processor.close()
+    # ============================================================
+    # RESOLVE MONTHS
+    # ============================================================
+    if args.month is not None:
+        months = [args.month]
+    elif args.months is not None:
+        months = sorted(args.months)
+    else:
+        months = None  # Will process all 12 months
+    
+    # Validate months
+    if months:
+        invalid_months = [m for m in months if m < 1 or m > 12]
+        if invalid_months:
+            print(f"Error: Invalid month(s): {invalid_months}. Months must be 1-12.")
+            return
+    
+    # ============================================================
+    # PRINT PROCESSING PLAN
+    # ============================================================
+    print(f"\n{'='*70}")
+    print("PROCESSING PLAN")
+    print(f"{'='*70}")
+    print(f"Years: {years}")
+    print(f"Months: {months if months else 'All (1-12)'}")
+    print(f"Time scale: {args.time_scale}")
+    print(f"Output mode: {'Yearly files' if args.yearly_output else 'Monthly files'}")
+    if args.shapefile:
+        print(f"Shapefile: {args.shapefile}")
+    if args.output:
+        print(f"Output directory: {args.output}")
+    print(f"{'='*70}\n")
+    
+    # Confirm for large jobs
+    total_months = len(years) * (len(months) if months else 12)
+    if total_months > 12:
+        print(f"This will process {total_months} month(s) of data.")
+    
 
+    # ============================================================
+    # INITIALIZE PROCESSOR
+    # ============================================================
+    try:
+        processor = ERA5LandGEEProcessor(time_scale=args.time_scale)
+        
+        output_dir = Path(args.output) if args.output else config.PREDICTION_DIR
+        
+        # ============================================================
+        # SINGLE DAY PROCESSING
+        # ============================================================
+        if args.day is not None:
+            if len(years) > 1 or (months and len(months) > 1):
+                print("Error: --day can only be used with a single year and month")
+                return
+            
+            year = years[0]
+            month = months[0] if months else 1
+            
+            print(f"Processing single day: {year}-{month:02d}-{args.day:02d}")
+            
+            processor.process_single_day(
+                config.REQUIRED_VARIABLES, year, month, args.day,
+                shapefile=args.shapefile,
+                output_dir=output_dir / f"{year}_{args.time_scale}",
+                hourly_parallel=args.hourly_parallel,
+                num_workers=args.num_workers
+            )
+        
+        # ============================================================
+        # SINGLE YEAR PROCESSING
+        # ============================================================
+        elif len(years) == 1:
+            year = years[0]
+            
+            if months and len(months) == 1:
+                # Single month
+                month = months[0]
+                print(f"Processing single month: {year}-{month:02d}")
+                
+                processor.process_month_daily_chunked(
+                    config.REQUIRED_VARIABLES, year, month,
+                    shapefile=args.shapefile,
+                    output_dir=output_dir / f"{year}_{args.time_scale}",
+                    days_per_chunk=args.days_per_chunk
+                )
+            else:
+                # Multiple months or full year
+                if months:
+                    print(f"Processing {year} months: {months}")
+                    # Process specific months
+                    processor.process_multiple_years(
+                        config.REQUIRED_VARIABLES,
+                        years=[year],
+                        months=months,
+                        shapefile=args.shapefile,
+                        output_dir=output_dir,
+                        days_per_chunk=args.days_per_chunk,
+                        save_monthly=not args.yearly_output
+                    )
+                else:
+                    print(f"Processing full year: {year}")
+                    processor.process_year(
+                        config.REQUIRED_VARIABLES, year,
+                        shapefile=args.shapefile,
+                        output_dir=output_dir / f"{year}_{args.time_scale}",
+                        days_per_chunk=args.days_per_chunk,
+                        save_monthly=not args.yearly_output
+                    )
+        
+        # ============================================================
+        # MULTI-YEAR PROCESSING
+        # ============================================================
+        else:
+            print(f"Processing {len(years)} years: {years}")
+            
+            processor.process_multiple_years(
+                config.REQUIRED_VARIABLES,
+                years=years,
+                months=months,
+                shapefile=args.shapefile,
+                output_dir=output_dir,
+                days_per_chunk=args.days_per_chunk,
+                save_monthly=not args.yearly_output
+            )
+        
+        print("\n" + "="*70)
+        print("PROCESSING COMPLETE")
+        print("="*70 + "\n")
+        
+    except KeyboardInterrupt:
+        print("\n\nProcessing interrupted by user.")
+    except Exception as e:
+        print(f"\nFATAL ERROR: {e}")
+        traceback.print_exc()
+    finally:
+        try:
+            processor.close()
+        except:
+            pass
 
 
 if __name__ == "__main__":
-
+    import ee
+    try:
+        ee.Initialize(project='era5download-447713')
+        print("GEE Initialized successfully.")
+    except Exception as e:
+        print(f"GEE Initialization failed ({e}). Triggering Authentication...")
+        ee.Authenticate() 
+        ee.Initialize(project='era5download-447713')
     main()
+
+

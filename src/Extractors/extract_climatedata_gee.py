@@ -5,7 +5,7 @@ import numpy as np
 import concurrent.futures
 import os
 from tqdm import tqdm
-
+from path_config import PathConfig, get_default_paths
 # Initialize Earth Engine with your project ID
 def initialize_ee(project_id):
     ee.Authenticate()
@@ -137,7 +137,9 @@ def extract_era5_data_parallel(sites_df, variables=['temperature_2m'], max_worke
 # Usage example
 if __name__ == "__main__":
     # Read your site information
-    example_df = pd.read_csv('data/raw/0.1.5/0.1.5/csv/sapwood/site_info1.csv')
+    paths = PathConfig()
+    site_info = paths.site_info_path
+    example_df = pd.read_csv(site_info)
 
     # Define which ERA5 variables you need
     variables = [
@@ -146,14 +148,37 @@ if __name__ == "__main__":
         'soil_temperature_level_1',
         'soil_temperature_level_2',
         'soil_temperature_level_3',
+        'soil_temperature_level_4',
+        'temperature_2m',
+        'dewpoint_2m',
         'surface_latent_heat_flux_hourly',
+        'surface_net_solar_radiation_hourly',
+        'surface_net_thermal_radiation_hourly',
+        'surface_sensible_heat_flux_hourly',
+        'surface_solar_radiation_downwards_hourly',
+        'surface_thermal_radiation_downwards_hourly',
+        'potential_evaporation_hourly',
+        'evaporation_from_the_top_of_canopy_hourly',
+        'total_evaporation_hourly',
+        'total_precipitation_hourly',
         'evaporation_from_vegetation_transpiration_hourly',
+        'volumetric_soil_water_layer_1',
         'volumetric_soil_water_layer_2',
         'volumetric_soil_water_layer_3',
+        'volumetric_soil_water_layer_4',
+        'u_component_of_wind_10m',
+        'v_component_of_wind_10m',
+        'total_precipitation',
+        'surface_pressure',
+
     ]
 
     # Extract data in parallel (adjust max_workers based on your system capabilities)
-    data = extract_era5_data_parallel(example_df, variables, max_workers=16)
+    data = extract_era5_data_parallel(example_df, variables, max_workers=32)
+    
+    output_dir = paths.era5_discrete_data_path
+    if not output_dir.parent.exists():
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
 
     # Save to CSV
-    data.to_csv('data/raw/era5_extracted_data_parallel.csv', index=False)
+    data.to_csv(output_dir, index=False)

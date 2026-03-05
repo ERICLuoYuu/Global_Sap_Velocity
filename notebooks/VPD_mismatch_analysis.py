@@ -71,13 +71,6 @@ def analyze_vpd_mismatches(era5_data, env_files, threshold=0.5, ratio_threshold=
         env_data['timestamp'] = pd.to_datetime(env_data['timestamp'])
         env_data.set_index('timestamp', inplace=True)
         
-        # Filter for June 1-21 (summer period)
-        env_data = env_data[
-            (env_data.index.month == 6) & 
-            (env_data.index.day >= 1) & 
-            (env_data.index.day <= 21)
-        ]
-        
         # Round timestamps to nearest hour and resample
         env_data.index = env_data.index.round('H')
         if 'solar_TIMESTAMP' in env_data.columns:

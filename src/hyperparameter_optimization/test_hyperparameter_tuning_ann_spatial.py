@@ -130,31 +130,7 @@ def add_time_features(df, datetime_column=None):
     
     return df
 
-@deterministic
-def extract_site_id_from_filename(filename):
-    """
-    Extract site ID from a filename.
-    
-    Parameters:
-    -----------
-    filename : Path or str
-        File path or name
-        
-    Returns:
-    --------
-    str
-        Site ID
-    """
-    # Convert to Path if it's a string
-    if isinstance(filename, str):
-        filename = Path(filename)
-    
-    # Extract site ID from filename
-    # Assuming the site ID is the first part of the filename before an underscore
-    # Adapt this pattern according to your actual filename structure
-    site_id = filename.stem.split('_')[0]
-    
-    return site_id
+
 
 @deterministic
 def create_windows_from_segments(
@@ -163,6 +139,7 @@ def create_windows_from_segments(
     label_width: int,
     shift: int,
     label_columns: List[str] = None,
+    exclude_targets_from_features: bool = True,
     exclude_labels_from_inputs: bool = True
 ) -> List[Tuple[tf.Tensor, tf.Tensor]]:
     """
@@ -181,8 +158,10 @@ def create_windows_from_segments(
         Offset between input and label
     label_columns : list of str, optional
         Columns to use as labels
-    exclude_labels_from_inputs : bool
+    exclude_targets_from_features : bool
         Whether to exclude label columns from inputs
+    exclude_labels_from_inputs : bool
+        Whether to exclude labels from inputs 
         
     Returns:
     --------
@@ -207,6 +186,7 @@ def create_windows_from_segments(
             label_columns=label_columns,
             batch_size=1,  # Use batch size of 1 to extract individual windows
             shuffle=False,  # Don't shuffle to maintain temporal order
+            exclude_targets_from_features=exclude_targets_from_features,
             exclude_labels_from_inputs=exclude_labels_from_inputs
         )
         
@@ -389,12 +369,12 @@ def create_spatial_groups(
     lat: Union[np.ndarray, List],
     lon: Union[np.ndarray, List],
     data_counts: Union[np.ndarray, List] = None,
-    method: str = 'kmeans',
+    method: str = 'grid',
     n_clusters: int = 10,
     eps: float = 0.5,
     min_samples: int = 5,
-    lat_grid_size: float = 5.0,
-    lon_grid_size: float = 5.0,
+    lat_grid_size: float = 0.05,
+    lon_grid_size: float = 0.05,
     random_state: int = 42
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """
@@ -461,6 +441,11 @@ def create_spatial_groups(
         # Create unique group numbers for each grid cell
         n_lon_bins = len(lon_bins)
         groups = lat_indices * n_lon_bins + lon_indices
+        # randomly assign groups to n_clusters
+        np.random.seed(random_state)
+        unique_groups = np.unique(groups)
+        group_map = {g: np.random.randint(0, n_clusters) for g in unique_groups}
+        groups = np.array([group_map[g] for g in groups])
         
     elif method in ['kmeans', 'dbscan']:
         # Scale coordinates
@@ -475,9 +460,32 @@ def create_spatial_groups(
         
         groups = clusterer.fit_predict(coords_scaled)
     
+    elif method == 'default':
+        # Randomly assign points into groups, ensuring close points are in same group
+        np.random.seed(random_state)
+        groups = np.random.randint(0, n_clusters, size=len(lat))
+        '''
+        n_points = len(lat)
+        
+        # Calculate distances between points
+        from scipy.spatial.distance import cdist
+        coords = np.column_stack((lat, lon))
+        distances = cdist(coords, coords, metric='euclidean')
+        
+        # Create adjacency matrix for close points
+        close_mask = distances < 0.05
+        
+        # Use connected components to find groups of close points
+        from scipy.sparse.csgraph import connected_components
+        n_components, labels = connected_components(close_mask, directed=False)
+        
+        # Randomly assign cluster IDs to each connected component
+        component_to_cluster = np.random.randint(0, n_clusters, size=n_components)
+        groups = component_to_cluster[labels]
+        '''
     else:
-        raise ValueError("Method must be one of: 'kmeans', 'dbscan', or 'grid'")
-    
+        raise ValueError(f"Unknown method: {method}. Supported methods are 'kmeans', 'dbscan', 'grid', or 'default'.")
+
     # Calculate group statistics including data counts
     stats = []
     for group in np.unique(groups):
@@ -601,43 +609,28 @@ def verify_determinism_of_spatial_ann_model():
     return is_deterministic
 
 @deterministic
-def main(run_id="default", n_groups=10, test_size=0.2, n_cv_folds=5):
+def main(run_id="default", n_groups=10, n_cv_folds=5):
     """
-    Main function to train and evaluate the ANN model with spatial cross-validation.
-    
-    Parameters:
-    -----------
-    run_id : str
-        Identifier for the run, used for saving models and plots
-    n_groups : int
-        Number of spatial groups to create
-    test_size : float
-        Proportion of groups to use for testing
-    n_cv_folds : int
-        Number of cross-validation folds for the optimizer
-        
-    Returns:
-    --------
-    tuple
-        Lists of R² scores and RMSE scores for each test set
+    Main function implementing the paper's leave-fold-out CV approach.
+    Each fold serves as test set exactly once, with remaining folds split 8:1 for train:validation.
     """
     # Set parameters
     RANDOM_SEED = get_seed()
     BATCH_SIZE = 32
     
     # Define window parameters
-    INPUT_WIDTH = 8
+    INPUT_WIDTH = 3
     LABEL_WIDTH = 1
     SHIFT = 1
-    EXCLUDE_LABEL = True
-    
+    EXCLUDE_LABELS = True
+    EXCLUDE_TARGETS = True
     # Set deterministic rendering for matplotlib
     import matplotlib as mpl
     mpl.rcParams['agg.path.chunksize'] = 10000
     np.random.seed(RANDOM_SEED)
     
-    print(f"Starting ANN model training with spatial CV, seed {RANDOM_SEED} (run_id: {run_id})")
-    print(f"Using {n_groups} spatial groups, {test_size*100:.0f}% for testing, {n_cv_folds} CV folds for optimizer")
+    print(f"Starting ANN model training with leave-fold-out CV, seed {RANDOM_SEED} (run_id: {run_id})")
+    print(f"Using {n_groups} spatial groups with leave-fold-out cross-validation")
     
     # Create output directories
     plot_dir = Path('./plots')
@@ -647,14 +640,14 @@ def main(run_id="default", n_groups=10, test_size=0.2, n_cv_folds=5):
     model_dir.mkdir(exist_ok=True)
     
     # Load and preprocess data
-    data_dir = Path('./outputs/processed_data/merged/site/gap_filled_size1_hourly_after_filter')
+    data_dir = Path('./outputs/processed_data/merged/site/hourly_after_outlier_removal')
     data_list = list(data_dir.glob('*merged.csv'))
     
     if not data_list:
         print(f"No CSV files found in {data_dir}")
         try:
             # Fallback to single file
-            data = pd.read_csv('./outputs/processed_data/merged/site/gap_filled_size1_with_era5/test.csv')
+            data = pd.read_csv('./outputs/processed_data/merged/site/hourly_after_outlier_removal/test.csv')
             print("Using fallback test.csv file")
         except:
             print("ERROR: Could not find any data files")
@@ -665,9 +658,9 @@ def main(run_id="default", n_groups=10, test_size=0.2, n_cv_folds=5):
     # Process data files
     site_data_dict = {}  # Dictionary to store data segments by site
     site_info_dict = {}  # Dictionary to store site metadata
-    
+    site_windows_dict = {}  # Dictionary to store windows per site
     # Define the columns we want to use
-    used_cols = ['sap_velocity', 'sw_in', 'ext_rad', 'ta', 'ws', 'vpd', 'ppfd_in', 'biome', 'Day sin', 'Week sin', 'Month sin', 'Year sin']
+    used_cols = ['sap_velocity', 'sw_in', 'ext_rad', 'ta', 'ws', 'vpd', 'ppfd_in', 'Day sin', 'Week sin', 'Month sin', 'Year sin']
     all_biome_types = set()
     all_possible_biome_types = ['Boreal forest', 'Subtropical desert', 'Temperate forest', 'Temperate grassland desert', 'Temperate rain forest', 'Tropical forest savanna', 'Tropical rain forest', 'Tundra', 'Woodland/Shrubland']
     
@@ -678,11 +671,11 @@ def main(run_id="default", n_groups=10, test_size=0.2, n_cv_folds=5):
     for data_file in data_list:
         print(f"Processing {data_file.name}")
         try:
-            # Extract site ID from filename
-            site_id = extract_site_id_from_filename(data_file)
+
+            
             
             df = pd.read_csv(data_file, parse_dates=['TIMESTAMP'])
-            
+            site_id = df['site'].iloc[0]
             # Extract lat/lon if available
             latitude = None
             longitude = None
@@ -791,7 +784,6 @@ def main(run_id="default", n_groups=10, test_size=0.2, n_cv_folds=5):
                     'data_count': 0,
                     'segments': 0
                 }
-            
             site_data_dict[site_id].extend(segments)
             site_info_dict[site_id]['data_count'] += data_count
             site_info_dict[site_id]['segments'] += len(segments)
@@ -845,7 +837,7 @@ def main(run_id="default", n_groups=10, test_size=0.2, n_cv_folds=5):
         lat=latitudes,
         lon=longitudes,
         data_counts=data_counts,
-        method='grid',
+        method='default',
         n_clusters=n_groups,
         random_state=RANDOM_SEED
     )
@@ -883,283 +875,355 @@ def main(run_id="default", n_groups=10, test_size=0.2, n_cv_folds=5):
     
     # Apply scaling to each segment in each site
     for site_id, segments in site_data_dict.items():
+        site_windows_dict[site_id] = []
         for i, segment in enumerate(segments):
             segment_copy = segment.copy()
             segment_copy[feature_columns] = feature_scaler.transform(segment[feature_columns])
             segment_copy['sap_velocity'] = label_scaler.transform(segment[['sap_velocity']])
             site_data_dict[site_id][i] = segment_copy
-    
-    # Get unique group numbers
-    unique_groups = np.unique(spatial_groups)
-    
-    # Split groups into training and test
-    # We use a deterministic train_test_split to ensure reproducibility
-    np.random.seed(RANDOM_SEED)
-    train_groups, test_groups = train_test_split(
-        unique_groups, 
-        test_size=test_size,
-        random_state=RANDOM_SEED
-    )
-    
-    print(f"\nTrain-test split:")
-    print(f"  Training groups: {sorted(train_groups)}")
-    print(f"  Test groups: {sorted(test_groups)}")
-    
-    # Collect sites for training and testing
-    train_sites = [site for site, group in site_to_group.items() if group in train_groups]
-    test_sites = [site for site, group in site_to_group.items() if group in test_groups]
-    
-    print(f"  Training sites: {len(train_sites)}")
-    print(f"  Test sites: {len(test_sites)}")
-    
-    # Collect segments for training and testing
-    train_segments = []
-    for site in train_sites:
-        train_segments.extend(site_data_dict[site])
-    
-    test_segments = []
-    for site in test_sites:
-        test_segments.extend(site_data_dict[site])
-    
-    print(f"  Training segments: {len(train_segments)}")
-    print(f"  Test segments: {len(test_segments)}")
-    
-    # Create windows from segments (each segment processed independently)
-    print("\nCreating windows from segments...")
-    train_windows = create_windows_from_segments(
-        segments=train_segments,
-        input_width=INPUT_WIDTH,
-        label_width=LABEL_WIDTH,
-        shift=SHIFT,
-        label_columns=['sap_velocity'],
-        exclude_labels_from_inputs=EXCLUDE_LABEL
-    )
-    
-    test_windows = create_windows_from_segments(
-        segments=test_segments,
-        input_width=INPUT_WIDTH,
-        label_width=LABEL_WIDTH,
-        shift=SHIFT,
-        label_columns=['sap_velocity'],
-        exclude_labels_from_inputs=EXCLUDE_LABEL
-    )
-    
-    print(f"  Created {len(train_windows)} training windows")
-    print(f"  Created {len(test_windows)} test windows")
-    
-    # Count windows per site for group labeling
-    site_windows_count = {}
-    
-    for site in train_sites:
-        site_segments = site_data_dict[site]
+        # create windows for each site
         site_windows = create_windows_from_segments(
-            segments=site_segments,
+            segments=site_data_dict[site_id],
             input_width=INPUT_WIDTH,
             label_width=LABEL_WIDTH,
             shift=SHIFT,
             label_columns=['sap_velocity'],
-            exclude_labels_from_inputs=EXCLUDE_LABEL
+            exclude_targets_from_features=EXCLUDE_TARGETS,
+            exclude_labels_from_inputs=EXCLUDE_LABELS
         )
-        site_windows_count[site] = len(site_windows)
+        
+        # Store the windows in the site_data_dict
+        site_windows_dict[site_id].extend(site_windows)
+    # release memory
+    site_data_dict = {}
+    # Get unique group numbers
+    unique_groups = np.unique(spatial_groups)
+    n_folds = len(unique_groups)
     
-    # Create group labels for all training windows
-    group_labels = create_group_labels_for_windows(site_to_group, site_windows_count)
+    print(f"\nImplementing leave-fold-out cross-validation:")
+    print(f"  Total folds (groups): {n_folds}")
+    print(f"  Each fold will serve as test set once")
+    print(f"  For each iteration: {n_folds-2} training + 1 validation + 1 test")
     
-    print(f"  Created {len(group_labels)} group labels for training windows")
-    print(f"  Group distribution: {Counter(group_labels)}")
+    # Storage for results from all iterations
+    all_test_r2_scores = []
+    all_test_rmse_scores = []
+    all_test_mae_scores = []
+    fold_results = []
+    all_predictions = []
+    all_actuals = []
     
-    # Convert windows to numpy arrays for the optimizer
-    X_train, y_train = convert_windows_to_numpy(train_windows)
-    X_test, y_test = convert_windows_to_numpy(test_windows)
-    
-    print(f"  Training features shape: {X_train.shape}")
-    print(f"  Training labels shape: {y_train.shape}")
-    print(f"  Test features shape: {X_test.shape}")
-    print(f"  Test labels shape: {y_test.shape}")
-    
-    # Also create TensorFlow datasets for prediction
-    train_ds = windows_to_tf_dataset(train_windows, batch_size=BATCH_SIZE)
-    test_ds = windows_to_tf_dataset(test_windows, batch_size=BATCH_SIZE)
-    
-    # Get input shape from data
-    input_shape = (X_train.shape[1], X_train.shape[2])  # (timesteps, features)
-    print(f"  Input shape: {input_shape}")
-    
-    # Define parameter grid for ANN
-    param_grid = {
-        'architecture': {
-            'n_layers': [2],
-            'units': [64],
-            'dropout_rate': [0.1] 
-        },
-        'optimizer': {   
-            'name': ['Adam'],
-            'learning_rate': [0.001]
-        },
-        'training': {
-            'batch_size': BATCH_SIZE,
-            'epochs': 100,
-            'patience': 10
+    # Iterate through each fold as test set
+    for test_fold_idx, test_group in enumerate(unique_groups):
+        print(f"\n=== Fold {test_fold_idx + 1}/{n_folds}: Group {test_group} as test set ===")
+        
+        # Get remaining groups (exclude test group)
+        remaining_groups = [g for g in unique_groups if g != test_group]
+        
+        # Skip if we don't have enough groups for proper split
+        if len(remaining_groups) < 2:
+            print(f"  Skipping fold {test_fold_idx + 1}: not enough groups for train/val split")
+            continue
+        
+        # Split remaining groups into train and validation
+        # Use deterministic approach to select validation group
+        np.random.seed(RANDOM_SEED + test_fold_idx)  # Different seed for each fold
+        val_group = np.random.choice(remaining_groups, size=1)[0]
+        train_groups = [g for g in remaining_groups if g != val_group]
+        
+        print(f"  Test group: {test_group}")
+        print(f"  Validation group: {val_group}")
+        print(f"  Training groups: {sorted(train_groups)}")
+        
+        # Collect sites for training, validation, and testing
+        train_sites = [site for site, group in site_to_group.items() if group in train_groups]
+        val_sites = [site for site, group in site_to_group.items() if group == val_group]
+        test_sites = [site for site, group in site_to_group.items() if group == test_group]
+        
+        print(f"  Training sites: {len(train_sites)}")
+        print(f"  Validation sites: {len(val_sites)}")
+        print(f"  Test sites: {len(test_sites)}")
+        
+        # Skip if any split is empty
+        if len(train_sites) == 0 or len(val_sites) == 0 or len(test_sites) == 0:
+            print(f"  Skipping fold {test_fold_idx + 1}: empty train/val/test split")
+            continue
+        
+        # Collect segments for training, validation, and testing
+        train_windows = []
+        for site in train_sites:
+            train_windows.extend(site_windows_dict[site])
+        
+        val_windows = []
+        for site in val_sites:
+            val_windows.extend(site_windows_dict[site])
+        
+        test_windows = []
+        for site in test_sites:
+            test_windows.extend(site_windows_dict[site])
+        
+       
+        
+        print(f"  Created {len(train_windows)} training windows")
+        print(f"  Created {len(val_windows)} validation windows")
+        print(f"  Created {len(test_windows)} test windows")
+        
+        # Skip if any set is empty
+        if len(train_windows) == 0 or len(val_windows) == 0 or len(test_windows) == 0:
+            print(f"  Skipping fold {test_fold_idx + 1} due to empty window set")
+            continue
+        
+        # Convert windows to numpy arrays
+        X_train, y_train = convert_windows_to_numpy(train_windows)
+        X_val, y_val = convert_windows_to_numpy(val_windows)
+        X_test, y_test = convert_windows_to_numpy(test_windows)
+        
+        # Create TensorFlow datasets
+        train_ds = windows_to_tf_dataset(train_windows, batch_size=BATCH_SIZE)
+        val_ds = windows_to_tf_dataset(val_windows, batch_size=BATCH_SIZE, shuffle=False)
+        test_ds = windows_to_tf_dataset(test_windows, batch_size=BATCH_SIZE, shuffle=False)
+        
+        # Get input shape
+        input_shape = (X_train.shape[1], X_train.shape[2])
+        
+        # Combine train and validation data for optimizer
+        X_train_val = np.vstack([X_train, X_val])
+        y_train_val = np.vstack([y_train, y_val])
+        
+        
+        
+        print(f"  Training model for fold {test_fold_idx + 1} using optimizer...")
+        print(f"    Combined dataset: {len(X_train_val)} samples")
+        print(f"    Train samples: {len(X_train)}, Val samples: {len(X_val)}")
+        
+        # Define parameter grid for this fold
+        param_grid = {
+            'architecture': {
+                'n_layers': [2],
+                'units': [64],
+                'dropout_rate': [0.1] 
+            },
+            'optimizer': {   
+                'name': ['Adam'],
+                'learning_rate': [0.001]
+            },
+            'training': {
+                'batch_size': BATCH_SIZE,
+                'epochs': 100,
+                'patience': 10
+            }
         }
-    }
-    
-    # Create and fit optimizer with group-based CV
-    print("\nTraining model with spatial group-based cross-validation...")
-    optimizer = DLOptimizer(
-        base_architecture=create_windowed_nn,
-        task='regression',
-        model_type='windowed_nn',
-        param_grid=param_grid,
-        input_shape=input_shape,
-        output_shape=LABEL_WIDTH,
-        scoring='val_loss',
-        random_state=RANDOM_SEED,
-        use_distribution=False,
-        n_splits=n_cv_folds  # Use specified number of CV folds
-    )
-    
-    # Fit the optimizer with group labels for spatial CV
-    optimizer.fit(
-        X_train, 
-        y_train,
-        is_cv=True,  # Use cross-validation
-        groups=group_labels,  # Pass group labels for grouped CV
-        split_type='spatial'  # Indicate spatial splitting
-    )
-    
-    # Get the best model
-    best_model = optimizer.get_best_model()
-    
-    # Get predictions
-    test_predictions, test_labels_actual = get_predictions(best_model, test_ds, label_scaler)
-    train_predictions, train_labels_actual = get_predictions(best_model, train_ds, label_scaler)
-    
-    # Calculate metrics
-    test_r2 = r2_score(test_labels_actual, test_predictions)
-    test_mse = mean_squared_error(test_labels_actual, test_predictions)
-    test_rmse = np.sqrt(test_mse)
-    test_mae = mean_absolute_error(test_labels_actual, test_predictions)
-    
-    train_r2 = r2_score(train_labels_actual, train_predictions)
-    train_mse = mean_squared_error(train_labels_actual, train_predictions)
-    train_rmse = np.sqrt(train_mse)
-    train_mae = mean_absolute_error(train_labels_actual, train_predictions)
-    
-    # Print results
-    print("\nModel Evaluation Results:")
-    print("\nTraining Set Metrics:")
-    print(f"  R² Score: {train_r2:.6f}")
-    print(f"  RMSE: {train_rmse:.6f}")
-    print(f"  MAE: {train_mae:.6f}")
-    
-    print("\nTest Set Metrics:")
-    print(f"  R² Score: {test_r2:.6f}")
-    print(f"  RMSE: {test_rmse:.6f}")
-    print(f"  MAE: {test_mae:.6f}")
-    
-    # Plot training predictions
-    plt.figure(figsize=(10, 10))
-    plt.scatter(train_labels_actual, train_predictions, alpha=0.5)
-    plt.xlabel('True Values [Sap Velocity]')
-    plt.ylabel('Predictions [Sap Velocity]')
-    plt.title('Training Set: Predictions vs Actual')
-    plt.axis('equal')
-    plt.axis('square')
-    plt.xlim([0, plt.xlim()[1]])
-    plt.ylim([0, plt.ylim()[1]])
-    plt.plot([-100, 100], [-100, 100])
-    plt.savefig(plot_dir / f'spatial_ann_train_predictions_{run_id}.png')
-    plt.close()
-    
-    # Plot test predictions
-    plt.figure(figsize=(10, 10))
-    plt.scatter(test_labels_actual, test_predictions, alpha=0.5)
-    plt.xlabel('True Values [Sap Velocity]')
-    plt.ylabel('Predictions [Sap Velocity]')
-    plt.title('Test Set: Predictions vs Actual')
-    plt.axis('equal')
-    plt.axis('square')
-    plt.xlim([0, plt.xlim()[1]])
-    plt.ylim([0, plt.ylim()[1]])
-    plt.plot([-100, 100], [-100, 100])
-    plt.savefig(plot_dir / f'spatial_ann_test_predictions_{run_id}.png')
-    plt.close()
-    
-    # Plot error distributions
-    train_error = train_predictions - train_labels_actual
-    plt.figure(figsize=(10, 7))
-    plt.hist(train_error, bins=25)
-    plt.xlabel('Prediction Error [Sap Velocity]')
-    plt.ylabel('Count')
-    plt.title('Training Set: Error Distribution')
-    plt.savefig(plot_dir / f'spatial_ann_train_error_distribution_{run_id}.png')
-    plt.close()
-    
-    test_error = test_predictions - test_labels_actual
-    plt.figure(figsize=(10, 7))
-    plt.hist(test_error, bins=25)
-    plt.xlabel('Prediction Error [Sap Velocity]')
-    plt.ylabel('Count')
-    plt.title('Test Set: Error Distribution')
-    plt.savefig(plot_dir / f'spatial_ann_test_error_distribution_{run_id}.png')
-    plt.close()
-    
-    # Plot spatial distribution of sites with group and train/test assignment
-    try:
-        plt.figure(figsize=(12, 8))
         
+        # Create optimizer for this fold
+        optimizer = DLOptimizer(
+            base_architecture=create_windowed_nn,
+            task='regression',
+            model_type='windowed_nn',
+            param_grid=param_grid,
+            input_shape=input_shape,
+            output_shape=LABEL_WIDTH,
+            scoring='val_loss',
+            random_state=RANDOM_SEED + test_fold_idx,
+            use_distribution=False,
+        )
+        
+        # Fit the optimizer with train/val groups
+        # This ensures train and val data are properly separated during CV
+        optimizer.fit(
+            X_train_val, 
+            y_train_val,
+            is_cv=False,  # Use cross-validation with train/val split
+            X_val=X_val,
+            y_val=y_val,
+        )
+        
+        print(f"  Training completed using optimizer")
+        best_model = optimizer.get_best_model()
+        # Get predictions on test set only
+        test_predictions, test_labels_actual = get_predictions(best_model, test_ds, label_scaler)
+        
+        # Calculate test metrics for this fold
+        fold_test_r2 = r2_score(test_labels_actual, test_predictions)
+        fold_test_rmse = np.sqrt(mean_squared_error(test_labels_actual, test_predictions))
+        fold_test_mae = mean_absolute_error(test_labels_actual, test_predictions)
+        
+        # Store results
+        all_test_r2_scores.append(fold_test_r2)
+        all_test_rmse_scores.append(fold_test_rmse)
+        all_test_mae_scores.append(fold_test_mae)
+        
+        # Store predictions for overall analysis
+        all_predictions.extend(test_predictions)
+        all_actuals.extend(test_labels_actual)
+        
+        # Store detailed fold results
+        fold_results.append({
+            'fold': test_fold_idx + 1,
+            'test_group': test_group,
+            'val_group': val_group,
+            'train_groups': train_groups,
+            'n_train_sites': len(train_sites),
+            'n_val_sites': len(val_sites),
+            'n_test_sites': len(test_sites),
+            'n_train_windows': len(train_windows),
+            'n_val_windows': len(val_windows),
+            'n_test_windows': len(test_windows),
+            'test_r2': fold_test_r2,
+            'test_rmse': fold_test_rmse,
+            'test_mae': fold_test_mae,
+            'training_epochs': param_grid['training']['epochs'],
+            #'final_train_loss': final_train_loss,
+            #'final_val_loss': final_val_loss
+        })
+        
+        print(f"  Fold {test_fold_idx + 1} Results:")
+        print(f"    Test R²: {fold_test_r2:.6f}")
+        print(f"    Test RMSE: {fold_test_rmse:.6f}")
+        print(f"    Test MAE: {fold_test_mae:.6f}")
+        
+        # Save model for this fold
+        best_model.save(model_dir / f'spatial_ann_fold_{test_fold_idx + 1}_{run_id}.h5')
+    
+    # Calculate overall statistics
+    if len(all_test_r2_scores) > 0:
+        mean_test_r2 = np.mean(all_test_r2_scores)
+        std_test_r2 = np.std(all_test_r2_scores)
+        mean_test_rmse = np.mean(all_test_rmse_scores)
+        std_test_rmse = np.std(all_test_rmse_scores)
+        mean_test_mae = np.mean(all_test_mae_scores)
+        std_test_mae = np.std(all_test_mae_scores)
+        
+        print(f"\n=== OVERALL LEAVE-FOLD-OUT CROSS-VALIDATION RESULTS ===")
+        print(f"Number of completed folds: {len(all_test_r2_scores)}")
+        print(f"Test R² Score: {mean_test_r2:.6f} ± {std_test_r2:.6f}")
+        print(f"Test RMSE: {mean_test_rmse:.6f} ± {std_test_rmse:.6f}")
+        print(f"Test MAE: {mean_test_mae:.6f} ± {std_test_mae:.6f}")
+        
+        # Create results summary DataFrame
+        results_df = pd.DataFrame(fold_results)
+        results_df.to_csv(Path(__file__).parent / f'spatial_cv_results_{run_id}.csv', index=False)
+        print(f"\nDetailed results saved to: {Path(__file__).parent / f'spatial_cv_results_{run_id}.csv'}")
+        
+        # Plot results across folds
+        plt.figure(figsize=(15, 10))
+        
+        # Plot 1: R² scores by fold
+        plt.subplot(2, 3, 1)
+        plt.bar(range(1, len(all_test_r2_scores) + 1), all_test_r2_scores)
+        plt.axhline(y=mean_test_r2, color='r', linestyle='--', label=f'Mean: {mean_test_r2:.3f}')
+        plt.xlabel('Fold')
+        plt.ylabel('Test R² Score')
+        plt.title('Test R² Score by Fold')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 2: RMSE by fold
+        plt.subplot(2, 3, 2)
+        plt.bar(range(1, len(all_test_rmse_scores) + 1), all_test_rmse_scores)
+        plt.axhline(y=mean_test_rmse, color='r', linestyle='--', label=f'Mean: {mean_test_rmse:.3f}')
+        plt.xlabel('Fold')
+        plt.ylabel('Test RMSE')
+        plt.title('Test RMSE by Fold')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 3: MAE by fold
+        plt.subplot(2, 3, 3)
+        plt.bar(range(1, len(all_test_mae_scores) + 1), all_test_mae_scores)
+        plt.axhline(y=mean_test_mae, color='r', linestyle='--', label=f'Mean: {mean_test_mae:.3f}')
+        plt.xlabel('Fold')
+        plt.ylabel('Test MAE')
+        plt.title('Test MAE by Fold')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 4: Overall predictions vs actual
+        plt.subplot(2, 3, 4)
+        plt.scatter(all_actuals, all_predictions, alpha=0.5)
+        plt.xlabel('True Values [Sap Velocity]')
+        plt.ylabel('Predictions [Sap Velocity]')
+        plt.title(f'All Folds: Predictions vs Actual\n(R² = {mean_test_r2:.3f})')
+        plt.axis('equal')
+        plt.axis('square')
+        
+        # Add 1:1 line
+        min_val = min(min(all_actuals), min(all_predictions))
+        max_val = max(max(all_actuals), max(all_predictions))
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8)
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 5: Error distribution
+        plt.subplot(2, 3, 5)
+        errors = np.array(all_predictions) - np.array(all_actuals)
+        plt.hist(errors, bins=30, alpha=0.7)
+        plt.xlabel('Prediction Error [Sap Velocity]')
+        plt.ylabel('Count')
+        plt.title(f'Error Distribution\n(RMSE = {mean_test_rmse:.3f})')
+        plt.axvline(x=0, color='r', linestyle='--', alpha=0.8)
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 6: Spatial distribution of sites
+        plt.subplot(2, 3, 6)
         # Create a colormap for groups
-        cmap = plt.cm.get_cmap('tab10', n_groups)
+        cmap = plt.cm.get_cmap('tab10', n_folds)
         
-        # Plot each site
+        # Plot each site with different colors for groups
         for i, site in enumerate(site_ids):
             group = spatial_groups[i]
-            is_test = site in test_sites
-            
-            marker = 'X' if is_test else 'o'
-            edgecolor = 'red' if is_test else 'black'
-            
             plt.scatter(
                 longitudes[i],
                 latitudes[i],
                 s=50 + site_info_dict[site]['data_count'] / 1000,  # Size based on data count
                 c=[cmap(group)],
-                marker=marker,
-                edgecolor=edgecolor,
-                linewidth=1.5 if is_test else 0.5,
                 alpha=0.7,
                 label=f"Group {group}" if i == list(spatial_groups).index(group) else ""
             )
         
-        # Add test/train markers to legend
-        plt.scatter([], [], marker='X', edgecolor='red', c='white', linewidth=1.5, label='Test')
-        plt.scatter([], [], marker='o', edgecolor='black', c='white', linewidth=0.5, label='Train')
-        
         plt.xlabel('Longitude')
         plt.ylabel('Latitude')
-        plt.title('Spatial Distribution of Sites by Group and Train/Test Split')
-        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.title('Spatial Distribution of Sites by Group')
+        plt.grid(True, alpha=0.3)
         
-        # Add legend with unique entries
+        # Add legend with unique entries only
         handles, labels = plt.gca().get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
-        plt.legend(by_label.values(), by_label.keys(), loc='best')
+        if len(by_label) <= 10:  # Only show legend if not too many groups
+            plt.legend(by_label.values(), by_label.keys(), bbox_to_anchor=(1.05, 1), loc='upper left')
         
-        plt.savefig(plot_dir / f'spatial_distribution_of_sites_{run_id}.png')
+        plt.tight_layout()
+        plt.savefig(plot_dir / f'spatial_cv_comprehensive_results_{run_id}.png', dpi=300, bbox_inches='tight')
         plt.close()
-    except Exception as e:
-        print(f"Error creating spatial distribution plot: {e}")
+        
+        # Create individual plots for paper-quality figures
+        # Plot predictions vs actual (publication quality)
+        plt.figure(figsize=(8, 8))
+        plt.scatter(all_actuals, all_predictions, alpha=0.6, s=20)
+        plt.xlabel('Observed Sap Velocity', fontsize=14)
+        plt.ylabel('Predicted Sap Velocity', fontsize=14)
+        plt.title(f'Leave-Fold-Out Cross-Validation Results\nR² = {mean_test_r2:.3f} ± {std_test_r2:.3f}, RMSE = {mean_test_rmse:.3f} ± {std_test_rmse:.3f}', 
+                 fontsize=12)
+        
+        # Add 1:1 line
+        min_val = min(min(all_actuals), min(all_predictions))
+        max_val = max(max(all_actuals), max(all_predictions))
+        plt.plot([min_val, max_val], [min_val, max_val], 'r-', alpha=0.8, linewidth=2)
+        
+        plt.grid(True, alpha=0.3)
+        plt.axis('equal')
+        plt.axis('square')
+        plt.tight_layout()
+        plt.savefig(plot_dir / f'spatial_cv_predictions_vs_actual_{run_id}.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        return all_test_r2_scores, all_test_rmse_scores
     
-    # Save the best model
-    best_model.save(model_dir / f'spatial_ann_model_seed_{RANDOM_SEED}_{run_id}.h5')
-    
-    # Return metrics
-    return [test_r2], [test_rmse]
-
+    else:
+        print("ERROR: No folds completed successfully")
+        return [], []
 
 if __name__ == "__main__":
     # Run the main function with spatial cross-validation
-    main(run_id="spatial_ann_group_cv", n_groups=10, test_size=0.2, n_cv_folds=5)
+    main(run_id="spatial_ann_group_cv", n_groups=10)
     
     # Optionally run determinism test
     # verify_determinism_of_spatial_ann_model()

@@ -300,7 +300,7 @@ def main(run_id="default"):
     print(f"Starting windowed ANN model training with seed {RANDOM_SEED} (run_id: {run_id})")
     
     # Load and preprocess data in a deterministic manner
-    data_dir = Path('./outputs/processed_data/merged/site/gap_filled_size1_hourly_after_filter')
+    data_dir = Path('./outputs/processed_data/merged/site/hourly_after_outlier_removal')
     data_list = list(data_dir.glob('*merged.csv'))
     
     if not data_list:

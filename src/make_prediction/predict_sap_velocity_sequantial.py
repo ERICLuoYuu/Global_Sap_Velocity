@@ -4,6 +4,11 @@ Improved Sap Velocity Prediction Script
 
 This script works with preprocessed ERA5-Land data to predict sap velocity,
 using an improved index mapping approach for more reliable time series predictions.
+
+IMPROVEMENTS OVER ORIGINAL:
+1. Conditionally creates time windows based on model config (IS_WINDOWING)
+2. Dynamically loads features from model config (feature_names)
+3. Applies data transformations based on config (preprocessing settings)
 """
 import os
 import sys
@@ -16,17 +21,19 @@ from datetime import datetime
 from pathlib import Path
 import logging
 import tensorflow as tf
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 import time
 import warnings
 import json
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any, Tuple
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("sap_velocity_prediction.log"),
+        logging.FileHandler(Path(__file__).parent / "sap_velocity_prediction.log"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -55,140 +62,585 @@ except ImportError:
     MODEL_TYPES = DEFAULT_PARAMS['MODEL_TYPES']
 
 
-def load_models(models_dir=None, model_types=None):
-    """
-    Load saved models for each model type.
+# =============================================================================
+# NEW: Model Configuration Classes
+# =============================================================================
 
+@dataclass
+class ModelConfig:
+    """
+    Data class to hold model configuration loaded from JSON.
+    
+    This enables config-driven behavior for:
+    - Windowing (IS_WINDOWING)
+    - Feature selection (feature_names)
+    - Data transformations (preprocessing)
+    """
+    model_type: str
+    run_id: str = "default"
+    best_params: Dict[str, Any] = field(default_factory=dict)
+    
+    # Preprocessing settings
+    target_transform: Optional[str] = None  # e.g., "log1p", "sqrt", "log"
+    feature_scaling: Optional[str] = None   # e.g., "StandardScaler", "MinMaxScaler"
+    
+    # Data info / windowing settings
+    is_windowing: bool = False
+    input_width: Optional[int] = None
+    label_width: Optional[int] = None
+    shift: Optional[int] = None
+    n_samples: Optional[int] = None
+    n_features: Optional[int] = None
+    
+    # Feature names from training
+    feature_names: List[str] = field(default_factory=list)
+    
+    # Other settings
+    random_seed: int = 42
+    split_type: str = "random"
+    cv_results: Dict[str, Any] = field(default_factory=dict)
+    
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'ModelConfig':
+        """Create ModelConfig from a dictionary (loaded from JSON)."""
+        # Extract preprocessing settings
+        preprocessing = config_dict.get('preprocessing', {})
+        target_transform = preprocessing.get('target_transform')
+        feature_scaling = preprocessing.get('feature_scaling')
+        
+        # Extract data_info settings
+        data_info = config_dict.get('data_info', {})
+        is_windowing = data_info.get('IS_WINDOWING', False)
+        input_width = data_info.get('input_width')
+        label_width = data_info.get('label_width')
+        shift = data_info.get('shift')
+        n_samples = data_info.get('n_samples')
+        n_features = data_info.get('n_features')
+        
+        return cls(
+            model_type=config_dict.get('model_type', 'unknown'),
+            run_id=config_dict.get('run_id', 'default'),
+            best_params=config_dict.get('best_params', {}),
+            target_transform=target_transform,
+            feature_scaling=feature_scaling,
+            is_windowing=is_windowing,
+            input_width=input_width,
+            label_width=label_width,
+            shift=shift,
+            n_samples=n_samples,
+            n_features=n_features,
+            feature_names=config_dict.get('feature_names', []),
+            random_seed=config_dict.get('random_seed', 42),
+            split_type=config_dict.get('split_type', 'random'),
+            cv_results=config_dict.get('cv_results', {})
+        )
+    
+    @classmethod
+    def from_json(cls, json_path: Path) -> 'ModelConfig':
+        """Load ModelConfig from a JSON file."""
+        with open(json_path, 'r') as f:
+            config_dict = json.load(f)
+        return cls.from_dict(config_dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert ModelConfig to dictionary."""
+        return {
+            'model_type': self.model_type,
+            'run_id': self.run_id,
+            'best_params': self.best_params,
+            'preprocessing': {
+                'target_transform': self.target_transform,
+                'feature_scaling': self.feature_scaling
+            },
+            'data_info': {
+                'IS_WINDOWING': self.is_windowing,
+                'input_width': self.input_width,
+                'label_width': self.label_width,
+                'shift': self.shift,
+                'n_samples': self.n_samples,
+                'n_features': self.n_features
+            },
+            'feature_names': self.feature_names,
+            'random_seed': self.random_seed,
+            'split_type': self.split_type,
+            'cv_results': self.cv_results
+        }
+
+
+class DataTransformer:
+    """
+    Handles data transformations based on model config.
+    
+    Supports:
+    - Target transforms: log1p, log, sqrt, none
+    - Feature scaling: StandardScaler, MinMaxScaler, RobustScaler
+    """
+    
+    def __init__(self, config: Optional[ModelConfig] = None):
+        self.config = config
+        self.target_transform = config.target_transform if config else None
+        self.feature_scaling = config.feature_scaling if config else None
+    
+    def get_scaler(self) -> Optional[Any]:
+        """Get the appropriate scaler based on config."""
+        if self.feature_scaling is None:
+            return None
+        
+        scaler_map = {
+            'StandardScaler': StandardScaler(),
+            'MinMaxScaler': MinMaxScaler(),
+            'RobustScaler': RobustScaler(),
+            'standard': StandardScaler(),
+            'minmax': MinMaxScaler(),
+            'robust': RobustScaler()
+        }
+        
+        return scaler_map.get(self.feature_scaling)
+    
+    def transform_target(self, y: np.ndarray, inverse: bool = False) -> np.ndarray:
+        """
+        Apply or inverse target transformation based on config.
+        
+        Parameters:
+        -----------
+        y : np.ndarray
+            Target values
+        inverse : bool
+            If True, apply inverse transformation
+            
+        Returns:
+        --------
+        np.ndarray
+            Transformed values
+        """
+        if self.target_transform is None:
+            return y
+        
+        y = np.asarray(y)
+        
+        if self.target_transform == 'log1p':
+            if inverse:
+                return np.expm1(y)
+            else:
+                return np.log1p(np.maximum(y, 0))
+        elif self.target_transform == 'log':
+            if inverse:
+                return np.exp(y)
+            else:
+                return np.log(np.maximum(y, 1e-8))
+        elif self.target_transform == 'sqrt':
+            if inverse:
+                return np.square(y)
+            else:
+                return np.sqrt(np.maximum(y, 0))
+        else:
+            logger.warning(f"Unknown target transform: {self.target_transform}. Returning unchanged.")
+            return y
+    
+    def should_transform_target(self) -> bool:
+        """Check if target transformation should be applied."""
+        return self.target_transform is not None
+    
+    def should_scale_features(self) -> bool:
+        """Check if feature scaling should be applied."""
+        return self.feature_scaling is not None
+
+
+def get_model_dir(models_dir: Path, model_type: str, run_id: str) -> Path:
+    """
+    Get the model directory path based on new structure.
+    
+    New structure: ./models/{model_type}/{run_id}/
+    
     Parameters:
     -----------
-    models_dir : str or Path, optional
-        Directory containing model files. If None, uses './outputs/models/'
-    model_types : list, optional
-        List of model types to load. If None, loads all available models.
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model (e.g., 'xgb', 'rf', 'cnn_lstm')
+    run_id : str
+        Run identifier
+        
+    Returns:
+    --------
+    Path
+        Path to the model directory
+    """
+    return models_dir / model_type / run_id
 
+
+def get_model_path(models_dir: Path, model_type: str, run_id: str) -> Path:
+    """
+    Get the model file path based on new naming convention.
+    
+    Model file: FINAL_{model_type}_{run_id}.joblib
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model
+    run_id : str
+        Run identifier
+        
+    Returns:
+    --------
+    Path
+        Path to the model file
+    """
+    model_dir = get_model_dir(models_dir, model_type, run_id)
+    return model_dir / f"FINAL_{model_type}_{run_id}.joblib"
+
+
+def get_config_path(models_dir: Path, model_type: str, run_id: str) -> Path:
+    """
+    Get the config file path based on new naming convention.
+    
+    Config file: FINAL_config_{run_id}.json
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model
+    run_id : str
+        Run identifier
+        
+    Returns:
+    --------
+    Path
+        Path to the config file
+    """
+    model_dir = get_model_dir(models_dir, model_type, run_id)
+    return model_dir / f"FINAL_config_{run_id}.json"
+
+
+def get_scaler_paths(models_dir: Path, model_type: str, run_id: str) -> Tuple[Path, Path]:
+    """
+    Get the scaler file paths based on new naming convention.
+    
+    Feature scaler: FINAL_scaler_{run_id}_feature.pkl
+    Label scaler: FINAL_scaler_{run_id}_label.pkl
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model
+    run_id : str
+        Run identifier
+        
+    Returns:
+    --------
+    Tuple[Path, Path]
+        (feature_scaler_path, label_scaler_path)
+    """
+    model_dir = get_model_dir(models_dir, model_type, run_id)
+    feature_scaler_path = model_dir / f"FINAL_scaler_{run_id}_feature.pkl"
+    label_scaler_path = model_dir / f"FINAL_scaler_{run_id}_label.pkl"
+    return feature_scaler_path, label_scaler_path
+
+
+def load_model_config(config_path: Path) -> Optional[ModelConfig]:
+    """
+    Load model configuration from JSON file.
+    
+    Parameters:
+    -----------
+    config_path : Path
+        Path to the model config JSON file
+        
+    Returns:
+    --------
+    ModelConfig or None
+        Loaded configuration or None if loading fails
+    """
+    try:
+        if not config_path.exists():
+            logger.warning(f"Config file not found: {config_path}")
+            return None
+            
+        config = ModelConfig.from_json(config_path)
+        logger.info(f"Loaded model config for {config.model_type} (run_id: {config.run_id})")
+        logger.info(f"  - IS_WINDOWING: {config.is_windowing}")
+        if config.is_windowing:
+            logger.info(f"  - input_width: {config.input_width}, label_width: {config.label_width}, shift: {config.shift}")
+        logger.info(f"  - target_transform: {config.target_transform}")
+        logger.info(f"  - feature_scaling: {config.feature_scaling}")
+        logger.info(f"  - Number of features in config: {len(config.feature_names)}")
+        
+        return config
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in config file {config_path}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error loading config from {config_path}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+
+def find_available_run_ids(models_dir: Path, model_type: str) -> List[str]:
+    """
+    Find all available run_ids for a given model type.
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model
+        
+    Returns:
+    --------
+    List[str]
+        List of available run_ids
+    """
+    type_dir = models_dir / model_type
+    
+    if not type_dir.exists():
+        logger.warning(f"Model type directory not found: {type_dir}")
+        return []
+    
+    run_ids = []
+    for subdir in type_dir.iterdir():
+        if subdir.is_dir():
+            # Check if this directory contains a valid model file
+            model_file = subdir / f"FINAL_{model_type}_{subdir.name}.joblib"
+            if model_file.exists():
+                run_ids.append(subdir.name)
+    
+    return sorted(run_ids)
+
+
+# =============================================================================
+# Model Loading (Updated for new directory structure)
+# =============================================================================
+
+def load_model(models_dir: Path, model_type: str, run_id: str) -> Optional[Any]:
+    """
+    Load a single model based on new directory structure.
+    
+    Structure: ./models/{model_type}/{run_id}/FINAL_{model_type}_{run_id}.joblib
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model (e.g., 'xgb', 'rf', 'cnn_lstm')
+    run_id : str
+        Run identifier
+        
+    Returns:
+    --------
+    model object or None
+        Loaded model or None if loading fails
+    """
+    model_path = get_model_path(models_dir, model_type, run_id)
+    
+    if not model_path.exists():
+        # Try to find .keras file for deep learning models
+        model_dir = get_model_dir(models_dir, model_type, run_id)
+        keras_path = model_dir / f"FINAL_{model_type}_{run_id}.keras"
+        
+        if keras_path.exists():
+            model_path = keras_path
+        else:
+            logger.error(f"Model file not found: {model_path}")
+            return None
+    
+    try:
+        if model_path.suffix == '.joblib':
+            logger.info(f"Loading {model_type} model from {model_path}")
+            model = joblib.load(model_path)
+        elif model_path.suffix == '.keras':
+            logger.info(f"Loading {model_type} Keras model from {model_path}")
+            model = tf.keras.models.load_model(model_path)
+        else:
+            logger.error(f"Unknown model format: {model_path.suffix}")
+            return None
+            
+        return model
+        
+    except Exception as e:
+        logger.error(f"Error loading {model_type} model from {model_path}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+
+def load_models(models_dir: Path, model_type: str, run_id: str) -> Dict[str, Any]:
+    """
+    Load model for specified model_type and run_id.
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory (e.g., './models')
+    model_type : str
+        Type of model (e.g., 'xgb', 'rf', 'cnn_lstm')
+    run_id : str
+        Run identifier
+        
     Returns:
     --------
     dict
-        Dictionary mapping model types to loaded models
+        Dictionary mapping model type to loaded model
     """
-    if models_dir is None:
-        models_dir = Path('./outputs/models')
-    else:
-        models_dir = Path(models_dir)  # Ensure it's a Path object
-
-    if model_types is None:
-        # Default list if none provided
-        model_types = ['ann', 'lstm', 'transformer', 'cnn_lstm', 'rf', 'svr', 'xgb']
-        logger.info(f"No model types specified, attempting to load default types: {model_types}")
-
+    models_dir = Path(models_dir)
     loaded_models = {}
-
-    for model_type in model_types:
-        model_path = None
-        # Define model directory based on convention
-        type_dir = models_dir / (model_type + '_regression')
-
-        # Check if directory exists
-        if not type_dir.exists():
-            logger.warning(f"Directory for {model_type} not found at {type_dir}")
-            continue
-
-        # Find the most recent model file based on type
-        if model_type in ['rf', 'svr', 'xgb']:
-            # Traditional ML models use .joblib format
-            model_files = list(type_dir.glob('*.joblib'))
-            if model_files:
-                # Sort by modification time (most recent first)
-                model_path = sorted(model_files, key=lambda x: x.stat().st_mtime, reverse=True)[0]
-                # Load the model
-                try:
-                    logger.info(f"Loading {model_type} model from {model_path}")
-                    model = joblib.load(model_path)
-                    loaded_models[model_type] = model
-                except Exception as e:
-                    logger.error(f"Error loading {model_type} model from {model_path}: {e}")
-            else:
-                logger.warning(f"No .joblib files found for {model_type} in {type_dir}")
-
-        else:
-            # Deep learning models
-            model_files = list(type_dir.glob('*.keras'))
-            if model_files:
-                # Use the most recent .keras file
-                model_path = sorted(model_files, key=lambda x: x.stat().st_mtime, reverse=True)[0]
-            else:
-                # Check for saved model directories
-                model_dirs = [d for d in type_dir.iterdir() if d.is_dir() and (d / 'saved_model.pb').exists()]
-                if model_dirs:
-                    model_path = sorted(model_dirs, key=lambda x: x.stat().st_mtime, reverse=True)[0]
-                else:
-                    logger.warning(f"No model files found for {model_type} in {type_dir}")
-                    continue
-
-            # Load the model
-            if model_path:
-                try:
-                    logger.info(f"Loading {model_type} model from {model_path}")
-                    model = tf.keras.models.load_model(model_path)
-                    loaded_models[model_type] = model
-                except Exception as e:
-                    logger.error(f"Error loading {model_type} model from {model_path}: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-
-    if not loaded_models:
-        logger.error(f"Failed to load any models from the specified types: {model_types}")
+    
+    model = load_model(models_dir, model_type, run_id)
+    if model is not None:
+        loaded_models[model_type] = model
+        logger.info(f"Successfully loaded model: {model_type}/{run_id}")
     else:
-        logger.info(f"Successfully loaded {len(loaded_models)} models: {list(loaded_models.keys())}")
-
+        logger.error(f"Failed to load model: {model_type}/{run_id}")
+    
     return loaded_models
 
 
-def load_scalers(scaler_dir=None):
+def load_models_multiple(models_dir: Path, model_specs: List[Tuple[str, str]]) -> Dict[str, Any]:
     """
-    Load feature and label scalers.
-
+    Load multiple models with different model_types and run_ids.
+    
     Parameters:
     -----------
-    scaler_dir : str or Path, optional
-        Directory containing scalers. If None, uses './outputs/scalers/'.
+    models_dir : Path
+        Base models directory
+    model_specs : List[Tuple[str, str]]
+        List of (model_type, run_id) tuples
+        
+    Returns:
+    --------
+    dict
+        Dictionary mapping model_type to loaded model
+    """
+    models_dir = Path(models_dir)
+    loaded_models = {}
+    
+    for model_type, run_id in model_specs:
+        model = load_model(models_dir, model_type, run_id)
+        if model is not None:
+            loaded_models[model_type] = model
+            logger.info(f"Successfully loaded model: {model_type}/{run_id}")
+    
+    if not loaded_models:
+        logger.error("Failed to load any models")
+    else:
+        logger.info(f"Loaded {len(loaded_models)} models: {list(loaded_models.keys())}")
+    
+    return loaded_models
+
+
+def load_model_config_for_run(models_dir: Path, model_type: str, run_id: str) -> Optional[ModelConfig]:
+    """
+    Load model configuration for a specific model_type and run_id.
+    
+    Config file: ./models/{model_type}/{run_id}/FINAL_config_{run_id}.json
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model
+    run_id : str
+        Run identifier
+        
+    Returns:
+    --------
+    ModelConfig or None
+    """
+    config_path = get_config_path(models_dir, model_type, run_id)
+    return load_model_config(config_path)
+
+
+def load_model_configs(models_dir: Path, model_type: str, run_id: str) -> Dict[str, ModelConfig]:
+    """
+    Load model configuration for specified model_type and run_id.
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model
+    run_id : str
+        Run identifier
+        
+    Returns:
+    --------
+    dict
+        Dictionary mapping model type to ModelConfig
+    """
+    model_configs = {}
+    
+    config = load_model_config_for_run(models_dir, model_type, run_id)
+    if config:
+        model_configs[model_type] = config
+        logger.info(f"Loaded config for {model_type}/{run_id}")
+    else:
+        logger.warning(f"No config found for {model_type}/{run_id}")
+    
+    return model_configs
+
+
+def load_scalers(models_dir: Path, model_type: str, run_id: str) -> Tuple[Optional[Any], Optional[Any]]:
+    """
+    Load feature and label scalers from model directory.
+    
+    Scaler files:
+    - FINAL_scaler_{run_id}_feature.pkl
+    - FINAL_scaler_{run_id}_label.pkl
+    
+    If scalers are not found, returns None (scaling will be skipped).
+    
+    Parameters:
+    -----------
+    models_dir : Path
+        Base models directory
+    model_type : str
+        Type of model
+    run_id : str
+        Run identifier
 
     Returns:
     --------
     tuple
-        (feature_scaler, label_scaler) or (None, None) if not found
+        (feature_scaler, label_scaler) - either can be None if not found
     """
-    if scaler_dir is None:
-        scaler_dir = Path('./outputs/scalers')
-    else:
-        scaler_dir = Path(scaler_dir)  # Ensure it's a Path object
-
+    models_dir = Path(models_dir)
+    feature_scaler_path, label_scaler_path = get_scaler_paths(models_dir, model_type, run_id)
+    
     feature_scaler = None
     label_scaler = None
-    try:
-        feature_scaler_path = scaler_dir / 'feature_scaler.pkl'
-        label_scaler_path = scaler_dir / 'label_scaler.pkl'
-
-        if feature_scaler_path.exists():
+    
+    # Load feature scaler (optional)
+    if feature_scaler_path.exists():
+        try:
             feature_scaler = joblib.load(feature_scaler_path)
             logger.info(f"Loaded feature scaler from {feature_scaler_path}")
-        else:
-            logger.warning(f"Feature scaler not found at {feature_scaler_path}")
-
-        if label_scaler_path.exists():
+        except Exception as e:
+            logger.warning(f"Error loading feature scaler: {e}")
+    else:
+        logger.info(f"No feature scaler found at {feature_scaler_path}. Feature scaling will be skipped.")
+    
+    # Load label scaler (optional)
+    if label_scaler_path.exists():
+        try:
             label_scaler = joblib.load(label_scaler_path)
             logger.info(f"Loaded label scaler from {label_scaler_path}")
-        else:
-            logger.warning(f"Label scaler not found at {label_scaler_path}")
-
-    except FileNotFoundError as e:
-        logger.error(f"Scaler file not found: {e}")
-    except Exception as e:
-        logger.error(f"Error loading scalers from {scaler_dir}: {e}")
-
-    if feature_scaler is None or label_scaler is None:
-        logger.warning("One or both scalers could not be loaded. Predictions might be inaccurate or fail.")
-
+        except Exception as e:
+            logger.warning(f"Error loading label scaler: {e}")
+    else:
+        logger.info(f"No label scaler found at {label_scaler_path}. Label scaling will be skipped.")
+    
     return feature_scaler, label_scaler
 
 
@@ -218,10 +670,8 @@ def load_preprocessed_data(data_file):
         try:
             with open(data_file_path, 'r') as f:
                 header = f.readline().strip().split(',')
-                # Find potential timestamp columns
                 time_cols = [col for col in header if 'time' in col.lower() or 'date' in col.lower()]
                 
-                # Try to read first data row
                 first_row_line = f.readline()
                 if not first_row_line:
                     logger.error(f"Data file {data_file_path} appears to be empty or only has a header.")
@@ -233,21 +683,17 @@ def load_preprocessed_data(data_file):
         # Load the data using pandas
         df = pd.read_csv(data_file_path, low_memory=False).dropna()
         df = df.iloc[:, 1:]
-        # Try to set index using timestamp columns if they exist
-        # check if there are multiple timestamp columns
-        # and set the second one as index
+        
         timestamp_col = 'timestamp.1'
-        # sort by timestamp if it exists
         df = df.sort_values(by=timestamp_col) if timestamp_col in df.columns else df
 
         logger.info(f"Loaded data with {len(df)} rows and {len(df.columns)} columns")
         
-        # Basic data validation
         if df.empty:
             logger.error("Loaded DataFrame is empty.")
             return None
             
-        # Check for important columns
+        # Check for important columns (warning only)
         required_features = ['ta', 'vpd', 'sw_in', 'ppfd_in', 'ext_rad', 'ws', 'annual_mean_temperature', 'annual_precipitation']
         missing_features = [f for f in required_features if f not in df.columns]
         if missing_features:
@@ -262,9 +708,15 @@ def load_preprocessed_data(data_file):
         return None
 
 
+# =============================================================================
+# Windowing Functions (CONDITIONAL based on config)
+# =============================================================================
+
 def create_prediction_windows_improved(df, feature_columns, input_width=8, shift=1, batch_size=32):
     """
     Create time series windows for prediction with explicit metadata tracking.
+    
+    NOTE: This function is only called when IS_WINDOWING=True in the model config.
     
     Parameters:
     -----------
@@ -287,18 +739,14 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
         - Dictionary mapping location identifier to sorted indices
         - Total number of windows created
     """
-    import tensorflow as tf
-    
     logger.info(f"Creating prediction windows with input_width={input_width}, shift={shift}, batch_size={batch_size}")
     logger.info(f"Using features: {feature_columns}")
     
-    # Ensure unique index for reliable mapping
     df_processed = df.copy()
     if not df_processed.index.is_unique:
         logger.warning("DataFrame index is not unique. Resetting index for reliable mapping.")
         df_processed = df_processed.reset_index(drop=True)
     
-    # Store all windows with their metadata
     window_data = []
     window_metadata = []
     location_indices_map = {}
@@ -312,7 +760,6 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
         time_col = 'timestamp'
         logger.info(f"Using 'timestamp' column for time reference.")
     else:
-        # Try to find other time columns
         time_cols = [col for col in df_processed.columns 
                     if 'time' in col.lower() or 'date' in col.lower()]
         if time_cols:
@@ -341,9 +788,7 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
     
     total_windows = 0
     
-    # Process each location
     for location_id, group_df in location_groups:
-        # Sort by timestamp if available
         if time_col and time_col in group_df.columns:
             try:
                 group_df = group_df.sort_values(time_col)
@@ -352,40 +797,29 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
                 logger.warning(f"Error sorting by {time_col}: {e}. Using index order.")
                 group_df = group_df.sort_index()
         else:
-            # Fall back to index sorting for consistency
             group_df = group_df.sort_index()
         
-        # Store sorted indices for this location
         location_indices_map[location_id] = group_df.index.tolist()
         
-        # Check for required features
         missing_cols = [col for col in feature_columns if col not in group_df.columns]
         if missing_cols:
             logger.error(f"Missing required feature columns for location {location_id}: {missing_cols}")
             continue
             
-        # Get feature data as numpy array
         feature_data = group_df[feature_columns].values
         
-        # Skip if not enough data for a single window
         if len(feature_data) < input_width:
             logger.warning(f"Location {location_id} has insufficient data points: {len(feature_data)} < {input_width}")
             continue
             
-        # Create windows for this location
         for i in range(len(feature_data) - input_width + 1):
-            # Extract the window
             window = feature_data[i:i+input_width]
-            
-            # Store window data
             window_data.append(window)
             
-            # Calculate target index for this prediction based on shift
             target_idx = None
             if i + input_width - 1 + shift < len(group_df):
                 target_idx = group_df.index[i + input_width - 1 + shift]
             
-            # Store comprehensive metadata for each window
             metadata = {
                 'location_id': location_id,
                 'window_start_idx': group_df.index[i],
@@ -402,7 +836,6 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
         logger.error("No windows were created. Cannot proceed with prediction.")
         return None, [], {}, 0
     
-    # Convert window data to numpy array for TensorFlow
     try:
         windows_array = np.array(window_data)
         logger.info(f"Created a total of {total_windows} windows with shape {windows_array.shape}")
@@ -410,7 +843,6 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
         logger.error(f"Could not convert windows to numpy array: {ve}")
         return None, [], {}, 0
     
-    # Create TensorFlow dataset
     try:
         windows_dataset = tf.data.Dataset.from_tensor_slices(windows_array)
         windows_dataset = windows_dataset.batch(batch_size)
@@ -422,6 +854,42 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
     
     return windows_dataset, window_metadata, location_indices_map, total_windows
 
+
+def prepare_flat_features(df: pd.DataFrame, feature_columns: List[str]) -> Tuple[np.ndarray, List[int]]:
+    """
+    Prepare flat (non-windowed) features for traditional ML models.
+    
+    NOTE: This function is called when IS_WINDOWING=False in the model config.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        DataFrame with features
+    feature_columns : list
+        List of feature column names
+        
+    Returns:
+    --------
+    tuple: (np.ndarray, list)
+        - Feature array (n_samples, n_features)
+        - List of original DataFrame indices
+    """
+    logger.info(f"Preparing flat features (no windowing) with {len(feature_columns)} features")
+    
+    df_features = df[feature_columns].copy()
+    valid_mask = ~df_features.isna().any(axis=1)
+    
+    X = df_features[valid_mask].values
+    indices = df.index[valid_mask].tolist()
+    
+    logger.info(f"Prepared {len(X)} samples with shape {X.shape}")
+    
+    return X, indices
+
+
+# =============================================================================
+# Prediction Mapping Functions
+# =============================================================================
 
 def map_predictions_to_df_improved(df, predictions, window_metadata, model_name):
     """
@@ -446,7 +914,6 @@ def map_predictions_to_df_improved(df, predictions, window_metadata, model_name)
     """
     logger.info(f"Mapping {len(predictions)} {model_name} predictions back to DataFrame")
     
-    # Validate inputs
     if len(predictions) != len(window_metadata):
         logger.error(f"Prediction count ({len(predictions)}) doesn't match metadata count ({len(window_metadata)})")
         n_predictions = min(len(predictions), len(window_metadata))
@@ -454,43 +921,33 @@ def map_predictions_to_df_improved(df, predictions, window_metadata, model_name)
     else:
         n_predictions = len(predictions)
     
-    # Pre-allocate target indices and values for better performance
     target_indices = []
     pred_values = []
-    
-    # New arrays for metadata
     location_ids = []
     window_starts = []
     window_ends = []
     window_positions = []
     
-    # Extract valid target indices and corresponding predictions
     for i in range(n_predictions):
         target_idx = window_metadata[i]['prediction_target_idx']
         if target_idx is not None:
             target_indices.append(target_idx)
             pred_values.append(predictions[i])
-            
-            # Extract metadata
             location_ids.append(window_metadata[i]['location_id'])
             window_starts.append(window_metadata[i]['window_start_idx'])
             window_ends.append(window_metadata[i]['window_end_idx'])
             window_positions.append(window_metadata[i]['window_position'])
     
-    # Check for duplicate target indices
     if len(target_indices) != len(set(target_indices)):
         logger.warning(f"Found duplicate target indices. Some predictions may overwrite others.")
-        # Count duplicates for detailed logging
         from collections import Counter
         dup_counts = Counter(target_indices)
         duplicates = {idx: count for idx, count in dup_counts.items() if count > 1}
         logger.debug(f"Duplicate indices: {duplicates}")
     
-    # Create a series with predictions indexed by their target indices
     pred_series = pd.Series(pred_values, index=target_indices, dtype=float)
     mapped_count = len(pred_series)
     
-    # Create series for metadata
     location_series = pd.Series(location_ids, index=target_indices)
     window_start_series = pd.Series(window_starts, index=target_indices)
     window_end_series = pd.Series(window_ends, index=target_indices)
@@ -498,36 +955,64 @@ def map_predictions_to_df_improved(df, predictions, window_metadata, model_name)
     
     logger.info(f"Successfully mapped {mapped_count} {model_name} predictions")
     
-    # Add the predictions to a copy of the original DataFrame
     df_with_preds = df.copy()
     column_name = f'sap_velocity_{model_name}'
     
-    # Check that all target indices exist in the DataFrame
     missing_indices = [idx for idx in target_indices if idx not in df.index]
     if missing_indices:
         logger.warning(f"Found {len(missing_indices)} target indices that don't exist in the DataFrame index")
         logger.debug(f"First few missing indices: {missing_indices[:5]}")
     
-    # Align the predictions with the DataFrame
     df_with_preds[column_name] = pred_series
-    
-    # Align metadata with the DataFrame
     df_with_preds[f'{column_name}_location'] = location_series
     df_with_preds[f'{column_name}_window_start'] = window_start_series
     df_with_preds[f'{column_name}_window_end'] = window_end_series
     df_with_preds[f'{column_name}_window_pos'] = window_pos_series
     
-    # Verify mapping success
     filled_count = df_with_preds[column_name].notna().sum()
     if filled_count != mapped_count:
         logger.warning(f"Only {filled_count} of {mapped_count} predictions were added to DataFrame. Check index alignment.")
     
-    # Check for potential mapping issues
     mapped_pct = mapped_count / n_predictions * 100 if n_predictions > 0 else 0
-    if mapped_pct < 80:  # Warn if less than 80% mapped
+    if mapped_pct < 80:
         logger.warning(f"Only {mapped_pct:.1f}% of {model_name} predictions were mapped. Check index alignment and shift value.")
     
     return df_with_preds
+
+
+def map_flat_predictions_to_df(df: pd.DataFrame, predictions: np.ndarray, indices: List[int], model_name: str) -> pd.DataFrame:
+    """
+    Maps flat (non-windowed) predictions back to the original DataFrame.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        The original DataFrame
+    predictions : np.ndarray
+        Array of model predictions
+    indices : list
+        List of DataFrame indices corresponding to predictions
+    model_name : str
+        Name of the model for the prediction column
+        
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with predictions mapped back to original indices
+    """
+    logger.info(f"Mapping {len(predictions)} flat {model_name} predictions back to DataFrame")
+    
+    df_with_preds = df.copy()
+    column_name = f'sap_velocity_{model_name}'
+    
+    pred_series = pd.Series(predictions.flatten(), index=indices, dtype=float)
+    df_with_preds[column_name] = pred_series
+    
+    filled_count = df_with_preds[column_name].notna().sum()
+    logger.info(f"Successfully mapped {filled_count} {model_name} predictions")
+    
+    return df_with_preds
+
 
 def verify_prediction_mapping(df_predictions, model_name):
     """
@@ -548,17 +1033,14 @@ def verify_prediction_mapping(df_predictions, model_name):
     pred_col = f'sap_velocity_{model_name}'
     loc_col = f'{pred_col}_location'
     
-    # Check if prediction column exists
     if pred_col not in df_predictions.columns:
         logger.error(f"Prediction column {pred_col} not found")
         return False
         
-    # Check if metadata columns exist
     if loc_col not in df_predictions.columns:
         logger.warning(f"Metadata columns for {model_name} not found. Verification not possible.")
         return False
     
-    # Get rows with predictions
     pred_rows = df_predictions[df_predictions[pred_col].notna()]
     pred_count = len(pred_rows)
     
@@ -568,43 +1050,89 @@ def verify_prediction_mapping(df_predictions, model_name):
     
     logger.info(f"Verifying {pred_count} predictions for {model_name}")
     
-    # Check for location consistency if 'name' column exists
     if 'name' in df_predictions.columns:
-        # Get rows where both name and prediction location are available
         loc_rows = pred_rows.dropna(subset=['name', loc_col])
-        
-        # Check if prediction locations match data locations
         location_matches = loc_rows['name'] == loc_rows[loc_col]
         match_pct = location_matches.mean() * 100
         
         logger.info(f"Location match: {match_pct:.1f}% of predictions mapped to correct locations")
         
-        # If significant mismatches, show examples
         if match_pct < 95:
             mismatches = loc_rows[~location_matches].head(5)
             logger.warning(f"Examples of location mismatches:\n{mismatches[['name', loc_col, pred_col]]}")
     
-    # Output summary of predictions by location
     if loc_col in pred_rows.columns:
         location_summary = pred_rows[loc_col].value_counts().head(10)
         logger.info(f"Predictions by location (top 10):\n{location_summary}")
     
-    # Check window coherence
     window_start_col = f'{pred_col}_window_start'
     window_end_col = f'{pred_col}_window_end'
     
     if window_start_col in pred_rows.columns and window_end_col in pred_rows.columns:
-        # Check that window end is after window start
         valid_windows = pred_rows[window_end_col] >= pred_rows[window_start_col]
         valid_pct = valid_windows.mean() * 100
-        
         logger.info(f"Window coherence: {valid_pct:.1f}% of prediction windows are valid")
     
     logger.info(f"Prediction mapping verification completed for {model_name}")
     return True
-def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, label_width=1, shift=1):
+
+
+# =============================================================================
+# Feature Preparation (CONFIG-DRIVEN)
+# =============================================================================
+
+def get_feature_columns_from_config(df: pd.DataFrame, config: Optional[ModelConfig]) -> List[str]:
+    """
+    Get feature columns based on model config, with fallback to default detection.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input DataFrame
+    config : ModelConfig, optional
+        Model configuration containing feature_names
+        
+    Returns:
+    --------
+    list
+        List of feature column names to use
+    """
+    if config and config.feature_names:
+        # Use features from config
+        available = []
+        missing = []
+        
+        for feature in config.feature_names:
+            if feature in df.columns:
+                available.append(feature)
+            else:
+                # Try case-insensitive match
+                matched = False
+                for col in df.columns:
+                    if col.lower() == feature.lower():
+                        available.append(col)
+                        matched = True
+                        logger.info(f"Matched feature '{feature}' to column '{col}' (case-insensitive)")
+                        break
+                if not matched:
+                    missing.append(feature)
+        
+        if missing:
+            logger.warning(f"Features from config not found in data: {missing}")
+        
+        logger.info(f"Using {len(available)} features from config")
+        return available
+    else:
+        # Fallback to default feature detection
+        logger.info("No feature_names in config. Using default feature detection.")
+        return None  # Signal to use default detection
+
+
+def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, label_width=1, shift=1, config=None):
     """
     Prepare features from preprocessed data with improved error handling.
+    
+    IMPROVED: Now uses config.feature_names if available, otherwise falls back to default detection.
     
     Parameters:
     -----------
@@ -618,6 +1146,8 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
         Number of time steps for output window
     shift : int
         Number of steps to shift for prediction
+    config : ModelConfig, optional
+        Model configuration for feature selection
         
     Returns:
     --------
@@ -631,13 +1161,11 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
             logger.error("Input DataFrame is None or empty.")
             return None, []
         
-        # Create a copy to avoid modifying the original DataFrame
         df_processed = df.copy()
         
         # Convert temperature to Celsius if 'ta' exists
         if 'ta' in df_processed.columns:
             try:
-                # Check if values are likely in Kelvin (most values > 100)
                 if df_processed['ta'].median() > 100:
                     logger.info("Converting temperature from Kelvin to Celsius")
                     df_processed['ta'] = df_processed['ta'] - 273.15
@@ -650,68 +1178,83 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
         if 'annual_precipitation' in df_processed.columns:
             df_processed.rename(columns={'annual_precipitation': 'mean_annual_precip'}, inplace=True)
         
-        # Standardize time feature names
-        time_features_caps = ['Day sin', 'Week sin', 'Month sin', 'Year sin']
-        for col in time_features_caps:
-            if col in df_processed.columns:
-                lowercase_col = col.lower()
-                if lowercase_col != col:
-                    logger.info(f"Renaming column '{col}' to '{lowercase_col}'")
-                    df_processed.rename(columns={col: lowercase_col}, inplace=True)
         
-        # Define the desired order of features
-        ordered_features = [
-            'ext_rad', 'sw_in', 'ta', 'ws', 'vpd', 'ppfd_in',
-            'mean_annual_temp', 'mean_annual_precip',
-            'day sin', 'week sin', 'month sin', 'year sin'
-        ]
+        # IMPROVED: Try to get features from config first
+        config_features = get_feature_columns_from_config(df_processed, config)
         
-        # Filter to get features actually present
-        available_features = [col for col in ordered_features if col in df_processed.columns]
+        if config_features:
+            # Use features from config
+            feature_columns = config_features
+            logger.info(f"Using {len(feature_columns)} features from model config: {feature_columns}")
+        else:
+            # Fallback to default ordered features (original behavior)
+            ordered_features = [
+                'ext_rad', 'sw_in', 'ta', 'ws', 'vpd', 'ppfd_in',
+                'mean_annual_temp', 'mean_annual_precip',
+                'day sin', 'week sin', 'month sin', 'year sin'
+            ]
+            
+            available_features = [col for col in ordered_features if col in df_processed.columns]
+            missing_features = [col for col in ordered_features if col not in df_processed.columns]
+            if missing_features:
+                logger.warning(f"Some default features are missing: {missing_features}")
+            
+            if len(available_features) < 3:
+                logger.warning(f"Very few features available ({len(available_features)}). Results may be unreliable.")
+                numeric_cols = df_processed.select_dtypes(include=np.number).columns.tolist()
+                excluded_cols = ['sap_velocity', 'latitude', 'longitude']
+                additional_features = [col for col in numeric_cols 
+                                      if col not in available_features 
+                                      and col not in excluded_cols]
+                if additional_features:
+                    logger.info(f"Adding {len(additional_features)} additional numeric features.")
+                    available_features.extend(additional_features)
+            
+            feature_columns = available_features
+            logger.info(f"Using {len(feature_columns)} default features: {feature_columns}")
         
-        # Log missing features
-        missing_features = [col for col in ordered_features if col not in df_processed.columns]
-        if missing_features:
-            logger.warning(f"Some specified features are missing: {missing_features}")
-        
-        # Check if we have enough features
-        if len(available_features) < 3:  # Arbitrary minimum
-            logger.warning(f"Very few features available ({len(available_features)}). Results may be unreliable.")
-            # Try to find more usable numeric features
-            numeric_cols = df_processed.select_dtypes(include=np.number).columns.tolist()
-            excluded_cols = ['sap_velocity', 'latitude', 'longitude']
-            additional_features = [col for col in numeric_cols 
-                                  if col not in available_features 
-                                  and col not in excluded_cols]
-            if additional_features:
-                logger.info(f"Adding {len(additional_features)} additional numeric features.")
-                available_features.extend(additional_features)
-        
-        logger.info(f"Using {len(available_features)} features: {available_features}")
-        feature_columns = available_features
-        
+        # Apply scaling if scaler is provided
         # Apply scaling if scaler is provided
         if feature_scaler is not None:
             try:
-                if hasattr(feature_scaler, 'n_features_in_'):
-                    logger.info(f"Applying feature scaling (scaler was trained on {feature_scaler.n_features_in_} features)")
+                # Case 1: Scaler knows its feature names (Scikit-Learn 1.0+)
+                if hasattr(feature_scaler, 'feature_names_in_'):
+                    scaler_features = feature_scaler.feature_names_in_
+                    # Only scale the columns that exist in the dataframe
+                    valid_features = [f for f in scaler_features if f in df_processed.columns]
                     
-                    # Ensure we only scale features the scaler was trained on
-                    if hasattr(feature_scaler, 'feature_names_in_'):
-                        scaler_features = feature_scaler.feature_names_in_
-                        common_features = [f for f in scaler_features if f in df_processed.columns]
-                        if common_features:
-                            logger.info(f"Scaling {len(common_features)} features: {common_features}")
-                            df_processed[common_features] = feature_scaler.transform(df_processed[common_features])
-                        else:
-                            logger.warning("No common features found between scaler and data. Skipping scaling.")
+                    if len(valid_features) == len(scaler_features):
+                        logger.info(f"Scaling {len(valid_features)} specific features matching scaler definition.")
+                        df_processed[valid_features] = feature_scaler.transform(df_processed[valid_features])
                     else:
-                        # Assume the scaler was trained on the features in the same order
-                        if len(feature_columns) == feature_scaler.n_features_in_:
-                            df_processed[feature_columns] = feature_scaler.transform(df_processed[feature_columns])
+                        missing = set(scaler_features) - set(df_processed.columns)
+                        logger.warning(f"Cannot scale: Data is missing features expected by scaler: {missing}")
+
+                # Case 2: Scaler only knows the count (Old Scikit-Learn or specific save formats)
+                elif hasattr(feature_scaler, 'n_features_in_'):
+                    n_expected = feature_scaler.n_features_in_
+                    n_current = len(feature_columns)
+                    
+                    if n_current == n_expected:
+                        # Exact match
+                        df_processed[feature_columns] = feature_scaler.transform(df_processed[feature_columns])
+                    
+                    elif n_current > n_expected:
+                        # DATA has MORE features than SCALER. 
+                        # Logic: Identify the PFT/Categorical columns and exclude them from scaling.
+                        pft_cols = ['MF', 'DNF', 'ENF', 'EBF', 'WSA', 'WET', 'DBF', 'SAV']
+                        
+                        # Filter to get only continuous columns
+                        continuous_cols = [col for col in feature_columns if col not in pft_cols]
+                        
+                        if len(continuous_cols) == n_expected:
+                            logger.info(f"Smart Scaling: Found {len(continuous_cols)} continuous features matching scaler count ({n_expected}). Scaling these only.")
+                            df_processed[continuous_cols] = feature_scaler.transform(df_processed[continuous_cols])
                         else:
-                            logger.warning(f"Feature count mismatch: data has {len(feature_columns)}, "
-                                          f"scaler expects {feature_scaler.n_features_in_}. Skipping scaling.")
+                            # Fallback: Try to guess based on standard ordering (usually scaling happens before one-hot encoding)
+                            logger.warning(f"Could not automatically match {n_expected} scaler features from {n_current} columns. Skipping scaling to avoid errors.")
+                    else:
+                        logger.warning(f"Feature count mismatch: data has {n_current}, scaler expects {n_expected}. Skipping scaling.")
                 else:
                     logger.warning("Feature scaler doesn't appear to be properly fitted. Skipping scaling.")
             except Exception as e:
@@ -730,9 +1273,17 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
         return None, []
 
 
-def make_predictions_improved(df, models, feature_columns, label_scaler, input_width=8, shift=1):
+# =============================================================================
+# Main Prediction Function (CONFIG-DRIVEN)
+# =============================================================================
+
+def make_predictions_improved(df, models, feature_columns, label_scaler, input_width=8, shift=1, 
+                              model_configs=None, transformer=None):
     """
     Make predictions with improved mapping approach.
+    
+    IMPROVED: Now conditionally creates windows based on model config IS_WINDOWING setting.
+    Handles optional label_scaler - if None, skips inverse scaling.
     
     Parameters:
     -----------
@@ -742,12 +1293,16 @@ def make_predictions_improved(df, models, feature_columns, label_scaler, input_w
         Dictionary of loaded models {model_type: model_object}
     feature_columns : list
         List of feature column names
-    label_scaler : sklearn.preprocessing.StandardScaler
-        Fitted scaler for the target variable
+    label_scaler : sklearn.preprocessing.StandardScaler or None
+        Fitted scaler for the target variable (optional - if None, scaling is skipped)
     input_width : int
-        Width of the input window
+        Width of the input window (used if windowing enabled)
     shift : int
         Prediction shift
+    model_configs : dict, optional
+        Dictionary of ModelConfig objects for each model type
+    transformer : DataTransformer, optional
+        Transformer for applying inverse target transforms
         
     Returns:
     --------
@@ -756,7 +1311,6 @@ def make_predictions_improved(df, models, feature_columns, label_scaler, input_w
     """
     logger.info("Making predictions with improved mapping...")
     
-    # Validate inputs
     if df is None or df.empty:
         logger.error("Input DataFrame is empty or None")
         return pd.DataFrame()
@@ -769,79 +1323,151 @@ def make_predictions_improved(df, models, feature_columns, label_scaler, input_w
         logger.error("No feature columns specified")
         return df
     
+    if model_configs is None:
+        model_configs = {}
+    
+    # Log scaler status
     if label_scaler is None:
-        logger.error("Label scaler is required for predictions")
-        return df
+        logger.info("No label scaler provided. Predictions will not be inverse-scaled.")
+    if label_scaler is None:
+        logger.warning("Label scaler is None. Predictions will be in scaled space.")
     
-    # Create windows with explicit metadata, passing the shift parameter
-    windows_dataset, window_metadata, location_map, total_windows = create_prediction_windows_improved(
-        df, feature_columns, input_width=input_width, shift=shift
-    )
+    if model_configs is None:
+        model_configs = {}
     
-    if windows_dataset is None or not window_metadata:
-        logger.error("Failed to create prediction windows")
-        return df
-    
-    # Store results
     results_df = df.copy()
     
     # Make predictions with each model
     for model_type, model in models.items():
         logger.info(f"Making predictions with {model_type} model")
         
-        try:
-            # Handle different model types
+        # Get config for this model
+        config = model_configs.get(model_type)
+        
+        # Determine if windowing is needed based on config
+        if config:
+            is_windowing = config.is_windowing
+            model_input_width = config.input_width or input_width
+            model_shift = config.shift or shift
+            logger.info(f"  Config: IS_WINDOWING={is_windowing}, input_width={model_input_width}, shift={model_shift}")
+        else:
+            # Fallback: determine based on model type
             is_deep_model = model_type.lower() in ['cnn_lstm', 'lstm', 'transformer', 'ann', 'gru']
-            
-            if is_deep_model and isinstance(model, tf.keras.Model):
-                # For sequence models, use the windowed dataset directly
-                preds_scaled = model.predict(windows_dataset, verbose=0)
-            elif hasattr(model, 'predict'):
-                # For traditional ML models, flatten the windows
-                windows_np = np.concatenate([batch.numpy() for batch in windows_dataset], axis=0)
-                X_flattened = windows_np.reshape(windows_np.shape[0], -1)  # Flatten each window
-                preds_scaled = model.predict(X_flattened)
+            is_windowing = is_deep_model
+            model_input_width = input_width
+            model_shift = shift
+            logger.info(f"  No config found. Using default: IS_WINDOWING={is_windowing} (based on model type)")
+        
+        try:
+            if is_windowing:
+                # ========== WINDOWED PREDICTIONS ==========
+                logger.info(f"  Creating windowed predictions for {model_type}")
+                
+                windows_dataset, window_metadata, location_map, total_windows = create_prediction_windows_improved(
+                    df, feature_columns, input_width=model_input_width, shift=model_shift
+                )
+                
+                if windows_dataset is None or not window_metadata:
+                    logger.error(f"Failed to create prediction windows for {model_type}")
+                    continue
+                
+                # Handle different model types
+                is_keras_model = isinstance(model, tf.keras.Model)
+                
+                if is_keras_model:
+                    preds_scaled = model.predict(windows_dataset, verbose=0)
+                elif hasattr(model, 'predict'):
+                    # For traditional ML models with windowed input, flatten the windows
+                    windows_np = np.concatenate([batch.numpy() for batch in windows_dataset], axis=0)
+                    X_flattened = windows_np.reshape(windows_np.shape[0], -1)
+                    preds_scaled = model.predict(X_flattened)
+                else:
+                    logger.error(f"Model {model_type} lacks a predict method. Skipping.")
+                    continue
+                
+                # Standardize prediction shape
+                if len(preds_scaled.shape) == 3:
+                    logger.info(f"Model {model_type} produced 3D output with shape {preds_scaled.shape}.")
+                    preds_scaled = preds_scaled[:, -1, :].reshape(-1, 1)
+                elif len(preds_scaled.shape) == 2 and preds_scaled.shape[1] > 1:
+                    logger.info(f"Model {model_type} produced 2D output with multiple features: {preds_scaled.shape}.")
+                    preds_scaled = preds_scaled[:, 0].reshape(-1, 1)
+                elif len(preds_scaled.shape) == 1:
+                    preds_scaled = preds_scaled.reshape(-1, 1)
+                
+                # Inverse transform to get actual sap velocity values (only if scaler exists)
+                if label_scaler is not None:
+                    preds_unscaled = label_scaler.inverse_transform(preds_scaled).flatten()
+                    logger.debug(f"  Applied inverse label scaling for {model_type}")
+                else:
+                    preds_unscaled = preds_scaled.flatten()
+                
+                # Apply inverse target transform if transformer provided
+                if transformer and transformer.should_transform_target():
+                    logger.info(f"  Applying inverse target transform: {transformer.target_transform}")
+                    preds_unscaled = transformer.transform_target(preds_unscaled, inverse=True)
+                
+                # Map predictions back to DataFrame with explicit metadata
+                mapped_results = map_predictions_to_df_improved(
+                    df, preds_unscaled, window_metadata, model_type
+                )
+                
+                # Copy ALL columns including metadata
+                pred_col = f'sap_velocity_{model_type}'
+                results_df[pred_col] = mapped_results[pred_col]
+                
+                meta_cols = [
+                    f'{pred_col}_location',
+                    f'{pred_col}_window_start',
+                    f'{pred_col}_window_end',
+                    f'{pred_col}_window_pos'
+                ]
+                
+                for meta_col in meta_cols:
+                    if meta_col in mapped_results.columns:
+                        results_df[meta_col] = mapped_results[meta_col]
+                
             else:
-                logger.error(f"Model {model_type} lacks a predict method. Skipping.")
-                continue
-            
-            # Standardize prediction shape
-            if len(preds_scaled.shape) == 3:  # Sequence output (batch, timesteps, features)
-                logger.info(f"Model {model_type} produced 3D output with shape {preds_scaled.shape}.")
-                preds_scaled = preds_scaled[:, -1, :].reshape(-1, 1)  # Take the last timestep
-            elif len(preds_scaled.shape) == 2 and preds_scaled.shape[1] > 1:
-                logger.info(f"Model {model_type} produced 2D output with multiple features: {preds_scaled.shape}.")
-                preds_scaled = preds_scaled[:, 0].reshape(-1, 1)  # Take first feature
-            elif len(preds_scaled.shape) == 1:
-                preds_scaled = preds_scaled.reshape(-1, 1)  # Ensure 2D for inverse transform
-            
-            # Inverse transform to get actual sap velocity values
-            preds_unscaled = label_scaler.inverse_transform(preds_scaled).flatten()
-            
-            # Map predictions back to DataFrame with explicit metadata
-            mapped_results = map_predictions_to_df_improved(
-                df, preds_unscaled, window_metadata, model_type
-            )
-            
-            # MODIFIED SECTION: Copy ALL metadata columns, not just the prediction column
-            pred_col = f'sap_velocity_{model_type}'
-            
-            # Copy the prediction column
-            results_df[pred_col] = mapped_results[pred_col]
-            
-            # Copy all associated metadata columns
-            meta_cols = [
-                f'{pred_col}_location',
-                f'{pred_col}_window_start',
-                f'{pred_col}_window_end',
-                f'{pred_col}_window_pos'
-            ]
-            
-            for meta_col in meta_cols:
-                if meta_col in mapped_results.columns:
-                    results_df[meta_col] = mapped_results[meta_col]
+                # ========== FLAT (NON-WINDOWED) PREDICTIONS ==========
+                logger.info(f"  Creating flat predictions for {model_type} (no windowing)")
+                
+                X, indices = prepare_flat_features(df, feature_columns)
+                
+                if len(X) == 0:
+                    logger.error(f"No valid samples for {model_type}")
+                    continue
+                
+                # Make predictions
+                if hasattr(model, 'predict'):
+                    preds_scaled = model.predict(X)
+                else:
+                    logger.error(f"Model {model_type} lacks a predict method. Skipping.")
+                    continue
+                
+                # Ensure 2D for inverse transform
+                if len(preds_scaled.shape) == 1:
+                    preds_scaled = preds_scaled.reshape(-1, 1)
+                
+                # Inverse transform (only if scaler exists)
+                if label_scaler is not None:
+                    preds_unscaled = label_scaler.inverse_transform(preds_scaled).flatten()
+                    logger.debug(f"  Applied inverse label scaling for {model_type}")
+                else:
+                    preds_unscaled = preds_scaled.flatten()
+                
+                # Apply inverse target transform if transformer provided
+                if transformer and transformer.should_transform_target():
+                    logger.info(f"  Applying inverse target transform: {transformer.target_transform}")
+                    preds_unscaled = transformer.transform_target(preds_unscaled, inverse=True)
+                
+                # Map predictions back to DataFrame
+                mapped_results = map_flat_predictions_to_df(df, preds_unscaled, indices, model_type)
+                
+                pred_col = f'sap_velocity_{model_type}'
+                results_df[pred_col] = mapped_results[pred_col]
             
             # Log prediction statistics
+            pred_col = f'sap_velocity_{model_type}'
             non_nan_count = results_df[pred_col].notna().sum()
             logger.info(f"Added {non_nan_count} predictions for {model_type} ({non_nan_count/len(results_df)*100:.1f}% coverage)")
             
@@ -854,7 +1480,10 @@ def make_predictions_improved(df, models, feature_columns, label_scaler, input_w
             logger.error(traceback.format_exc())
     
     # Create ensemble prediction if multiple models succeeded
-    pred_cols = [col for col in results_df.columns if col.startswith('sap_velocity_') and not col.startswith('sap_velocity_ensemble') and not any(col.endswith(x) for x in ['_location', '_window_start', '_window_end', '_window_pos'])]
+    pred_cols = [col for col in results_df.columns 
+                 if col.startswith('sap_velocity_') 
+                 and not col.startswith('sap_velocity_ensemble') 
+                 and not any(col.endswith(x) for x in ['_location', '_window_start', '_window_end', '_window_pos'])]
     
     if len(pred_cols) > 1:
         logger.info(f"Creating ensemble prediction from {len(pred_cols)} models")
@@ -869,6 +1498,10 @@ def make_predictions_improved(df, models, feature_columns, label_scaler, input_w
     
     return results_df
 
+
+# =============================================================================
+# Validation Functions (KEPT FROM ORIGINAL)
+# =============================================================================
 
 def validate_predictions(df_predictions, feature_columns):
     """
@@ -888,7 +1521,6 @@ def validate_predictions(df_predictions, feature_columns):
     """
     logger.info("Validating predictions...")
     
-    # Get prediction columns
     pred_cols = [col for col in df_predictions.columns if col.startswith('sap_velocity_')]
     if not pred_cols:
         logger.warning("No prediction columns found to validate")
@@ -899,6 +1531,10 @@ def validate_predictions(df_predictions, feature_columns):
     
     # 1. Check for reasonable value ranges for sap velocity
     for col in pred_cols:
+        # Skip metadata columns
+        if any(x in col for x in ['_location', '_window_start', '_window_end', '_window_pos']):
+            continue
+            
         pred_data = df_predictions[col].dropna()
         if len(pred_data) == 0:
             logger.error(f"No predictions in column {col}")
@@ -907,7 +1543,7 @@ def validate_predictions(df_predictions, feature_columns):
             continue
             
         min_val, max_val = pred_data.min(), pred_data.max()
-        if min_val < -10 or max_val > 100:  # Reasonable range for sap velocity
+        if min_val < 0 or max_val > 100:
             logger.warning(f"Column {col} has potentially unreasonable values: [{min_val:.2f}, {max_val:.2f}]")
             validation_results[f"{col}_range_issue"] = False
             validation_passed = False
@@ -927,24 +1563,23 @@ def validate_predictions(df_predictions, feature_columns):
     
     if time_col is not None:
         for col in pred_cols:
-            # Check if predictions change too abruptly over time
-            if len(df_predictions[col].dropna()) > 10:  # Need reasonable sample
+            if any(x in col for x in ['_location', '_window_start', '_window_end', '_window_pos']):
+                continue
+                
+            if len(df_predictions[col].dropna()) > 10:
                 pred_series = df_predictions[col].dropna()
-                # Create temporary DataFrame with time index for proper diff calculation
                 if isinstance(time_col, pd.DatetimeIndex):
                     temp_df = pd.DataFrame({col: pred_series}, index=time_col)
                 else:
                     temp_df = pd.DataFrame({col: pred_series, 'time': time_col})
                     temp_df.set_index('time', inplace=True)
                 
-                # Sort by time to ensure proper diff calculation
                 temp_df = temp_df.sort_index()
                 abs_diff = temp_df[col].diff().abs()
                 
-                # Skip empty diff results
                 if not abs_diff.empty:
                     max_diff = abs_diff.max()
-                    if max_diff > 50:  # Threshold for suspiciously large changes
+                    if max_diff > 50:
                         logger.warning(f"Column {col} shows potentially abrupt changes (max diff: {max_diff:.2f})")
                         validation_results[f"{col}_temporal_consistency"] = False
                         validation_passed = False
@@ -953,21 +1588,20 @@ def validate_predictions(df_predictions, feature_columns):
     key_features = [f for f in ['ta', 'vpd', 'ppfd_in'] if f in df_predictions.columns]
     for feat in key_features:
         for col in pred_cols:
-            # Create a DataFrame with only the feature and prediction
+            if any(x in col for x in ['_location', '_window_start', '_window_end', '_window_pos']):
+                continue
+                
             valid_data = df_predictions[[feat, col]].dropna()
-            if len(valid_data) > 10:  # Need reasonable sample
+            if len(valid_data) > 10:
                 try:
                     corr = valid_data.corr().iloc[0, 1]
-                    # Check for suspicious lack of correlation with known important features
-                    if abs(corr) < 0.05:  # Threshold for suspiciously low correlation
+                    if abs(corr) < 0.05:
                         logger.warning(f"Column {col} shows very low correlation with {feat}: {corr:.3f}")
                         validation_results[f"{col}_{feat}_correlation"] = False
                         validation_passed = False
                 except:
-                    # Ignore correlation calculation errors
                     pass
     
-    # Log overall validation results
     if validation_passed:
         logger.info("All prediction validations passed.")
     else:
@@ -976,6 +1610,10 @@ def validate_predictions(df_predictions, feature_columns):
     
     return validation_passed
 
+
+# =============================================================================
+# Visualization Functions (KEPT FROM ORIGINAL)
+# =============================================================================
 
 def visualize_predictions(df_predictions, output_dir, feature_columns, include_feature_importance=True, models=None):
     """
@@ -1002,8 +1640,10 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
     output_dir.mkdir(exist_ok=True, parents=True)
     df_plot = df_predictions.copy()
 
-    # Get prediction columns
-    pred_cols = [col for col in df_plot.columns if col.startswith('sap_velocity_')]
+    # Get prediction columns (excluding metadata)
+    pred_cols = [col for col in df_plot.columns 
+                 if col.startswith('sap_velocity_') 
+                 and not any(x in col for x in ['_location', '_window_start', '_window_end', '_window_pos'])]
     ensemble_col = 'sap_velocity_ensemble' if 'sap_velocity_ensemble' in pred_cols else None
     individual_pred_cols = [col for col in pred_cols if col != ensemble_col]
 
@@ -1018,7 +1658,6 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
         df_plot[time_col] = df_plot.index
         logger.info(f"Using DatetimeIndex for plotting.")
     else:
-        # Try to find a time column
         time_cols = [c for c in df_plot.columns if 'time' in c.lower() or 'date' in c.lower()]
         for col in time_cols:
             try:
@@ -1042,7 +1681,6 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
         logger.info(f"Found {len(unique_locations)} locations using 'name' column.")
     elif 'latitude' in df_plot.columns and 'longitude' in df_plot.columns:
         location_col = ('latitude', 'longitude')
-        # Round coordinates for display
         df_plot['lat_rounded'] = df_plot['latitude'].round(2)
         df_plot['lon_rounded'] = df_plot['longitude'].round(2)
         unique_locations = sorted(df_plot[['lat_rounded', 'lon_rounded']].drop_duplicates().values.tolist())
@@ -1062,7 +1700,6 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
     # Create plots for each location
     for i, location_id in enumerate(locations_to_plot):
         try:
-            # Extract data for this location
             if location_col == 'name':
                 location_data = df_plot[df_plot['name'] == location_id].copy()
                 loc_str = str(location_id)
@@ -1075,12 +1712,10 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
                 location_data = df_plot.copy()
                 loc_str = "All_Data"
             
-            # Skip if no data
             if location_data.empty:
                 logger.warning(f"No data for location {loc_str}. Skipping plot.")
                 continue
             
-            # Sort by time for proper plotting
             location_data = location_data.sort_values(by=time_col)
             
             # Create figure with subplots
@@ -1090,14 +1725,12 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
             # Plot 1: Predictions
             ax = axes[0]
             
-            # Plot ensemble prediction if available
             if ensemble_col and ensemble_col in location_data.columns:
                 ensemble_data = location_data[[time_col, ensemble_col]].dropna()
                 if not ensemble_data.empty:
                     ax.plot(ensemble_data[time_col], ensemble_data[ensemble_col], 
                            label='Ensemble', color='black', linewidth=2.5, zorder=10)
             
-            # Plot individual model predictions
             palette = sns.color_palette("tab10", len(individual_pred_cols))
             for j, col in enumerate(individual_pred_cols):
                 if col in location_data.columns:
@@ -1121,7 +1754,6 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
             plot_features = [f for f in key_features if f in location_data.columns]
             
             if plot_features:
-                # Normalize features for comparison
                 norm_data = location_data[plot_features].copy()
                 for col in plot_features:
                     min_val, max_val = norm_data[col].min(), norm_data[col].max()
@@ -1130,7 +1762,6 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
                     else:
                         norm_data[col] = 0.5
                 
-                # Plot normalized features
                 for j, col in enumerate(plot_features):
                     ax.plot(location_data[time_col], norm_data[col], 
                            label=col, linewidth=1)
@@ -1141,10 +1772,8 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
             else:
                 ax.set_visible(False)
             
-            # Set x-axis label
             axes[-1].set_xlabel(time_col.replace('_', ' ').title())
             
-            # Save the figure
             plt.tight_layout()
             safe_loc_str = loc_str.replace(' ', '_').replace('=', '').replace('.', 'p')
             safe_loc_str = safe_loc_str.replace(',', '').replace('/', '_').replace('\\', '_')
@@ -1168,7 +1797,6 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
             try:
                 importances = None
                 
-                # Extract feature importance based on model type
                 if hasattr(model, 'feature_importances_'):
                     importances = model.feature_importances_
                 elif hasattr(model, 'coef_') and hasattr(model.coef_, 'shape'):
@@ -1178,32 +1806,26 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
                         importances = np.mean(np.abs(model.coef_), axis=0)
                 
                 if importances is not None:
-                    # Check if dimensions match
                     if len(importances) == len(feature_columns):
-                        # Create DataFrame for plotting
                         imp_df = pd.DataFrame({
                             'Feature': feature_columns,
                             'Importance': importances
                         })
                         imp_df = imp_df.sort_values('Importance', ascending=False)
                         
-                        # Limit to top 20 features
                         if len(imp_df) > 20:
                             imp_df = imp_df.head(20)
                         
-                        # Plot feature importance
                         plt.figure(figsize=(10, max(6, len(imp_df) * 0.3)))
                         ax = sns.barplot(x='Importance', y='Feature', data=imp_df, palette='viridis')
                         plt.title(f'Feature Importance - {model_type.upper()}')
                         plt.tight_layout()
                         
-                        # Add value labels
                         for p, importance in zip(ax.patches, imp_df['Importance']):
                             width = p.get_width()
                             plt.text(width + width * 0.02, p.get_y() + p.get_height()/2, 
                                     f'{importance:.3f}', ha='left', va='center')
                         
-                        # Save plot and data
                         filepath = output_dir / f'feature_importance_{model_type}.png'
                         plt.savefig(filepath, bbox_inches='tight', dpi=150)
                         logger.info(f"Saved feature importance plot: {filepath}")
@@ -1220,26 +1842,32 @@ def visualize_predictions(df_predictions, output_dir, feature_columns, include_f
     logger.info(f"Visualization complete. Results saved to {output_dir}")
 
 
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description='Predict sap velocity from preprocessed data using improved mapping approach.',
+        description='Predict sap velocity from preprocessed data using config-driven approach.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument('--input', type=str, required=True,
-                        help='Input CSV file with preprocessed data.')
+    parser.add_argument('--input-dir', type=str, required=True,
+                        help='Input directory with preprocessed data files.')
     parser.add_argument('--output', type=str, default=None,
                         help='Output directory. Defaults to ./outputs/<input_file_stem>/')
-    parser.add_argument('--models-dir', type=str, default='./outputs/models',
-                        help='Directory containing trained model subdirectories.')
-    parser.add_argument('--scaler-dir', type=str, default='./outputs/scalers',
-                        help='Directory containing feature and label scalers.')
-    parser.add_argument('--model-types', type=str, nargs='+', default=['cnn_lstm'],
-                        help='List of model types to load and predict with.')
+    parser.add_argument('--models-dir', type=str, default='./models',
+                        help='Base directory containing model subdirectories (structure: models/{model_type}/{run_id}/).')
+    parser.add_argument('--model-type', type=str, required=True,
+                        help='Type of model to use (e.g., xgb, rf, cnn_lstm).')
+    parser.add_argument('--run-id', type=str, required=True,
+                        help='Run identifier for the model.')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to explicit model config JSON file (overrides auto-detection).')
     parser.add_argument('--input-width', type=int, default=DEFAULT_PARAMS['INPUT_WIDTH'],
-                        help='Time steps for sequence model input window.')
+                        help='Time steps for sequence model input window (used if not in config).')
     parser.add_argument('--shift', type=int, default=DEFAULT_PARAMS['SHIFT'],
-                        help='Prediction shift steps ahead.')
+                        help='Prediction shift steps ahead (used if not in config).')
     parser.add_argument('--label-width', type=int, default=DEFAULT_PARAMS['LABEL_WIDTH'],
                         help='Time steps in the label window (informational).')
     parser.add_argument('--visualize', action='store_true',
@@ -1248,9 +1876,15 @@ def parse_args():
                         help='Generate feature importance plots for applicable models.')
     parser.add_argument('--validate', action='store_true',
                         help='Perform validation checks on predictions.')
+    parser.add_argument('--list-runs', action='store_true',
+                        help='List available run_ids for the specified model_type and exit.')
 
     return parser.parse_args()
 
+
+# =============================================================================
+# Main Function
+# =============================================================================
 
 def main():
     """Main execution function"""
@@ -1258,122 +1892,205 @@ def main():
     args = parse_args()
 
     # Setup directories
-    input_file = Path(args.input)
-    if not input_file.is_file():
-        logger.error(f"Input file not found: {input_file}")
-        sys.exit(1)
-
     models_dir = Path(args.models_dir)
-    scaler_dir = Path(args.scaler_dir)
-
-    if args.output:
-        output_dir = Path(args.output)
-    else:
-        output_base = Path('./outputs')
-        output_dir = output_base / input_file.stem
-    output_dir.mkdir(exist_ok=True, parents=True)
-
-    # Log setup information
-    logger.info("="*60)
-    logger.info(" Sap Velocity Prediction Script (Improved Mapping) ")
-    logger.info("="*60)
-    logger.info(f"Input: {input_file}")
-    logger.info(f"Output: {output_dir}")
-    logger.info(f"Models: {args.model_types}")
-    logger.info(f"Window params: width={args.input_width}, shift={args.shift}")
-
-    # Load models
-    models = load_models(models_dir, args.model_types)
-    if not models:
-        logger.error("No models were loaded. Exiting.")
-        sys.exit(1)
-    logger.info(f"Successfully loaded {len(models)} models: {list(models.keys())}")
-
-    # Load scalers
-    feature_scaler, label_scaler = load_scalers(scaler_dir)
-    if label_scaler is None:
-        logger.error("Label scaler is required but not found. Exiting.")
-        sys.exit(1)
-
-    # Load and prepare data
-    df_raw = load_preprocessed_data(input_file)
-    if df_raw is None or df_raw.empty:
-        logger.error("Failed to load input data. Exiting.")
-        sys.exit(1)
-    logger.info(f"Loaded data with {len(df_raw)} rows and {len(df_raw.columns)} columns")
-
-    # Save original index
-    original_index = df_raw.index
-
-    # Prepare features
-    df_prepared, feature_columns = prepare_features_from_preprocessed(
-        df_raw,
-        feature_scaler,
-        input_width=args.input_width
-    )
+    model_type = args.model_type
+    run_id = args.run_id
     
-    if df_prepared is None or not feature_columns:
-        logger.error("Failed to prepare features. Exiting.")
+    # Handle --list-runs option
+    if args.list_runs:
+        available_runs = find_available_run_ids(models_dir, model_type)
+        if available_runs:
+            logger.info(f"Available run_ids for {model_type}:")
+            for rid in available_runs:
+                logger.info(f"  - {rid}")
+        else:
+            logger.info(f"No runs found for model type: {model_type}")
+        sys.exit(0)
+
+    # input will be a directory, check existence and get files
+    input_dir = Path(args.input_dir)
+    input_files = list(input_dir.glob('*.csv'))
+    print(f"Found {len(input_files)} input files in {input_dir}")
+    if not input_dir.is_dir():
+        logger.error(f"Input directory not found: {input_dir}")
         sys.exit(1)
-    logger.info(f"Prepared features: {feature_columns}")
+    for input_file in input_files:
+        logger.info(f"Processing input file: {input_file}")
 
-    # Make predictions
-    df_predictions = make_predictions_improved(
-        df_prepared,
-        models,
-        feature_columns,
-        label_scaler,
-        input_width=args.input_width,
-        shift=args.shift
-    )
-    verify_prediction_mapping(df_predictions, 'cnn_lstm')
-    if df_predictions.empty:
-        logger.error("Prediction failed or returned empty DataFrame. Exiting.")
-        sys.exit(1)
+        if args.output:
+            output_dir = Path(args.output)
+        else:
+            output_base = Path('./outputs')
+            output_dir = output_base / input_file.stem
+        output_dir.mkdir(exist_ok=True, parents=True)
 
-    # Restore original index if possible
-    if len(original_index) == len(df_predictions):
-        try:
-            df_final = df_predictions.set_index(original_index)
-            logger.info("Restored original index to predictions DataFrame.")
-        except Exception as e:
-            logger.warning(f"Could not restore original index: {e}. Using current index.")
-            df_final = df_predictions
-    else:
-        logger.warning(f"Length mismatch between original ({len(original_index)}) and "
-                      f"predictions ({len(df_predictions)}). Using current index.")
-        df_final = df_predictions
+        # Log setup information
+        logger.info("="*60)
+        logger.info(" Sap Velocity Prediction Script (Config-Driven) ")
+        logger.info("="*60)
+        logger.info(f"Input: {input_file}")
+        logger.info(f"Output: {output_dir}")
+        logger.info(f"Model: {model_type}/{run_id}")
+        logger.info(f"Models dir: {models_dir}")
+        logger.info(f"Default window params: width={args.input_width}, shift={args.shift}")
 
-    # Validate predictions
-    if args.validate:
-        validation_passed = validate_predictions(df_final, feature_columns)
-        logger.info(f"Prediction validation {'passed' if validation_passed else 'failed'}")
+        # Verify model directory exists
+        model_dir = get_model_dir(models_dir, model_type, run_id)
+        if not model_dir.exists():
+            logger.error(f"Model directory not found: {model_dir}")
+            available_runs = find_available_run_ids(models_dir, model_type)
+            if available_runs:
+                logger.info(f"Available run_ids for {model_type}: {available_runs}")
+            sys.exit(1)
 
-    # Save predictions
-    output_file = output_dir / f"{input_file.stem}_predictions_improved.csv"
-    try:
-        df_final.to_csv(output_file)
-        logger.info(f"Saved predictions to {output_file}")
-    except Exception as e:
-        logger.error(f"Error saving predictions: {e}")
+        # Load model
+        models = load_models(models_dir, model_type, run_id)
+        if not models:
+            logger.error("No models were loaded. Exiting.")
+            sys.exit(1)
+        logger.info(f"Successfully loaded {len(models)} models: {list(models.keys())}")
 
-    # Create visualizations
-    if args.visualize:
-        visualize_predictions(
-            df_final, 
-            output_dir, 
-            feature_columns,
-            include_feature_importance=args.feature_importance,
-            models=models
+        # Load model config
+        if args.config:
+            # Use explicit config if provided
+            model_configs = {}
+            explicit_config = load_model_config(Path(args.config))
+            if explicit_config:
+                logger.info(f"Using explicit config from {args.config}")
+                model_configs[model_type] = explicit_config
+        else:
+            # Load config from model directory
+            model_configs = load_model_configs(models_dir, model_type, run_id)
+        
+        logger.info(f"Loaded configs for {len(model_configs)} models: {list(model_configs.keys())}")
+
+        # Create transformer based on config
+        transformer = None
+        if model_configs:
+            first_config = list(model_configs.values())[0]
+            transformer = DataTransformer(first_config)
+            if transformer.should_transform_target():
+                logger.info(f"Will apply inverse target transform: {transformer.target_transform}")
+
+        # Load scalers from model directory (optional - if not found, skip scaling)
+        feature_scaler, label_scaler = load_scalers(models_dir, model_type, run_id)
+        
+        if label_scaler is None:
+            logger.info("No label scaler found. Predictions will not be inverse-scaled.")
+        if feature_scaler is None:
+            logger.info("No feature scaler found. Features will not be scaled.")
+
+        # Load and prepare data
+        df_raw = load_preprocessed_data(input_file)
+        if df_raw is None or df_raw.empty:
+            logger.error("Failed to load input data. Skipping this input file.")
+            continue
+        logger.info(f"Loaded data with {len(df_raw)} rows and {len(df_raw.columns)} columns")
+
+        # Save original index
+        original_index = df_raw.index
+
+        # Get primary config for feature preparation
+        primary_config = list(model_configs.values())[0] if model_configs else None
+
+        # Prepare features (CONFIG-DRIVEN)
+        df_prepared, feature_columns = prepare_features_from_preprocessed(
+            df_raw,
+            feature_scaler,
+            input_width=args.input_width,
+            config=primary_config  # Pass config for feature selection
         )
+        
+        if df_prepared is None or not feature_columns:
+            logger.error("Failed to prepare features. Skipping this input file.")
+            continue
+        logger.info(f"Prepared features: {feature_columns}")
 
-    # Finish
-    end_time = time.time()
-    execution_time = end_time - start_time
-    logger.info("="*60)
-    logger.info(" Prediction Script Completed ")
-    logger.info(f" Execution time: {execution_time:.2f} seconds ({execution_time/60:.2f} minutes)")
-    logger.info("="*60)
+        # Make predictions (CONFIG-DRIVEN)
+        df_predictions = make_predictions_improved(
+            df_prepared,
+            models,
+            feature_columns,
+            label_scaler,
+            input_width=args.input_width,
+            shift=args.shift,
+            model_configs=model_configs,
+            transformer=transformer
+        )
+        
+        # Verify prediction mapping for windowed models
+        for mt, config in model_configs.items():
+            if config and config.is_windowing:
+                verify_prediction_mapping(df_predictions, mt)
+        
+        if df_predictions.empty:
+            logger.error("Prediction failed or returned empty DataFrame. Skipping this input file.")
+            continue
+
+        # Restore original index if possible
+        if len(original_index) == len(df_predictions):
+            try:
+                df_final = df_predictions.set_index(original_index)
+                logger.info("Restored original index to predictions DataFrame.")
+            except Exception as e:
+                logger.warning(f"Could not restore original index: {e}. Using current index.")
+                df_final = df_predictions
+        else:
+            logger.warning(f"Length mismatch between original ({len(original_index)}) and "
+                        f"predictions ({len(df_predictions)}). Using current index.")
+            df_final = df_predictions
+
+        # Validate predictions
+        if args.validate:
+            validation_passed = validate_predictions(df_final, feature_columns)
+            logger.info(f"Prediction validation {'passed' if validation_passed else 'failed'}")
+
+        # Save predictions
+        output_file = output_dir / f"{input_file.stem}_predictions_{model_type}_{run_id}.csv"
+        try:
+            df_final.to_csv(output_file)
+            logger.info(f"Saved predictions to {output_file}")
+        except Exception as e:
+            logger.error(f"Error saving predictions: {e}")
+
+        # Save config summary
+        config_summary_file = output_dir / f"prediction_config_{model_type}_{run_id}.json"
+        try:
+            config_summary = {
+                'model_type': model_type,
+                'run_id': run_id,
+                'feature_columns_used': feature_columns,
+                'default_input_width': args.input_width,
+                'default_shift': args.shift,
+                'has_feature_scaler': feature_scaler is not None,
+                'has_label_scaler': label_scaler is not None,
+                'model_config': model_configs[model_type].to_dict() if model_type in model_configs else None,
+                'input_file': str(input_file),
+                'timestamp': datetime.now().isoformat()
+            }
+            with open(config_summary_file, 'w') as f:
+                json.dump(config_summary, f, indent=2)
+            logger.info(f"Saved config summary to {config_summary_file}")
+        except Exception as e:
+            logger.warning(f"Could not save config summary: {e}")
+
+        # Create visualizations
+        if args.visualize:
+            visualize_predictions(
+                df_final, 
+                output_dir, 
+                feature_columns,
+                include_feature_importance=args.feature_importance,
+                models=models
+            )
+
+        # Finish
+        end_time = time.time()
+        execution_time = end_time - start_time
+        logger.info("="*60)
+        logger.info(" Prediction Script Completed ")
+        logger.info(f" Execution time: {execution_time:.2f} seconds ({execution_time/60:.2f} minutes)")
+        logger.info("="*60)
 
 
 if __name__ == "__main__":

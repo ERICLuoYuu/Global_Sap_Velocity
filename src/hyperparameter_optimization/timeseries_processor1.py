@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import os
+import logging
 
 # Set environment variables for determinism BEFORE importing TensorFlow
 os.environ['TF_DETERMINISTIC_OPS'] = '1'
@@ -126,6 +127,7 @@ class WindowGenerator:
         label_columns=None,
         batch_size: int = 32,
         shuffle: bool = True,
+        exclude_targets_from_features: bool = True,
         exclude_labels_from_inputs: bool = True
     ):
         """
@@ -135,7 +137,7 @@ class WindowGenerator:
         self.data_df = data_df
         self.batch_size = batch_size
         self.shuffle = shuffle
-        self.exclude_labels_from_inputs = exclude_labels_from_inputs
+        self.exclude_targets_from_features = exclude_targets_from_features
 
         # Work out the label column indices
         self.label_columns = label_columns
@@ -151,9 +153,14 @@ class WindowGenerator:
         self.shift = shift
 
         self.total_window_size = input_width + shift
-
-        self.input_slice = slice(0, input_width)
-        self.input_indices = np.arange(self.total_window_size)[self.input_slice]
+        if exclude_labels_from_inputs:
+            self.input_slice = slice(0, input_width)
+            self.input_indices = np.arange(self.total_window_size)[self.input_slice]
+        else:
+            # If labels are included in inputs, input slice includes the entire window
+            self.input_slice = slice(0, self.total_window_size)
+            self.input_indices = np.arange(self.total_window_size)[self.input_slice]
+            self.input_width = self.total_window_size  # Adjust input width to total window size
 
         self.label_start = self.total_window_size - self.label_width
         self.labels_slice = slice(self.label_start, None)
@@ -186,7 +193,7 @@ class WindowGenerator:
                 axis=-1)
                 
             # Remove label columns and metadata columns from inputs
-            if hasattr(self, 'exclude_labels_from_inputs') and self.exclude_labels_from_inputs:
+            if hasattr(self, 'exclude_targets_from_features') and self.exclude_targets_from_features:
                 # Create a list of indices for columns to keep
                 feature_indices = []
                 for i, name in enumerate(self.data_df.columns):
@@ -198,7 +205,7 @@ class WindowGenerator:
                 if feature_indices:  # Only if we have features to keep
                     inputs = tf.gather(inputs, feature_indices, axis=2)
                 else:
-                    print("Warning: No feature columns remain after excluding labels and metadata.")
+                    logging.warning("Warning: No feature columns remain after excluding labels and metadata.")
 
         # Slicing doesn't preserve static shape information, so set the shapes manually
         inputs.set_shape([None, self.input_width, None])
@@ -278,7 +285,7 @@ class TemporalWindowGenerator:
         label_columns=None,
         batch_size=32,
         min_segment_length=None,
-        exclude_labels_from_inputs=True,
+        exclude_targets_from_features=True,
         train_val_test_split=(0.7, 0.15, 0.15)
     ):
         """
@@ -301,7 +308,7 @@ class TemporalWindowGenerator:
             Batch size for datasets
         min_segment_length : int, optional
             Minimum length required for a segment to be used
-        exclude_labels_from_inputs : bool
+        exclude_targets_from_features : bool
             Whether to exclude label columns from inputs
         train_val_test_split : tuple
             Proportions for train, validation, and test splits (e.g., (0.7, 0.15, 0.15))
@@ -321,10 +328,10 @@ class TemporalWindowGenerator:
         # Set min_segment_length to window_size if not provided or too small
         if min_segment_length is None or min_segment_length < window_size:
             min_segment_length = window_size
-        
-        print(f"Minimum segment length required: {min_segment_length} (window size: {window_size})")
-        print(f"Using train/val/test split ratio: {train_val_test_split}")
-        
+
+        logging.info(f"Minimum segment length required: {min_segment_length} (window size: {window_size})")
+        logging.info(f"Using train/val/test split ratio: {train_val_test_split}")
+
         # Group segments by timeseries (source file)
         timeseries_segments = {}
         
@@ -340,9 +347,9 @@ class TemporalWindowGenerator:
             if source_file not in timeseries_segments:
                 timeseries_segments[source_file] = []
             timeseries_segments[source_file].append(segment)
-        
-        print(f"Grouped {len(segments)} segments into {len(timeseries_segments)} distinct timeseries")
-        
+
+        logging.info(f"Grouped {len(segments)} segments into {len(timeseries_segments)} distinct timeseries")
+
         # Track processed timeseries to prevent duplicates
         processed_timeseries = set()
         
@@ -354,12 +361,12 @@ class TemporalWindowGenerator:
         for source_file, source_segments in list(timeseries_segments.items()):
             # Skip if already processed (prevent duplicates)
             if source_file in processed_timeseries:
-                print(f"Warning: Skipping duplicate timeseries {source_file}")
+                logging.warning(f"Skipping duplicate timeseries {source_file}")
                 continue
                 
             processed_timeseries.add(source_file)
-            print(f"Processing timeseries: {source_file} with {len(source_segments)} segments")
-            
+            logging.info(f"Processing timeseries: {source_file} with {len(source_segments)} segments")
+
             # Collect all windows from all segments of this timeseries
             timeseries_windows = []
             
@@ -377,7 +384,7 @@ class TemporalWindowGenerator:
                     label_columns=label_columns,
                     batch_size=1,  # Use batch size of 1 to extract individual windows
                     shuffle=False,  # Don't shuffle to maintain temporal order
-                    exclude_labels_from_inputs=exclude_labels_from_inputs
+                    exclude_targets_from_features=exclude_targets_from_features
                 )
                 
                 # Collect all windows from this segment
@@ -387,7 +394,7 @@ class TemporalWindowGenerator:
             
             # Skip if no windows were created for this timeseries
             if not timeseries_windows:
-                print(f"Warning: No valid windows created for timeseries {source_file}")
+                logging.warning(f"No valid windows created for timeseries {source_file}")
                 continue
             
             # Split windows for this timeseries temporally
@@ -403,9 +410,8 @@ class TemporalWindowGenerator:
             all_train_windows.extend(ts_train_windows)
             all_val_windows.extend(ts_val_windows)
             all_test_windows.extend(ts_test_windows)
-            
-            print(f"  Windows from {source_file}: {len(ts_train_windows)} train, {len(ts_val_windows)} val, {len(ts_test_windows)} test")
-        
+
+            logging.info(f"  Windows from {source_file}: {len(ts_train_windows)} train, {len(ts_val_windows)} val, {len(ts_test_windows)} test")
         # Check if we have enough windows for each split
         if not all_train_windows or not all_val_windows or not all_test_windows:
             raise ValueError("Not enough valid windows for at least one of the splits. Consider adjusting split ratios or window size.")
@@ -422,10 +428,10 @@ class TemporalWindowGenerator:
         test_ds = test_ds.batch(batch_size)
         
         # Print final dataset sizes
-        print(f"Train windows: {len(all_train_windows)} ({train_val_test_split[0]*100:.1f}%)")
-        print(f"Validation windows: {len(all_val_windows)} ({train_val_test_split[1]*100:.1f}%)")
-        print(f"Test windows: {len(all_test_windows)} ({train_val_test_split[2]*100:.1f}%)")
-        
+        logging.info(f"Train windows: {len(all_train_windows)} ({train_val_test_split[0]*100:.1f}%)")
+        logging.info(f"Validation windows: {len(all_val_windows)} ({train_val_test_split[1]*100:.1f}%)")
+        logging.info(f"Test windows: {len(all_test_windows)} ({train_val_test_split[2]*100:.1f}%)")
+
         return {
             'train': train_ds,
             'val': val_ds,

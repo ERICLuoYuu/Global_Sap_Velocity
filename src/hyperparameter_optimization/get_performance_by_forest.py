@@ -10,7 +10,7 @@ import os
 import joblib
 import time
 import warnings
-
+import xgboost as xgb
 # Add parent directory to Python path
 parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
@@ -216,16 +216,21 @@ def load_pretrained_model(model_path):
     print(f"Path exists: {os.path.exists(model_path)}")
     
     # Check file extension directly from string
+    is_joblib = False
+    is_keras = False
+    is_json = False
+    
     if model_path.endswith('.joblib'):
         print("Detected .joblib extension in string path")
         is_joblib = True
     elif model_path.endswith('.keras') or model_path.endswith('.h5'):
         print("Detected .keras or .h5 extension in string path")
         is_keras = True
+    elif model_path.endswith('.json'):
+        print("Detected .json extension in string path")
+        is_json = True
     else:
         print("No recognized extension found in string path")
-        is_joblib = False
-        is_keras = False
     
     # Now convert to Path object for easier handling
     model_path = Path(model_path)
@@ -320,6 +325,21 @@ def load_pretrained_model(model_path):
             return model, model_type, expects_sequence
         except Exception as e:
             print(f"Error loading as keras despite extension: {e}")
+            # Continue to other methods if this fails
+    
+    # Check if suffix is missing but .json extension is in the name
+    if not model_path.suffix and is_json:
+        print("Path object missing suffix but .json detected in string - will treat as json")
+        model_type = None
+        expects_sequence = False
+        
+        try:
+            print(f"Loading JSON model directly: {original_path}")
+            model, model_type, expects_sequence = _load_json_model(original_path, model_path)
+            print(f"Detected model type: {model_type}")
+            return model, model_type, expects_sequence
+        except Exception as e:
+            print(f"Error loading as JSON despite extension: {e}")
             # Continue to other methods if this fails
     
     # Determine model type from file extension and name normally
@@ -453,6 +473,17 @@ def load_pretrained_model(model_path):
             print(f"Error loading machine learning model: {e}")
             sys.exit(1)
     
+    elif model_path.suffix.lower() == '.json':
+        try:
+            print(f"Loading JSON model from {model_path}")
+            model, model_type, expects_sequence = _load_json_model(str(model_path), model_path)
+            print(f"Detected model type: {model_type} (Expects sequence: {expects_sequence})")
+            return model, model_type, expects_sequence
+        except Exception as e:
+            print(f"Error loading JSON model: {e}")
+            print(f"Error details: {str(e)}")
+            sys.exit(1)
+    
     # If we get here, let's try loading the file directly as a last resort
     print("File extension not recognized. Attempting direct loading...")
     
@@ -527,6 +558,16 @@ def load_pretrained_model(model_path):
     except Exception as keras_err:
         print(f"Failed to load as keras: {keras_err}")
     
+    # Then try JSON
+    try:
+        print("Attempting to load as JSON...")
+        model, model_type, expects_sequence = _load_json_model(original_path, model_path)
+        print("Successfully loaded as JSON!")
+        print(f"Detected model type: {model_type} (Expects sequence: {expects_sequence})")
+        return model, model_type, expects_sequence
+    except Exception as json_err:
+        print(f"Failed to load as JSON: {json_err}")
+    
     # If we get here, all attempts failed
     print(f"All loading attempts failed for path: {original_path}")
     print("Please check if the file exists and has the correct format.")
@@ -538,7 +579,182 @@ def load_pretrained_model(model_path):
         for file in os.listdir(original_path):
             print(f"  - {file}")
     
-    raise ValueError(f"Could not load model from {original_path}. Please ensure file exists and has correct format (.keras, .h5, or .joblib).")
+    raise ValueError(f"Could not load model from {original_path}. Please ensure file exists and has correct format (.keras, .h5, .joblib, or .json).")
+
+
+def _load_json_model(file_path, path_obj):
+    """
+    Helper function to load a model from JSON format.
+    
+    Supports:
+    - XGBoost models saved with model.save_model('model.json')
+    - Keras model architecture (JSON) - requires separate weights file
+    - LightGBM models saved as JSON
+    - CatBoost models saved as JSON
+    
+    Parameters:
+    -----------
+    file_path : str
+        String path to the JSON file
+    path_obj : Path
+        Path object for filename analysis
+        
+    Returns:
+    --------
+    tuple
+        (model, model_type, expects_sequence)
+    """
+    import json
+    
+    expects_sequence = False
+    model_type = None
+    
+    # First, read the JSON to determine what type of model it is
+    with open(file_path, 'r') as f:
+        json_content = json.load(f)
+    
+    # Check for XGBoost model format
+    if isinstance(json_content, dict) and ('learner' in json_content or 'version' in json_content):
+        try:
+            import xgboost as xgb
+            print("Detected XGBoost JSON format")
+            model = xgb.Booster()
+            model.load_model(file_path)
+            
+            # Determine model type from filename
+            model_name = path_obj.stem.lower() if hasattr(path_obj, 'stem') else path_obj.name.lower()
+            if 'classifier' in model_name or 'cls' in model_name:
+                model_type = 'xgb_classifier'
+            elif 'regressor' in model_name or 'reg' in model_name:
+                model_type = 'xgb_regressor'
+            else:
+                model_type = 'xgb'
+            
+            return model, model_type, expects_sequence
+        except ImportError:
+            print("XGBoost not installed. Please install with: pip install xgboost")
+            raise
+        except Exception as e:
+            print(f"Failed to load as XGBoost: {e}")
+            # Continue trying other formats
+    
+    # Check for LightGBM model format
+    if isinstance(json_content, dict) and ('name' in json_content and json_content.get('name') == 'tree'):
+        try:
+            import lightgbm as lgb
+            print("Detected LightGBM JSON format")
+            model = lgb.Booster(model_file=file_path)
+            model_type = 'lgb'
+            return model, model_type, expects_sequence
+        except ImportError:
+            print("LightGBM not installed. Please install with: pip install lightgbm")
+            raise
+        except Exception as e:
+            print(f"Failed to load as LightGBM: {e}")
+            # Continue trying other formats
+    
+    # Check for CatBoost model format
+    if isinstance(json_content, dict) and ('model_info' in json_content or 'catboost_model' in str(json_content).lower()):
+        try:
+            from catboost import CatBoost
+            print("Detected CatBoost JSON format")
+            model = CatBoost()
+            model.load_model(file_path, format='json')
+            model_type = 'catboost'
+            return model, model_type, expects_sequence
+        except ImportError:
+            print("CatBoost not installed. Please install with: pip install catboost")
+            raise
+        except Exception as e:
+            print(f"Failed to load as CatBoost: {e}")
+            # Continue trying other formats
+    
+    # Check for Keras model architecture JSON
+    if isinstance(json_content, dict) and ('class_name' in json_content or 'config' in json_content):
+        try:
+            print("Detected Keras architecture JSON format")
+            
+            # Load model architecture from JSON
+            model = tf.keras.models.model_from_json(json.dumps(json_content))
+            
+            # Check for weights file with same name
+            weights_extensions = ['.h5', '.weights.h5', '_weights.h5', '.keras']
+            weights_path = None
+            
+            base_path = str(path_obj).rsplit('.json', 1)[0]
+            for ext in weights_extensions:
+                potential_weights = base_path + ext
+                if os.path.exists(potential_weights):
+                    weights_path = potential_weights
+                    break
+            
+            if weights_path:
+                print(f"Loading weights from: {weights_path}")
+                model.load_weights(weights_path)
+            else:
+                print("Warning: No weights file found. Model architecture loaded without weights.")
+                print(f"Searched for weights at: {[base_path + ext for ext in weights_extensions]}")
+            
+            # Determine model type from architecture
+            has_bidirectional = any(isinstance(layer, tf.keras.layers.Bidirectional) for layer in model.layers)
+            has_lstm = any(isinstance(layer, tf.keras.layers.LSTM) for layer in model.layers)
+            has_conv = any(isinstance(layer, tf.keras.layers.Conv1D) for layer in model.layers)
+            
+            if has_bidirectional or has_lstm:
+                if has_conv:
+                    model_type = 'cnn_lstm'
+                else:
+                    model_type = 'lstm'
+                expects_sequence = True
+            else:
+                model_type = 'ann'
+                try:
+                    input_shape = model.input_shape
+                    expects_sequence = len(input_shape) > 2
+                except:
+                    expects_sequence = False
+            
+            return model, model_type, expects_sequence
+        except Exception as e:
+            print(f"Failed to load as Keras architecture: {e}")
+            # Continue trying other formats
+    
+    # Check for scikit-learn model exported as JSON (using sklearn-json or similar)
+    if isinstance(json_content, dict) and ('meta' in json_content or 'sklearn_version' in json_content):
+        try:
+            # Try using sklearn_json if available
+            from sklearn_json import from_json
+            print("Detected scikit-learn JSON format")
+            model = from_json(file_path)
+            
+            model_class = str(type(model)).lower()
+            if 'forest' in model_class:
+                model_type = 'rf'
+            elif 'xgb' in model_class:
+                model_type = 'xgb'
+            else:
+                model_type = 'ml_model'
+            
+            return model, model_type, expects_sequence
+        except ImportError:
+            print("sklearn-json not installed. Please install with: pip install sklearn-json")
+            raise
+        except Exception as e:
+            print(f"Failed to load as scikit-learn JSON: {e}")
+    
+    # If we couldn't determine the format, try XGBoost as a fallback (most common JSON model format)
+    try:
+        import xgboost as xgb
+        print("Attempting fallback XGBoost loading...")
+        model = xgb.Booster()
+        model.load_model(file_path)
+        model_type = 'xgb'
+        return model, model_type, expects_sequence
+    except:
+        pass
+    
+    raise ValueError(f"Could not determine JSON model format for: {file_path}. "
+                     "Supported formats: XGBoost, LightGBM, CatBoost, Keras architecture, scikit-learn (with sklearn-json).")
 
 def prepare_data_for_model(datasets, model_type, expects_sequence=False):
     """
@@ -1402,7 +1618,9 @@ def main(model_path=None):
     # Get predictions using pre-trained model
     print("Generating predictions...")
     test_predictions, test_labels_actual = get_predictions(model, test_ds, label_scaler, model_type, expects_sequence)
+    test_predictions = np.expm1(test_predictions)
     train_predictions, train_labels_actual = get_predictions(model, train_ds, label_scaler, model_type, expects_sequence)
+    train_predictions = np.expm1(train_predictions)
     
     # Save predictions to file for later use
     predictions_dir = Path('./outputs/predictions')
@@ -1661,16 +1879,16 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == '--all':
         # Evaluate all models listed
         print("\nRunning evaluation on all model types")
-        model_paths = []
+        model_paths = ['./models/xgb/default_base_daily/']
         
         # Try to find models in common directories
-        model_dirs = [
+        """ model_dirs = [
             #'./outputs/models/cnn_lstm_regression',
             './outputs/models/lstm_regression',
             #'./outputs/models/ann_regression',
             #'./outputs/models/xgb',
             #'./outputs/models/rf_regression',
-        ]
+        ] 
         
         # Find all model files
         for model_dir in model_dirs:
@@ -1680,9 +1898,10 @@ if __name__ == "__main__":
                 keras_models = list(dir_path.glob('*.keras')) + list(dir_path.glob('*.h5'))
                 # Find joblib models
                 joblib_models = list(dir_path.glob('*.joblib'))
-                
-                model_paths.extend([str(m) for m in keras_models + joblib_models])
-        
+                # find .json models (for xgboost)
+                json_models = list(dir_path.glob('*.json'))
+                model_paths.extend([str(m) for m in keras_models + joblib_models + json_models])
+        """
         if model_paths:
             print(f"Found {len(model_paths)} models to evaluate:")
             for path in model_paths:

@@ -5,11 +5,10 @@ parent_dir = str(Path(__file__).parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 import time
-from src.Analyzers import sap_analyzer_parallel
-from src.Analyzers import env_analyzer_parallel
-from src.Analyzers import sap_analyzer
+# from src.Analyzers import sap_analyzer_parallel
 from src.Analyzers import env_analyzer
-
+from src.Analyzers.sap_analyzer import SapFlowAnalyzer
+from src.Analyzers.mannual_removal_processor import add_removal_log_support
 
    
 
@@ -17,10 +16,11 @@ from src.Analyzers import env_analyzer
 if __name__ == "__main__":
     # Start the timer
     start_time = time.time()
+    add_removal_log_support(SapFlowAnalyzer)
     # Initialize analyzer
-    # analyzer = sap_analyzer_parallel.SapFlowAnalyzer(max_workers=8)
-    # env_analyzer_parallel = env_analyzer_parallel.EnvironmentalAnalyzer(max_workers=8)
-    env_analyzer = env_analyzer.EnvironmentalAnalyzer()
+    analyzer = SapFlowAnalyzer()
+    analyzer.set_removal_log('removal_log.csv')
+    #env_analyzer = env_analyzer.EnvironmentalAnalyzer()
     
     """
     # Print available sites and their basic info
@@ -34,42 +34,23 @@ if __name__ == "__main__":
             print(f"Period: {summary['time_range']['start']} to {summary['time_range']['end']}")
             print(f"Trees: {summary['trees']}")
             print(f"Missing data: {summary['missing_data']:.1f}%")
-    
-    
+    """
+
     print("\nGenerating individual plant plots...")
-    # analyzer.plot_histogram_parallel(save_dir='./outputs/figures/sap/histograms', max_workers=4)
-    
-    summary = analyzer.plot_all_plants(
-        figsize=(15, 8),
-        save_dir='./outputs/figures/sap/cleaned',
-        skip_empty=True,
-        plot_limit=20,  # limit plots per location
-        progress_update=True
-    )
-    
-    # Print summary
-    print(summary)
-    
+    # env_analyzer.run_analysis_in_batches()
+    analyzer.run_analysis_in_batches(switch='load')
+    #df_years = analyzer.calculate_site_years(file_pattern="*_sapf_data.csv")
+    #print(df_years)
     end_time = time.time()
     
     print(f"Time elapsed: {end_time - start_time:.2f} seconds")  
-    """
+    
     
     # plot environmental data
     # Plot all environmental variables with customization
     # env_analyzer_parallel.plot_histogram_parallel(save_dir='./outputs/figures/env/histograms')
-    '''
-    summary = env_analyzer_parallel.plot_all_parallel(
-        figsize=(15, 8),
-        save_dir='./outputs/figures/env/cleaned(out_warn_removed)',
-        skip_empty=True,
-        plot_limit=10,  # limit plots per location
-        progress_update=True
-    )
-    
-    print(summary)
-    '''
-    summary = env_analyzer.plot_all (
+    ''' 
+    summary = env_analyzer.plot_all(
         figsize=(15, 8),
         save_dir='./outputs/figures/env/cleaned',
         skip_empty=True,
@@ -78,7 +59,8 @@ if __name__ == "__main__":
     )
     
     print(summary)
-    '''
+    
+    
     # Collect all DataFrames
     all_dfs = []
     for location in env_analyzer_parallel.env_data:
@@ -88,5 +70,5 @@ if __name__ == "__main__":
             print(f"Added DataFrame for {location}_{plant_type}")
     
     # Find common columns
-    common_cols = env_analyzer.get_common_columns(all_dfs)
+    common_cols = env_analyzer_parallel.get_common_columns(all_dfs)
     '''

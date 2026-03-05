@@ -463,8 +463,8 @@ def main(run_id="default", block_size=1.0, buffer_size=0.0, n_cv_folds=5, use_au
     site_info_dict = {}  # Dictionary to store site metadata
     
     # Define the columns we want to use
-    used_cols = ['sap_velocity', 'ext_rad', 'sw_in', 'ta', 'ws', 'vpd','ppfd_in', 'biome', 'Day sin', 'Week sin', 'Month sin', 'Year sin', 'mean_annual_temp', 'mean_annual_precip', 'temp_seasonality', 'precip_seasonality']
-    all_biome_types = set()
+    used_cols = ['sap_velocity', 'ext_rad', 'sw_in', 'ta', 'ws', 'vpd','ppfd_in', 'Day sin', 'Week sin', 'Month sin', 'Year sin', 'mean_annual_temp', 'mean_annual_precip']
+
     all_possible_biome_types = ['Boreal forest', 'Subtropical desert', 'Temperate forest', 'Temperate grassland desert', 'Temperate rain forest', 'Tropical forest savanna', 'Tropical rain forest', 'Tundra', 'Woodland/Shrubland']
     
     # Sort data files for deterministic processing order

@@ -1,10 +1,14 @@
+import sys
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import os
-
+parent_dir = str(Path(__file__).parent.parent)
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+from path_config import PathConfig, get_default_paths
 # Create output directories if they don't exist
 os.makedirs('./outputs/figures/mismatch_analysis/mismatched_points', exist_ok=True)
 os.makedirs('./outputs/statistics', exist_ok=True)
@@ -792,7 +796,8 @@ def analyze_vpd_mismatches(era5_data, env_files, threshold=0.5, ratio_threshold=
 # Example usage
 if __name__ == "__main__":
     # Load ERA5 data
-    era5_data = pd.read_csv('data/raw/era5_extracted_data1.csv')
+    paths = get_default_paths()
+    era5_data = pd.read_csv(paths.era5_discrete_data_path)
     era5_data['TIMESTAMP'] = pd.to_datetime(era5_data['TIMESTAMP'])
     era5_data.set_index('TIMESTAMP', inplace=True)
     era5_data['vpd'] = era5_data['vpd'] / 10  # Converting from hPa to kPa
@@ -807,8 +812,8 @@ if __name__ == "__main__":
             era5_data[col] *= 1000  # Convert from m to mm
     
     # Get environmental data files
-    env_files = list(Path('./outputs/processed_data/env/filtered').glob("*_env_data_filtered.csv"))
-    
+    env_files = list(paths.env_filtered_dir.glob("*_env_data_filtered.csv"))
+
     # Run analysis with threshold-based detection method focusing on specific VPD ranges
     analyze_vpd_mismatches(
         era5_data, 

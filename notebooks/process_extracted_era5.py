@@ -10,8 +10,8 @@ print(parent_dir)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 from src.derive_climate_data.climate_data_calculator import ClimateDataCalculator
-era5_data = pd.read_csv('data/raw/era5_extracted_data1.csv')
-site_info = pd.read_csv('data/raw/0.1.5/0.1.5/csv/sapwood/site_info1.csv')
+era5_data = pd.read_csv('data/raw/extracted_data/era5land_site_data/sapwood/era5_extracted_data.csv')
+site_info = pd.read_csv('data/raw/0.1.5/0.1.5/csv/sapwood/site_info.csv')
 print(era5_data.head())
 print(era5_data.shape)
 print(era5_data['site_id'].nunique())
@@ -442,7 +442,7 @@ def compare_humidity(era5_file='data/raw/era5_extracted_data1.csv', **kwargs):
         era5_file=era5_file,
         **kwargs
     )
-def compare_shortwave_radiation(era5_unit_conversion, era5_file='data/raw/era5_extracted_data1.csv', **kwargs):
+def compare_shortwave_radiation(era5_unit_conversion, era5_file='data/raw/extracted_data/era5land_site_data/sapwood/era5_extracted_data.csv', **kwargs):
     """Compare shortwave incoming radiation data (assuming both in same units)."""
     return compare_era5_env_data(
         variable='sw_in',

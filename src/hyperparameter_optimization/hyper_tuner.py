@@ -10,19 +10,21 @@ import logging
 parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
+from path_config import PathConfig, get_default_paths
 from src.cross_validation.timeseries_split import GroupedTimeSeriesSplit
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, ParameterGrid, ParameterSampler
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.svm import SVR, SVC
 from xgboost.sklearn import XGBRegressor, XGBClassifier
 from abc import ABC, abstractmethod
-from sklearn.model_selection import KFold, GroupKFold, TimeSeriesSplit
+from sklearn.model_selection import KFold, GroupKFold, TimeSeriesSplit, PredefinedSplit, StratifiedGroupKFold
 from typing import Dict, Union, List, Optional, Tuple, Callable
 import tensorflow as tf
 import os
-
+from sklearn.metrics import get_scorer
+from sklearn.base import BaseEstimator, RegressorMixin
 # Set threading parameters before any other TensorFlow operations
 #cpu_num = 10  # or whatever number you want to use
 #tf.config.threading.set_intra_op_parallelism_threads(cpu_num)
@@ -31,132 +33,25 @@ from tensorflow import keras
 from sklearn.preprocessing import LabelEncoder
 import itertools
 import warnings
+# Set environment variables for determinism BEFORE importing TensorFlow
+os.environ['TF_DETERMINISTIC_OPS'] = '1'
+os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+os.environ['PYTHONHASHSEED'] = '42'
+# Force TensorFlow to use deterministic algorithms (TF 2.6+)
+try:
+    tf.config.experimental.enable_op_determinism()
+except:
+    # Fallback for older TF versions
+    logging.warning("Warning: Your TensorFlow version doesn't support enable_op_determinism()")
+    # Try alternative approaches
+    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+# Limit TensorFlow to use only one thread for CPU operations
+n_physical_cores = os.cpu_count() // 2  # Estimate of physical cores
+#n_physical_cores = 1
+tf.config.threading.set_inter_op_parallelism_threads(n_physical_cores)
+tf.config.threading.set_intra_op_parallelism_threads(n_physical_cores)
 
 
-# Simple logging setup function
-def setup_logging(log_dir=None):
-    """Set up basic logging configuration"""
-    if log_dir is None:
-        log_dir = Path('./outputs/logs')
-    
-    log_dir = Path(log_dir)
-    if not log_dir.exists():
-        log_dir.mkdir(parents=True, exist_ok=True)
-    
-    log_file = log_dir / 'optimizer.log'
-    
-    # Configure logging to file and console with basic format
-    handlers = [
-        logging.FileHandler(log_file),
-        logging.StreamHandler()
-    ]
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=handlers
-    )
-    
-    # Suppress warnings
-    warnings.filterwarnings("ignore")
-    
-    return logging.getLogger()
-
-
-def setup_distribution_strategy():
-    """
-    Set up the appropriate distribution strategy based on environment.
-    
-    Returns:
-    --------
-    devices : str
-        Type of devices being used ('GPUs', 'CPUs', or 'Nodes')
-    strategy : tf.distribute.Strategy
-        The appropriate distribution strategy
-    is_multi_node : bool
-        Whether we're running in a multi-node environment
-    num_devices : int
-        Number of devices available
-    """
-    # Clear any existing strategy to avoid mixing
-    tf.distribute.experimental_set_strategy(None)
-    
-    # Check if running under SLURM
-    if 'SLURM_JOB_NUM_NODES' in os.environ:
-        num_nodes = int(os.environ.get('SLURM_JOB_NUM_NODES', '1'))
-        if num_nodes > 1:
-            # Multi-node setup
-            setup_tf_config_for_slurm()
-            # Use NCCL for best GPU performance
-            communication_options = tf.distribute.experimental.CommunicationOptions(
-                implementation=tf.distribute.experimental.CommunicationImplementation.NCCL)
-            strategy = tf.distribute.MultiWorkerMirroredStrategy(
-                communication_options=communication_options)
-            return 'Nodes', strategy, True, num_nodes
-    
-    # Single node setup - use MirroredStrategy if GPUs are available
-    gpus = tf.config.list_physical_devices('GPU')
-    print(gpus)
-    if gpus:
-        devices = 'GPUs'
-        strategy = tf.distribute.MirroredStrategy()
-        return devices, strategy, False, len(gpus)
-    else:
-        devices = 'CPUs'
-        available_cpus = 1
-        # Don't try to set threading parameters here
-        # Just use a single device strategy instead for CPUs
-        strategy = tf.distribute.get_strategy()
-        return devices, strategy, False, available_cpus
-
-def setup_tf_config_for_slurm():
-    """
-    Set up the TF_CONFIG environment variable for MultiWorkerMirroredStrategy using SLURM.
-    """
-    logger = logging.getLogger()
-    
-    # Get node list from SLURM
-    try:
-        node_list = os.environ.get('SLURM_NODELIST', '')
-        if '[' in node_list:  # Handle compressed node list format (e.g., "node[1-3,5]")
-            cmd = f"scontrol show hostnames {node_list}"
-            nodes = subprocess.check_output(cmd, shell=True).decode().splitlines()
-        else:
-            nodes = node_list.split(',')
-        
-        # Get current node's hostname
-        current_host = socket.gethostname()
-        
-        # Get current node's rank (assuming SLURM_PROCID represents the worker rank)
-        if 'SLURM_PROCID' in os.environ:
-            node_rank = int(os.environ['SLURM_PROCID'])
-        else:
-            # Try to determine which node we're on if SLURM_PROCID is not available
-            node_rank = nodes.index(current_host) if current_host in nodes else 0
-        
-        # Create worker list with a consistent port
-        port = 12345  # Choose an available port that's open on your cluster
-        worker_hosts = [f"{node}:{port}" for node in nodes]
-        
-        # Create and set TF_CONFIG
-        tf_config = {
-            "cluster": {
-                "worker": worker_hosts
-            },
-            "task": {
-                "type": "worker",
-                "index": node_rank
-            }
-        }
-        
-        os.environ["TF_CONFIG"] = json.dumps(tf_config)
-        logger.info(f"Set TF_CONFIG for node {node_rank} of {len(nodes)}")
-        
-    except Exception as e:
-        logger.error(f"Failed to set up TF_CONFIG: {e}")
-        # Fallback to no TF_CONFIG (single-worker)
-        if "TF_CONFIG" in os.environ:
-            del os.environ["TF_CONFIG"]
 
 
 class BaseOptimizer(ABC):
@@ -177,8 +72,6 @@ class BaseOptimizer(ABC):
         Number of jobs to run in parallel
     verbose : int, default=1
         Controls the verbosity
-    log_dir : str, default=None
-        Directory for log files
     """
     
     def __init__(
@@ -189,8 +82,8 @@ class BaseOptimizer(ABC):
         random_state: int = 42,
         n_jobs: int = -1,
         verbose: int = 1,
-        log_dir: Optional[str] = None,
-        
+        search_type: str = 'grid',
+        paths: Optional[PathConfig] = None
     ):
         self.param_grid = param_grid
         self.scoring = scoring
@@ -202,9 +95,8 @@ class BaseOptimizer(ABC):
         self.best_score_ = None
         self.best_estimator_ = None
         self.cv_results_ = None
-        
-        # Set up logging once for all instances
-        self.logger = setup_logging(log_dir)
+        self.search_type = search_type.lower()
+        self.paths = paths if paths is not None else get_default_paths()
     
     def _get_cv_splitter(
         self,
@@ -214,6 +106,10 @@ class BaseOptimizer(ABC):
         """Get the appropriate cross-validation splitter."""
         if split_type == 'spatial':
             return GroupKFold(n_splits=self.n_splits)
+        elif split_type == 'spatial_stratified':
+            # Add validation for StratifiedGroupKFold
+            n_splits = self.n_splits
+            return StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
         elif split_type == 'temporal':
             return TimeSeriesSplit(
                 n_splits=self.n_splits,
@@ -223,18 +119,10 @@ class BaseOptimizer(ABC):
             )
         else:  # random
             is_shuffle = kwargs.get('is_shuffle', False)
-            if is_shuffle:
-                return KFold(
-                    n_splits=self.n_splits,
-                    shuffle=True,
-                    random_state=self.random_state
-                )
-            else:
-
-                return KFold(
-                    n_splits=self.n_splits,
-                    shuffle=kwargs.get('is_shuffle', False),
-                    
+            return KFold(
+                n_splits=self.n_splits,
+                shuffle=is_shuffle,
+                random_state=self.random_state if is_shuffle else None
             )
     
     @abstractmethod
@@ -249,7 +137,7 @@ class BaseOptimizer(ABC):
         pass
 
 
-class MLOptimizer(BaseOptimizer):
+class MLOptimizer(BaseOptimizer, BaseEstimator, RegressorMixin):
     """
     Optimizer for scikit-learn compatible models.
     
@@ -271,8 +159,6 @@ class MLOptimizer(BaseOptimizer):
         Number of jobs to run in parallel
     verbose : int, default=1
         Controls the verbosity
-    log_dir : str, default=None
-        Directory for log files
     save_model_dir : str, default=None
         Directory to save the best model
     """
@@ -287,8 +173,8 @@ class MLOptimizer(BaseOptimizer):
         random_state: int = 42,
         n_jobs: int = -1,
         verbose: int = 1,
-        log_dir: Optional[str] = None,
-        save_model_dir: Optional[str] = None
+        save_model_dir: Optional[str] = None,
+        search_type: str = 'grid'
     ):  
         if task.lower() not in ['regression', 'classification']:
             raise ValueError("Unknown task type. Choose 'regression' or 'classification'.")
@@ -296,7 +182,8 @@ class MLOptimizer(BaseOptimizer):
         if scoring is None:
             scoring = 'r2' if task.lower() == 'regression' else 'accuracy'
             
-        super().__init__(param_grid, scoring, n_splits, random_state, n_jobs, verbose, log_dir)
+        super().__init__(param_grid, scoring, n_splits, random_state, n_jobs, verbose, search_type)
+        self.logger = logging.getLogger(f'{model_type}_optimizer')
         self.model_type = model_type.lower()
         self.task = task.lower()
         self.model = self._get_base_model()
@@ -305,7 +192,7 @@ class MLOptimizer(BaseOptimizer):
             if not self.save_model_dir.exists():
                 self.save_model_dir.mkdir(parents=True, exist_ok=True)
         else:
-            self.save_model_dir = Path('./outputs/models' + f'/{model_type}_{task}')
+            self.save_model_dir = self.paths.models_root / f'{model_type}_{task}'
             if not self.save_model_dir.exists():
                 self.save_model_dir.mkdir(parents=True, exist_ok=True)
         
@@ -324,9 +211,10 @@ class MLOptimizer(BaseOptimizer):
                 random_state=self.random_state,
                 n_jobs=self.n_jobs,
                 objective='reg:squarederror',
-                eval_metric='rmse',
+                eval_metric='rmse', 
                 enable_categorical=True,
-                tree_method='hist'  # Added for better compatibility
+                tree_method='hist',  # Added for better compatibility
+                early_stopping_rounds=50,  
             ),
             'classification': XGBClassifier(
                 random_state=self.random_state,
@@ -348,68 +236,223 @@ class MLOptimizer(BaseOptimizer):
         
         return models[self.model_type][self.task]
     
+    def _manual_search(
+            self,
+            X: pd.DataFrame,
+            y: pd.Series,
+            cv_splitter,
+            n_iterations: int = None,
+            is_refit: bool = True,
+            **kwargs
+        ):
+            """
+            Performs a manual grid/random search, correctly handling the 'best_estimator_'
+            attribute based on the 'is_refit' flag.
+            """
+            self.logger.info(f"Starting manual {self.search_type} search for {self.model_type} model.")
+            self.logger.info(f"Parameter grid: {self.param_grid}")
+
+            scorer = get_scorer(self.scoring)
+            if self.search_type == 'random':
+                if n_iterations is None:
+                    raise ValueError("'n_iterations' must be set for random search.")
+                param_iterable = ParameterSampler(
+                    self.param_grid, n_iter=n_iterations, random_state=self.random_state
+                )
+            else:
+                param_iterable = ParameterGrid(self.param_grid)
+
+            cv_results = {
+            'params': [], 'mean_test_score': [], 'std_test_score': [], 'all_fold_scores': [],
+            'param_best_score': [], 'best_model_from_param': []
+        }
+            if self.model_type == 'xgb':
+                cv_results['all_best_iterations'] = []
+                        # Convert to numpy for robust indexing, in case they are pandas objects
+            if isinstance(X, pd.DataFrame):
+                X_np = X.values
+            else:
+                X_np = X # It's already a numpy array
+
+            if isinstance(y, pd.Series):
+                y_np = y.values
+            else:
+                y_np = y # It's already a numpy array
+
+            # Outer Loop: Hyperparameters
+            for params in param_iterable:
+                self.logger.debug(f"Evaluating parameters: {params}")
+                fold_scores = []
+                fold_best_iterations = []
+                param_best_score = -np.inf
+                best_model_from_param = None
+                y_stratify = kwargs.get('y_stratify', None)
+                if y_stratify is None:
+                    self.logger.debug("No stratification provided, using target variable for stratification.")
+                    # If no stratification is provided, use the target variable directly
+                    y_stratify = y_np
+                # Inner Loop: CV Folds
+                for train_idx, val_idx in cv_splitter.split(X, y_stratify, groups=kwargs.get('groups')):
+                    
+                    # Use the NumPy arrays with the generated indices for slicing.
+                    # This is robust and avoids pandas indexing issues.
+                    X_train_fold, y_train_fold = X_np[train_idx], y_np[train_idx]
+                    X_val_fold, y_val_fold = X_np[val_idx], y_np[val_idx]
+
+                    model = self._get_base_model()
+                    model.set_params(**params)
+                    
+                    # Model-Specific Fitting
+                    if self.model_type == 'xgb':
+                        model.fit(
+                            X_train_fold, y_train_fold,
+                            eval_set=[(X_val_fold, y_val_fold)],
+                            verbose=False
+                        )
+                        # access the best iteration if uses early stopping
+                        try:
+                            fold_best_iterations.append(model.best_iteration)
+                            self.logger.debug(f"Best iteration for current fold: {model.best_iteration}")
+                        except AttributeError:
+                            self.logger.debug("No best iteration found for current fold.")
+                            fold_best_iterations.append(None)
+                    else:
+                        model.fit(X_train_fold, y_train_fold)
+
+                    score = scorer(model, X_val_fold, y_val_fold)
+                    fold_scores.append(score)
+
+                    # Check if this is the best single model seen so far ---
+                    if score > param_best_score:
+                        param_best_score = score
+                        best_model_from_param = model
+                        self.logger.debug(f"New best single model found. Score: {param_best_score:.4f} with params: {params}")
+
+
+                # Aggregate results for this parameter set
+                cv_results['params'].append(params)
+                cv_results['mean_test_score'].append(np.mean(fold_scores))
+                cv_results['std_test_score'].append(np.std(fold_scores))
+                cv_results['all_fold_scores'].append(fold_scores)
+                cv_results['param_best_score'].append(param_best_score)
+                cv_results['best_model_from_param'].append(best_model_from_param)
+                if self.model_type == 'xgb':
+                    cv_results['all_best_iterations'].append(fold_best_iterations)
+
+            # --- Find Best Parameters (based on AVERAGE score) ---
+            best_idx = np.argmax(cv_results['mean_test_score'])
+            self.best_params_ = cv_results['params'][best_idx]
+            self.best_score_ = cv_results['mean_test_score'][best_idx]
+            self.cv_results_ = cv_results
+            
+            self.logger.info(f"Search complete. Best average score: {self.best_score_:.4f}")
+            self.logger.info(f"Best parameters (based on average score): {self.best_params_}")
+
+            # --- UPDATED: Conditional Refitting and Assignment Block ---
+            if is_refit:
+                # --- REFIT LOGIC ---
+                # Create a NEW model and train it on ALL data.
+                final_params = self.best_params_.copy()
+                if self.model_type == 'xgb':
+                    best_iterations = cv_results['all_best_iterations'][best_idx]
+                    # Only process if we actually have valid iterations
+                    valid_iterations = [iter for iter in best_iterations if iter is not None]
+                    optimal_n_estimators = None
+                    if valid_iterations and len(valid_iterations) > 0:
+                        optimal_n_estimators = int(round(np.median(valid_iterations)))
+                        final_params['n_estimators'] = optimal_n_estimators
+                        self.logger.info(f"Using median of {len(valid_iterations)} valid iterations: {optimal_n_estimators}")
+                    else:
+                        # Keep the original n_estimators from best_params
+                        self.logger.info("No early stopping iterations found, keeping original n_estimators")
+                    final_params['n_estimators'] = optimal_n_estimators if optimal_n_estimators is not None else final_params.get('n_estimators', 1000)
+                    self.logger.info(f"Median best iterations: {best_iterations} -> Refitting with {final_params['n_estimators']} estimators.")
+                    final_params['early_stopping_rounds'] = None
+                
+                self.logger.info("Refitting model with best parameters on the full dataset.")
+                self.best_estimator_ = self._get_base_model()
+                self.best_estimator_.set_params(**final_params)
+                self.best_estimator_.fit(X, y, verbose=False)
+            else:
+                # --- NO REFIT LOGIC ---
+                # Assign the best model saved from the folds directly.
+                self.logger.info(
+                    "Refitting is disabled. 'best_estimator_' is the single best model found in one of the CV folds."
+                )
+                self.best_estimator_ = cv_results['best_model_from_param'][best_idx]
+                # Note: The score of `best_estimator_` is `param_best_score`, which may
+                # be different from `self.best_score_` (the best average).
+
+            return self
+
+
     def fit(
         self,
         X: Union[np.ndarray, pd.DataFrame],
         y: Union[np.ndarray, pd.Series],
+        is_cv: bool = True,
+        is_refit: bool = True,
         split_type: str = 'random',
+        n_iterations: int = None,
+        X_val: Optional[Union[np.ndarray, pd.DataFrame]] = None,
+        y_val: Optional[Union[np.ndarray, pd.Series]] = None,
         **kwargs
     ):
         """
-        Perform grid search optimization.
-        
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Training data
-        y : array-like of shape (n_samples,)
-            Target values
-        split_type : str, default='random'
-            Type of cross-validation split ('random', 'spatial', or 'temporal')
-        **kwargs : dict
-            Additional arguments for cross-validation splitter
-        
-        Returns
-        -------
-        self : returns an instance of self
+        Performs hyperparameter optimization by dispatching to a manual search loop.
         """
         try:
-            # Get appropriate CV splitter
-            cv = self._get_cv_splitter(split_type, **kwargs)
-            
-            self.logger.info(f"Starting grid search for {self.model_type} model with {split_type} split")
-            
-            # Set up GridSearchCV
-            grid_search = GridSearchCV(
-                estimator=self.model,
-                param_grid=self.param_grid,
-                scoring=self.scoring,
-                cv=cv,
-                n_jobs=self.n_jobs,
-                verbose=self.verbose
-            )
-            
-            # Handle groups for spatial/temporal cross-validation
-            if split_type in ['spatial']:
-                if 'groups' not in kwargs:
-                    raise ValueError("groups parameter is required for spatial cross-validation")
-                grid_search.fit(X, y, groups=kwargs['groups'])
+            # Ensure data is in pandas format for consistent .iloc slicing
+            if not isinstance(X, pd.DataFrame):
+                X = pd.DataFrame(X)
+            if not isinstance(y, pd.Series):
+                y = pd.Series(y, name='target')
+
+            if is_cv:
+                # --- Standard Cross-Validation ---
+                cv_splitter = self._get_cv_splitter(split_type, **kwargs)
+                self._manual_search(X, y, cv_splitter, n_iterations, is_refit, **kwargs)
+
             else:
-                grid_search.fit(X, y, )
-            
-            # Store results
-            self.best_params_ = grid_search.best_params_
-            self.best_score_ = grid_search.best_score_
-            self.best_estimator_ = grid_search.best_estimator_
-            self.cv_results_ = grid_search.cv_results_
-            # save the best model
-            self.save_best_model(path=self.save_model_dir)
-            self.logger.info(f"Grid search completed. Best score: {self.best_score_:.4f}")
-            self.logger.info(f"Best parameters: {self.best_params_}")
-            
+                # --- Fixed Validation Set (Non-CV) ---
+                self.logger.info(f"Optimizing with a fixed validation set.")
+                if X_val is None or y_val is None:
+                    self.logger.warning("Using fixed validation set splitted from training data.")
+                    cv_splitter = self._get_cv_splitter(split_type, **kwargs)
+                    y_stratify = kwargs.get('y_stratify', None)
+                    # Split the data into training and validation sets
+                    train_idx, val_idx = next(cv_splitter.split(X, y_stratify, groups=kwargs.get('groups')))
+                    X_train_fold, y_train_fold = X.iloc[train_idx], y.iloc[train_idx]
+                    X_val_fold, y_val_fold = X.iloc[val_idx], y.iloc[val_idx]
+                    # Now, assign them to the variables you use later.
+                    X = X_train_fold
+                    y = y_train_fold
+                    X_val = X_val_fold
+                    y_val = y_val_fold
+                else:
+                    self.logger.info("Using fixed validation set provided by user.")
+                    # Ensure validation data is also in pandas format
+                    if not isinstance(X_val, pd.DataFrame):
+                        X_val = pd.DataFrame(X_val)
+                    if not isinstance(y_val, pd.Series):
+                        y_val = pd.Series(y_val, name='target')
+
+                # For PredefinedSplit, we combine data and provide an index
+                X_combined = pd.concat([X, X_val], ignore_index=True)
+                y_combined = pd.concat([y, y_val], ignore_index=True)
+                
+                # -1 for training, 0 for validation
+                split_index = np.concatenate([np.full(len(X), -1, dtype=int), np.full(len(X_val), 0, dtype=int)])
+                pds = PredefinedSplit(test_fold=split_index)
+                
+                # Pass the combined data and the PredefinedSplitter to the manual search
+                self._manual_search(X_combined, y_combined, pds, n_iterations, is_refit, **kwargs)
+            # self.save_best_model(path=self.save_model_dir)
+                
             return self
+
         except Exception as e:
-            self.logger.error(f"Error in grid search: {e}")
+            self.logger.error(f"An error occurred during fitting: {e}", exc_info=True)
             raise
 
     def get_best_model(self):
@@ -512,10 +555,6 @@ class DLOptimizer(BaseOptimizer):
         Random state for reproducibility
     verbose : int, default=1
         Controls the verbosity
-    use_distribution : bool, default=True
-        Whether to use distributed training strategies
-    log_dir : str, default=None
-        Directory for log files
     """
     
     def __init__(
@@ -530,28 +569,27 @@ class DLOptimizer(BaseOptimizer):
         n_splits: int = 5,
         random_state: int = 42,
         verbose: int = 1,
-        use_distribution: bool = True,
-        log_dir: Optional[str] = None,
         back_up_dir: Optional[str] = None,
         save_model_dir: Optional[str] = None,
+        search_type: str = 'grid'
     ):
         # Set default scoring based on task
         if scoring is None:
             scoring = 'val_loss' if task.lower() == 'regression' else 'val_accuracy'
             
-        super().__init__(param_grid, scoring, n_splits, random_state, 1, verbose, log_dir)
+        super().__init__(param_grid, scoring, n_splits, random_state, 1, verbose, search_type)
+        self.logger = logging.getLogger(f'{model_type}_optimizer')
         self.base_architecture = base_architecture
         self.task = task.lower()
         self.input_shape = input_shape
         self.output_shape = output_shape
         self.label_encoder = LabelEncoder() if task == 'classification' else None
         self.best_model_weights = None
-        self.use_distribution = use_distribution
         
         if back_up_dir is not None:
             self.back_up_dir = Path(back_up_dir)
         else:
-            self.back_up_dir = Path('./outputs/hyper_tuning/tmp')
+            self.back_up_dir = self.paths.hyper_tuning_tmp_dir / f'{model_type}_{task}'
         if not self.back_up_dir.exists():
             self.back_up_dir.mkdir(parents=True, exist_ok=True)
         
@@ -560,28 +598,12 @@ class DLOptimizer(BaseOptimizer):
             if not self.save_model_dir.exists():
                 self.save_model_dir.mkdir(parents=True, exist_ok=True)
         else:
-            self.save_model_dir = Path('./outputs/models' + f'/{model_type}_{task}')
+            self.save_model_dir = self.paths.models_root / f'{model_type}_{task}'
             if not self.save_model_dir.exists():
                 self.save_model_dir.mkdir(parents=True, exist_ok=True)
         
         self.logger.info(f"Initialized DLOptimizer for {task} task")
         
-        # Set up distribution strategy if requested
-        if self.use_distribution:
-            device, self.strategy, self.is_multi_node, num_devices = setup_distribution_strategy()
-            strategy_type = 'MultiWorkerMirroredStrategy' if self.is_multi_node else 'MirroredStrategy'
-            self.logger.info(f"Using {strategy_type} with {self.strategy.num_replicas_in_sync} replicas")
-            
-            if self.is_multi_node:
-                self.logger.info(f"Running on {num_devices} nodes in distributed mode")
-            else:
-                device_type = device 
-                if num_devices > 0:
-                    self.logger.info(f"Running on {num_devices} {device_type} in single-node mode")
-        else:
-            self.strategy = None
-            self.is_multi_node = False
-            self.logger.info("Distribution strategy disabled")
         
         # Organize parameters by category
         self.architecture_params = param_grid.get('architecture', {})
@@ -635,22 +657,13 @@ class DLOptimizer(BaseOptimizer):
     
     def _create_model(self, architecture_params: Dict) -> keras.Model:
         """Create model with given architecture parameters."""
-        if self.strategy:
-            with self.strategy.scope():
-                model = self.base_architecture(
-                    input_shape=self.input_shape,
-                    output_shape=self.output_shape,
-                    **architecture_params
-                )
-                return model
-        else:
-            # No distribution strategy
-            model = self.base_architecture(
-                input_shape=self.input_shape,
-                output_shape=self.output_shape,
-                **architecture_params
-            )
-            return model
+        
+        model = self.base_architecture(
+            input_shape=self.input_shape,
+            output_shape=self.output_shape,
+            **architecture_params
+        )
+        return model
     
     def _compile_model(
         self,
@@ -675,17 +688,13 @@ class DLOptimizer(BaseOptimizer):
             metrics=metrics,
         )
         return model
-    
-    def _get_callbacks(self, fold: int, training_params: Dict) -> List[keras.callbacks.Callback]:
+
+    def _get_callbacks(self, is_refit: bool, fold: int, training_params: Dict) -> List[keras.callbacks.Callback]:
         """Get callbacks for training with specific training parameters."""
-        callbacks = [
-            keras.callbacks.EarlyStopping(
-                monitor=self.scoring,
-                patience=training_params.get('patience', 10),
-                restore_best_weights=True
-            ),
+        if is_refit:
+            callbacks = [
             keras.callbacks.ModelCheckpoint(
-                self.back_up_dir/f'temp_best_model_fold_{fold}.weights.h5',
+                self.back_up_dir/f'temp_best_model_refit.weights.h5',
                 monitor=self.scoring,
                 save_best_only=True,
                 save_weights_only=True,
@@ -697,24 +706,30 @@ class DLOptimizer(BaseOptimizer):
                 factor=0.5,
                 min_lr=1e-6
             )
-        ]
-        
-        # Add special callbacks for distributed training
-        if self.strategy and self.is_multi_node:
-            # Add BackupAndRestore for fault tolerance in multi-worker setup
-            backup_dir = self.back_up_dir/f'backup_{fold}'
-            if not os.path.exists(backup_dir):
-                Path(backup_dir).mkdir(parents=True, exist_ok=True)
-            os.makedirs(backup_dir, exist_ok=True)
-            callbacks.append(
-                keras.callbacks.BackupAndRestore(
-                    backup_dir=backup_dir,
-                    save_freq='epoch'  # Can also be an integer for step-based backup
+        ]  
+        else:
+            callbacks = [
+                keras.callbacks.EarlyStopping(
+                    monitor=self.scoring,
+                    patience=training_params.get('patience', 10),
+                    restore_best_weights=True
+                ),
+                keras.callbacks.ModelCheckpoint(
+                    self.back_up_dir/f'temp_best_model_fold_{fold}.weights.h5',
+                    monitor=self.scoring,
+                    save_best_only=True,
+                    save_weights_only=True,
+                    mode='min' if 'loss' in self.scoring else 'max'
+                ),
+                keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss',
+                    patience=5,
+                    factor=0.5,
+                    min_lr=1e-6
                 )
-            )
-            
+            ]  
         return callbacks
-    
+
     def _get_param_combinations(self):
         """Generate all parameter combinations for grid search."""
         param_combinations = []
@@ -806,30 +821,7 @@ class DLOptimizer(BaseOptimizer):
                 
         return param_combinations
     
-    def _create_distributed_dataset(
-        self, 
-        X: np.ndarray, 
-        y: np.ndarray,
-        batch_size: int
-    ) -> tf.data.Dataset:
-        """Create a distributed dataset for training."""
-        dataset = tf.data.Dataset.from_tensor_slices((X, y))
-        
-        # Get global batch size
-        if self.strategy:
-            global_batch_size = batch_size * self.strategy.num_replicas_in_sync
-        else:
-            global_batch_size = batch_size
-            
-        # Configure dataset for performance
-        dataset = dataset.shuffle(buffer_size=10000)
-        dataset = dataset.batch(global_batch_size)
-        dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-        
-        # Distribute dataset if using a strategy
-        if self.strategy:
-            return self.strategy.experimental_distribute_dataset(dataset)
-        return dataset
+    
     
     def fit(
         self,
@@ -837,6 +829,8 @@ class DLOptimizer(BaseOptimizer):
         y: Union[np.ndarray, pd.Series],
         split_type: str = 'random',
         is_cv: bool = True,
+        is_refit: bool = True,
+        n_iterations: Optional[int] = None,
         X_val: Optional[Union[np.ndarray, pd.DataFrame]] = None,
         y_val: Optional[Union[np.ndarray, pd.Series]] = None,
         **kwargs
@@ -881,16 +875,20 @@ class DLOptimizer(BaseOptimizer):
                 cv = self._get_cv_splitter(split_type, **kwargs)
             
             param_combinations = self._get_param_combinations()
+            if self.search_type == 'random' and n_iterations is not None:
+                # Randomly sample n_iterations from the full parameter combinations
+                if n_iterations > len(param_combinations):
+                    warnings.warn(f"Requested {n_iterations} iterations, but only {len(param_combinations)} combinations available. Using all combinations.")
+                    self.logger.warning(f"Requested {n_iterations} iterations, but only {len(param_combinations)} combinations available. Using all combinations.")
+                    n_iterations = len(param_combinations)
+                param_combinations = np.random.choice(param_combinations, size=n_iterations, replace=False).tolist()
             all_results = []
             best_score = float('inf') if 'loss' in self.scoring else float('-inf')
             best_params = None
-            
-            self.logger.info(f"Evaluating {len(param_combinations)} parameter combinations")
-            
+            self.logger.info(f"Evaluating {len(param_combinations)} parameter combinations")   
             for combo_idx, (arch_params, opt_name, opt_params, train_params) in enumerate(param_combinations):
                 # Clear TensorFlow state between iterations
                 keras.backend.clear_session()
-                tf.distribute.experimental_set_strategy(None)
                 
                 self.logger.info(f"Parameter combination {combo_idx+1}/{len(param_combinations)}")
                 self.logger.info(f"Architecture params: {arch_params}")
@@ -902,7 +900,9 @@ class DLOptimizer(BaseOptimizer):
                     fold_scores = []
                     fold_histories = []
                     current_model = None
-                    
+                    combo_best_score = float('inf') if 'loss' in self.scoring else float('-inf')
+                    combo_epochs = []
+
                     for fold, (train_idx, val_idx) in enumerate(cv.split(X, y, groups=kwargs.get('groups'))):
                         self.logger.info(f"Training fold {fold+1}/{self.n_splits}")
                         
@@ -921,46 +921,21 @@ class DLOptimizer(BaseOptimizer):
                         # Get current batch size from training parameters
                         batch_size = train_params.get('batch_size', 32)
                         
-                        # Distributed training path
-                        if self.strategy:
-                            with self.strategy.scope():
-                                # Create and compile model within strategy scope
-                                model = self._create_model(arch_params)
-                                model = self._compile_model(
-                                    model, 
-                                    opt_name,
-                                    opt_params
-                                )
-                                
-                                # Create datasets for distributed training
-                                train_dataset = self._create_distributed_dataset(X_train, y_train, batch_size)
-                                val_dataset = self._create_distributed_dataset(X_val_fold, y_val_fold, batch_size)
-                                
-                                # Train model (all within the same strategy scope)
-                                history = model.fit(
-                                    train_dataset,
-                                    validation_data=val_dataset,
-                                    epochs=train_params.get('epochs', 100),
-                                    callbacks=self._get_callbacks(fold, train_params),
-                                    verbose=self.verbose
-                                )
-                        else:
-                            # Standard training without distribution
-                            model = self._create_model(arch_params)
-                            model = self._compile_model(
-                                model, 
-                                opt_name,
-                                opt_params
-                            )
-                            
-                            history = model.fit(
-                                X_train, y_train,
-                                validation_data=(X_val_fold, y_val_fold),
-                                batch_size=batch_size,
-                                epochs=train_params.get('epochs', 100),
-                                callbacks=self._get_callbacks(fold, train_params),
-                                verbose=self.verbose
-                            )
+                        model = self._create_model(arch_params)
+                        model = self._compile_model(
+                            model, 
+                            opt_name,
+                            opt_params
+                        )
+                        
+                        history = model.fit(
+                            X_train, y_train,
+                            validation_data=(X_val_fold, y_val_fold),
+                            batch_size=batch_size,
+                            epochs=train_params.get('epochs', 100),
+                            callbacks=self._get_callbacks(is_refit, fold, train_params),
+                            verbose=self.verbose
+                        )
                         
                         # Store history and score
                         fold_histories.append(history.history)
@@ -969,17 +944,18 @@ class DLOptimizer(BaseOptimizer):
                         fold_scores.append(best_fold_score)
                         
                         self.logger.info(f"Fold {fold+1} best score: {best_fold_score:.4f}")
-                        
+                        fold_epochs = len(history.history[self.scoring])
+                        combo_epochs.append(fold_epochs)
                         # Save model if it's the best so far
-                        is_better = (('loss' in self.scoring and best_fold_score < best_score) or 
-                                    ('loss' not in self.scoring and best_fold_score > best_score))
+                        is_better = (('loss' in self.scoring and best_fold_score < combo_best_score) or 
+                                    ('loss' not in self.scoring and best_fold_score > combo_best_score))
                         if current_model is None or is_better:
                             current_model = model
                     
                     # Calculate mean score across folds
                     mean_score = np.mean(fold_scores)
                     std_score = np.std(fold_scores)
-                    
+                    median_epochs = int(np.median(combo_epochs))
                     self.logger.info(f"Combination {combo_idx+1} mean score: {mean_score:.4f} ± {std_score:.4f}")
                     
                     all_results.append({
@@ -992,7 +968,8 @@ class DLOptimizer(BaseOptimizer):
                         'mean_score': mean_score,
                         'std_score': std_score,
                         'fold_scores': fold_scores,
-                        'histories': fold_histories
+                        'histories': fold_histories,
+                        'median_epochs': median_epochs,
                     })
                     
                     # Update best results
@@ -1007,6 +984,8 @@ class DLOptimizer(BaseOptimizer):
                             'optimizer': opt_params,
                             'training': train_params
                         }
+                        refit_epochs = int(np.median(combo_epochs))
+                        self.logger.info(f"Saving best model weights for fold {fold+1} with {refit_epochs} epochs")
                         self.best_model_weights = current_model.get_weights()
                 
                 else:
@@ -1021,57 +1000,32 @@ class DLOptimizer(BaseOptimizer):
                     y_tensor = tf.convert_to_tensor(y, dtype=tf.float32)
                     X_val_tensor = tf.convert_to_tensor(X_val, dtype=tf.float32)
                     y_val_tensor = tf.convert_to_tensor(y_val, dtype=tf.float32)
-                    
+                    combo_epochs = None
                     # Get current batch size from training parameters
                     batch_size = train_params.get('batch_size', 32)
                     
-                    # Distributed training path
-                    if self.strategy:
-                        with self.strategy.scope():
-                            # Create and compile model within strategy scope
-                            model = self._create_model(arch_params)
-                            model = self._compile_model(
-                                model, 
-                                opt_name,
-                                opt_params
-                            )
-                            
-                            # Create datasets for distributed training
-                            train_dataset = self._create_distributed_dataset(X_tensor, y_tensor, batch_size)
-                            val_dataset = self._create_distributed_dataset(X_val_tensor, y_val_tensor, batch_size)
-                            
-                            # Train model (all within the same strategy scope)
-                            history = model.fit(
-                                train_dataset,
-                                validation_data=val_dataset,
-                                epochs=train_params.get('epochs', 100),
-                                callbacks=self._get_callbacks(0, train_params),  # Use 0 as fold number
-                                verbose=self.verbose
-                            )
-                    else:
-                        # Standard training without distribution
-                        model = self._create_model(arch_params)
-                        model = self._compile_model(
-                            model, 
-                            opt_name,
-                            opt_params
-                        )
-                        
-                        history = model.fit(
-                            X_tensor, y_tensor,
-                            validation_data=(X_val_tensor, y_val_tensor),
-                            batch_size=batch_size,
-                            epochs=train_params.get('epochs', 100),
-                            callbacks=self._get_callbacks(0, train_params),  # Use 0 as fold number
-                            verbose=self.verbose
-                        )
+                    model = self._create_model(arch_params)
+                    model = self._compile_model(
+                        model, 
+                        opt_name,
+                        opt_params
+                    )
+                    
+                    history = model.fit(
+                        X_tensor, y_tensor,
+                        validation_data=(X_val_tensor, y_val_tensor),
+                        batch_size=batch_size,
+                        epochs=train_params.get('epochs', 100),
+                        callbacks=self._get_callbacks(is_refit, 0, train_params),  
+                        verbose=self.verbose
+                    )
                     
                     # Store history and score
                     best_val_score = min(history.history[self.scoring]) if 'loss' in self.scoring \
                         else max(history.history[self.scoring])
                     
                     self.logger.info(f"Combination {combo_idx+1} validation score: {best_val_score:.4f}")
-                    
+                    combo_epochs = len(history.history[self.scoring])
                     all_results.append({
                         'params': {
                             'architecture': arch_params, 
@@ -1080,7 +1034,8 @@ class DLOptimizer(BaseOptimizer):
                             'training': train_params
                         },
                         'validation_score': best_val_score,
-                        'history': history.history
+                        'history': history.history,
+                        'epochs': combo_epochs
                     })
                     
                     # Update best results
@@ -1095,6 +1050,8 @@ class DLOptimizer(BaseOptimizer):
                             'optimizer': opt_params,
                             'training': train_params
                         }
+                        refit_epochs = combo_epochs
+                        self.logger.info(f"Saving best model weights with {refit_epochs} epochs")
                         self.best_model_weights = model.get_weights()
                     
         finally:
@@ -1106,65 +1063,32 @@ class DLOptimizer(BaseOptimizer):
                         os.remove(self.back_up_dir/f'temp_best_model_fold_{fold}.weights.h5')
                     except:
                         pass
-                    # Clean up backup directories if using distributed training
-                    if self.strategy and self.is_multi_node:
-                        try:
-                            backup_dir = self.back_up_dir/f'backup_{fold}'
-                            if os.path.exists(backup_dir):
-                                import shutil
-                                shutil.rmtree(backup_dir)
-                        except:
-                            pass
+
             else:
                 try:
                     os.remove(self.back_up_dir/f'temp_best_model_fold_0.weights.h5')
                 except:
                     pass
-                # Clean up backup directories if using distributed training
-                if self.strategy and self.is_multi_node:
-                    try:
-                        backup_dir = self.back_up_dir/f'backup_0'
-                        if os.path.exists(backup_dir):
-                            import shutil
-                            shutil.rmtree(backup_dir)
-                    except:
-                        pass
         
         try:
             # Create final best model and set weights
             self.logger.info("Creating final best model")
             keras.backend.clear_session()
             
-            if self.strategy:
-                with self.strategy.scope():
-                    self.best_estimator_ = self._create_model(best_params['architecture'])
-                    self.best_estimator_ = self._compile_model(
-                        self.best_estimator_,
-                        best_params['optimizer_name'],
-                        best_params['optimizer']
-                    )
-                    if self.best_model_weights is not None:
-                        self.best_estimator_.set_weights(self.best_model_weights)
-            else:
-                self.best_estimator_ = self._create_model(best_params['architecture'])
-                self.best_estimator_ = self._compile_model(
-                    self.best_estimator_,
-                    best_params['optimizer_name'],
-                    best_params['optimizer']
-                )
-                if self.best_model_weights is not None:
-                    self.best_estimator_.set_weights(self.best_model_weights)
+            self.best_estimator_ = self._create_model(best_params['architecture'])
+            self.best_estimator_ = self._compile_model(
+                self.best_estimator_,
+                best_params['optimizer_name'],
+                best_params['optimizer']
+            )
+            if self.best_model_weights is not None:
+                self.best_estimator_.set_weights(self.best_model_weights)
             
             self.best_params_ = best_params
             self.best_score_ = best_score
             self.cv_results_ = pd.DataFrame(all_results)
-            
             # Save best model weights to disk
-            if self.is_multi_node:
-                self.save_best_model_distributed(self.save_model_dir)
-            else:
-                self.save_best_model(self.save_model_dir)
-                
+            # self.save_best_model(self.save_model_dir)
             self.logger.info(f"Hyperparameter {'search' if is_cv else 'optimization'} completed. Best score: {best_score:.4f}, best params: {best_params}")
             
             return self
@@ -1207,7 +1131,7 @@ class DLOptimizer(BaseOptimizer):
         
         # Set default path if not provided
         if path is None:
-            path = Path('./outputs/models')
+            path = self.save_model_dir
         else:
             path = Path(path)
         
@@ -1278,29 +1202,3 @@ class DLOptimizer(BaseOptimizer):
         return str(model_path)
 
 
-# Updated distributed saving method for Keras 3 compatibility
-def save_best_model_distributed(self, path=None, filename=None, format=None):
-    """
-    Save the best model found during optimization in a distributed environment.
-    Only the chief worker (rank 0) will save the model. Compatible with Keras 3.
-    
-    Parameters
-    ----------
-    path : str, default=None
-        Directory to save the model. If None, saves to './outputs/models/'
-    filename : str, default=None
-        Filename for the saved model. If None, generates a name based on task and timestamp.
-    format : str, default=None
-        Optional format hint for the file extension if filename is not provided.
-        
-    Returns
-    -------
-    str : Path to the saved model file or directory, or None if not the chief worker
-    """
-    # Only save from the chief worker in a distributed setting
-    if not self.is_multi_node or (self.is_multi_node and 
-                                  tf.distribute.get_replica_context().replica_id_in_sync_group == 0):
-        return self.save_best_model(path, filename, format)
-    else:
-        self.logger.info("Skipping model saving on non-chief worker")
-        return None

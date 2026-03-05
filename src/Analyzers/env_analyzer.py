@@ -1,3 +1,4 @@
+import gc
 from pathlib import Path
 import sys
 import pandas as pd
@@ -6,39 +7,105 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List
 import warnings
-import plotly.graph_objects as go
-import plotly.io as pio
 import pvlib
+from typing import Union, List, Optional, Tuple, Callable
 parent_dir = str(Path(__file__).parent.parent.parent)
-print(parent_dir)
+from path_config import PathConfig, get_default_paths
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
-from src.tools import adjust_time_to_utc, create_timezone_mapping
+# from src.tools import adjust_time_to_utc, create_timezone_mapping
 
 class EnvironmentalAnalyzer:
     """
     Analyzer for German (DEU) Environmental data with metadata handling
     """
-    def __init__(self, base_dir: str = "./data/raw/0.1.5/0.1.5/csv/sapwood"):
-        self.data_dir = Path(base_dir)
-        if not self.data_dir.exists():
-            raise ValueError(f"Directory not found: {self.data_dir}")
+    def __init__(self, paths: PathConfig = None, scale: str = 'sapwood'):
+        self.paths = paths if paths is not None else PathConfig(scale=scale)
+        self.data_dir = self.paths.sap_data_dir
+        self.data_outlier_removed_dir = self.paths.sap_outliers_removed_dir
         self.env_raw_data = {}
         self.env_data = {}
         self.outlier_removed_data = {}
-        self._load_environmental_data()
-        self._standardize_all_data()
+
          
-    
-    def _load_environmental_data(self):
+    # NEW: A method to control the batch processing
+    def run_analysis_in_batches(self, batch_size: int = 20, switch = 'both'):
+        """
+        Orchestrates the analysis by processing files in batches to manage memory.
+        """
+        all_env_files = list(self.data_dir.glob("*_env_data.csv"))
+        print(f"Found {len(all_env_files)} total files to process in batches of {batch_size}.")
+
+        # Split the file list into chunks (batches)
+        file_batches = [all_env_files[i:i + batch_size] for i in range(0, len(all_env_files), batch_size)]
+
+        if switch == 'both':
+            for i, batch in enumerate(file_batches):
+                print("-" * 80)
+                print(f"Processing Batch {i+1}/{len(file_batches)} (files {i*batch_size + 1} to {i*batch_size + len(batch)})")
+                
+                # 1. Load data for the current batch
+                self._load_environmental_data(files_to_load=batch)
+
+                self._standardize_all_data()
+                # 2. Run plotting or other analysis on the loaded batch data
+                #    The plot_all_plants function will now only plot the 20 files in memory.
+                print("\nGenerating plots for the current batch...")
+                self.plot_all(save_dir=self.paths.env_cleaned_figures_dir, progress_update=False)
+                
+                # 3. CRITICAL: Clear data from memory before the next batch
+                self._clear_batch_data()
+        elif switch == 'load':
+            for i, batch in enumerate(file_batches):
+                print("-" * 80)
+                print(f"Loading Batch {i+1}/{len(file_batches)} (files {i*batch_size + 1} to {i*batch_size + len(batch)})")
+                
+                # 1. Load data for the current batch
+                self._load_environmental_data(files_to_load=batch)
+                self._standardize_all_data()
+                # 2. CRITICAL: Clear data from memory before the next batch
+                self._clear_batch_data()
+        elif switch == 'plot':
+            if not self.data_outlier_removed_dir.exists():
+                print("No outlier removed data found. Please run the 'load' switch first to load data.")
+                raise ValueError("No outlier removed data found. Please run the 'load' switch first to load data.")
+            else:
+                # Load outlier removed data from saved files
+                all_sapf_files_outliersremoved = list(self.data_outlier_removed_dir.glob("*_outliers_removed.csv"))
+                print("Plotting outlier removed data in batches...")
+                # Ensure the outlier removed data is loaded
+                file_batches_outliersremoved = [all_sapf_files_outliersremoved[i:i + batch_size] for i in range(0, len(all_sapf_files_outliersremoved), batch_size)]
+                for i, batch in enumerate(file_batches_outliersremoved):
+                    print("-" * 80)
+                    print(f"Plotting Batch {i+1}/{len(file_batches_outliersremoved)} (files {i*batch_size + 1} to {i*batch_size + len(batch)})")
+                    
+                    # 1. Run plotting or other analysis on the loaded batch data
+                    #    The plot_all_plants function will now only plot the 20 files in memory.
+                    print("\nGenerating plots for the current batch...")
+                    self.plot_all(save_dir=self.paths.env_cleaned_figures_dir, files_to_load=batch, progress_update=False)
+
+        print("-" * 80)
+        print("All batches processed successfully.")
+
+    # NEW: A helper method to clear the dictionaries
+    def _clear_batch_data(self):
+        """
+        Resets data dictionaries and calls the garbage collector to free memory.
+        """
+        print("\nClearing data from memory...")
+        self.env_raw_data.clear()
+        self.env_data.clear()
+        self.outlier_removed_data.clear()
+        gc.collect()
+        print("Memory cleared.")
+    def _load_environmental_data(self, files_to_load: List[Path]):
         """Load all German environmental data files and their corresponding metadata"""
-        env_files = list(self.data_dir.glob("*_env_data.csv"))
-        print(f"Found {len(env_files)} environmental files")
+        print(f"Loading {len(files_to_load)} env files for this batch...")
         column_mapping = {
                 'TIMESTAMP_solar': 'solar_TIMESTAMP',  # Map alternate name to standard name
                 }
-        for file in env_files:
-            parts = file.stem.split('_')
+        for file in files_to_load:
+            parts = file.stem.split('_') 
             location = '_'.join(parts[:2])
             
             plant_type = '_'.join(parts[2:])
@@ -53,7 +120,7 @@ class EnvironmentalAnalyzer:
                 time_zone_file = file.parent / f"{file.stem.replace('env_data', 'env_md')}.csv"
                 tz_df = pd.read_csv(time_zone_file)
                 time_zone = tz_df['env_time_zone'].iloc[0][2:]
-                time_zone_map = create_timezone_mapping()
+                # time_zone_map = create_timezone_mapping()
                 # Apply the time zone adjustment to the entire column at once
                 
                 df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
@@ -61,7 +128,7 @@ class EnvironmentalAnalyzer:
                 '''
                 df['TIMESTAMP'] = df['TIMESTAMP'].apply(lambda x: adjust_time_to_utc(x, time_zone, time_zone_map))
                 df['solar_TIMESTAMP'] = df['solar_TIMESTAMP'].apply(lambda x: adjust_time_to_utc(x, time_zone, time_zone_map))
-                output_dir = Path('./outputs/processed_data/env/timezone_adjusted')
+                output_dir = Path(f'./outputs/processed_data/{SCALE}/env/timezone_adjusted')
                 if not output_dir.exists():
                     output_dir.mkdir(parents=True, exist_ok=True)
                 df.to_csv(output_dir / f'{file.stem}_adjusted.csv')
@@ -133,9 +200,9 @@ class EnvironmentalAnalyzer:
         df = df.replace("NA", np.nan)
 
         # --- Define your radiation variables ---
-        RADIATION_VARIABLES = ['ppfd_in', 'sw_in', 'ext_rad', 'netrad'] # Add other radiation column names if any
-        NONNEGATIVE_VARIABLES = ['ppfd_in', 'sw_in', 'precip', 'ws', 'rh', 'vpd', 'swc_deep', 'swc_shallow'] # Variables that should not have negative values
-
+        NONNEGATIVE_VARIABLES = ['ppfd_in', 'sw_in', 'precip', 'ws', 'rh', 'vpd', 'swc_deep', 'swc_shallow', 'ext_rad'] # Variables that should not have negative values
+        DIURNAL_VARIABLES = ['ppfd_in', 'sw_in', 'ext_rad', 'netrad'] # Variables that should be diurnal
+        RADIATION_VARIABLES = ['ppfd_in', 'sw_in', 'ext_rad', 'netrad'] # Variables that are radiation-related
         # Convert numeric columns to float, with error handling
         numeric_cols = [col for col in df.columns if col != 'TIMESTAMP' and col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
         for col in numeric_cols:
@@ -162,9 +229,12 @@ class EnvironmentalAnalyzer:
             
             data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
             # Export filtered data immediately
-            output_dir = Path('./outputs/processed_data/env/filtered')
-            if not output_dir.exists():
-                output_dir.mkdir(parents=True, exist_ok=True)
+            env_filtered_dir = self.paths.env_filtered_dir
+            env_flagged_dir = self.paths.env_flagged_dir
+            if not env_filtered_dir.exists():
+                env_filtered_dir.mkdir(parents=True, exist_ok=True)
+            if not env_flagged_dir.exists():
+                env_flagged_dir.mkdir(parents=True, exist_ok=True)
             for col in data_cols:
                 flag_col = [fcol for fcol in flags.columns if col in fcol]
                 if flag_col:
@@ -179,45 +249,45 @@ class EnvironmentalAnalyzer:
                     # Export flagged values to CSV
                     if warn_mask.any():
                         print(f"\nFiltering {warn_mask.sum()} values in {col} due to warnings")
-                    df.loc[warn_mask, col].to_csv(output_dir / f"{location}_{plant_type}_{col}_flagged.csv")
+                    df.loc[warn_mask, col].to_csv(env_flagged_dir / f"{location}_{plant_type}_{col}_flagged.csv")
                     df.loc[warn_mask, col] = np.nan
-            
-            
-            filter_path = output_dir / f"{location}_{plant_type}_filtered.csv"
+
+
+            filter_path = env_filtered_dir / f"{location}_{plant_type}_filtered.csv"
             df.to_csv(filter_path, index=True)
             print(f"Saved filtered data to {filter_path}")
-
-        
         try: 
             # --- Default parameters for non-radiation variables ---
             # set one month time window
-            TIME_WINDOW = 30 * 24 * 60 # 30 days in minutes
-            DEFAULT_WINDOW_POINTS = int(TIME_WINDOW / timestep) # e.g., for 30-min data, a 24-hour window
-            DEFAULT_N_STD = 5
-
+            # pre_timewindow = self._get_timewindow(30*24*60*60, df.index)
+            pre_timewindow = self._get_timewindow(30*24*60*60, df.index) # 30 days in seconds
+            DEFAULT_WINDOW_POINTS = pre_timewindow if pre_timewindow < len(df) else len(df)  # 30 days in seconds
+            DEFAULT_N_STD = 4
             # --- Parameters for DAYTIME radiation ---
-            DAY_RADIATION_WINDOW_POINTS = DEFAULT_WINDOW_POINTS # e.g., for 30-min data, a 3-hour window
-            DAY_RADIATION_N_STD = 7
+            DAY_WINDOW_POINTS = DEFAULT_WINDOW_POINTS
+            print(f"Default window points: {DEFAULT_WINDOW_POINTS} and {DAY_WINDOW_POINTS} for timestep {timestep} minutes")
+            DAY_N_STD = 4
+            NIGHT_N_STD = 7 
 
-            # --- Parameters/settings for NIGHTTIME radiation ---
-            NIGHT_RADIATION_PPFDIN = 2
-            NIGHT_RADIATION_SWIN = 5
-            NIGHT_RADIATION_EXTRAD = 50 # Absolute threshold for ppfd_in or sw_in at night
+           
             # Alternatively, use _detect_outliers with specific params:
             # NIGHT_RADIATION_WINDOW_POINTS = 3
             # NIGHT_RADIATION_N_STD = 3 
             if location not in self.outlier_removed_data:
                 self.outlier_removed_data[location] = {}
-            outlier_dir = Path('./outputs/processed_data/env/outliers')
+            outlier_dir = self.paths.env_outliers_dir
             outlier_dir.mkdir(parents=True, exist_ok=True)
-            day_mask_dir = Path('./outputs/processed_data/env/day_masks')
+            day_mask_dir = self.paths.env_day_masks_dir
             day_mask_dir.mkdir(parents=True, exist_ok=True)
+            outliers_removed_dir = self.paths.env_outliers_removed_dir
+            outliers_removed_dir.mkdir(parents=True, exist_ok=True)
             current_df_latitude = latitude
             current_df_longitude = longitude
 
             data_cols = [col for col in df.columns if col not in ['solar_TIMESTAMP', 'lat', 'long'] and 'Unnamed:' not in str(col)]
             
             for col in data_cols:
+                NIGHT_N_STD = 4 # Default for non-radiation variables
                 if df[col].isna().all():
                     print(f"Skipping {col} at {location}_{plant_type} - all values are NA")
                     continue
@@ -226,8 +296,10 @@ class EnvironmentalAnalyzer:
                 column_series = df[col].copy() # Work on a copy for safety before modifying df
                 final_col_outliers = pd.Series(False, index=column_series.index)
 
-                if col in RADIATION_VARIABLES:
-                    print(f"Applying radiation-specific outlier detection for {col}...")
+                if col in DIURNAL_VARIABLES:
+                    if col in RADIATION_VARIABLES:
+                        NIGHT_N_STD = 3 # For radiation variables, we can use a lower threshold for nighttime
+                    print(f"Applying diurnal-specific outlier detection for {col}...")
                     try:
                         
                         day_mask = self._calculate_daytime_mask(df.index, current_df_latitude, current_df_longitude, elevation, elevation_threshold=0)
@@ -295,35 +367,34 @@ class EnvironmentalAnalyzer:
                         # print(f"  Processing daytime for {col} ({len(day_series)} points)...")
                         day_outliers_detected = self._detect_outliers(
                             series=day_series,
-                            n_std=DAY_RADIATION_N_STD,
-                            time_window=DAY_RADIATION_WINDOW_POINTS,
-                            method='C' # Or 'B'
+                            n_std=DAY_N_STD,
+                            time_window=DAY_WINDOW_POINTS,
+                            method='B' # Or 'B'
                         )
                         final_col_outliers.loc[day_outliers_detected[day_outliers_detected].index] = True
 
                     '''
                     # Process Nighttime Radiation
                     if not night_series.empty:
-                        if col=='ppfd_in':
-                            # print(f"  Processing nighttime for {col} ({len(night_series)} points)...")
-                            night_outliers_detected_bool = night_series > NIGHT_RADIATION_PPFDIN
-                            final_col_outliers.loc[night_series[night_outliers_detected_bool].index] = True
-                        elif col=='sw_in':
-                            # print(f"  Processing nighttime for {col} ({len(night_series)} points)...")
-                            night_outliers_detected_bool = night_series > NIGHT_RADIATION_SWIN
-                            final_col_outliers.loc[night_series[night_outliers_detected_bool].index] = True
-                        elif col=='ext_rad':
-                            # print(f"  Processing nighttime for {col} ({len(night_series)} points)...")
-                            night_outliers_detected_bool = night_series > NIGHT_RADIATION_EXTRAD
-                            final_col_outliers.loc[night_series[night_outliers_detected_bool].index] = True
+                        # print(f"  Processing nighttime for {col} ({len(night_series)} points)...")
+                        night_outliers_detected = self._detect_outliers(
+                            series=night_series,
+                            n_std=NIGHT_N_STD, # Use same n_std as daytime
+                            time_window=DAY_WINDOW_POINTS, # Use same window as daytime
+                            method='B' # Or 'B'
+                        )
+                        final_col_outliers.loc[night_outliers_detected[night_outliers_detected].index] = True
                     '''
 
-                else: # For non-radiation variables
-                    # Use a sensible default windowing strategy, NOT len(df[col]) unless global is truly intended
-                    # print(f"Applying default outlier detection for {col}...")
+                else: # For non-diunal variables
+                    NIGHT_N_STD = 7 # Default for non-radiation variables
+                    # set 0 values to NaN if the variable is precip
+                    if col == 'precip':
+                        NIGHT_N_STD = 5 # For precipitation, we can use a higher threshold
+                        column_series[column_series <= 0] = np.nan
                     final_col_outliers = self._detect_outliers(
                         series=column_series,
-                        n_std=DEFAULT_N_STD,
+                        n_std=NIGHT_N_STD,
                         time_window=DEFAULT_WINDOW_POINTS, # A fixed, reasonable window
                         method='B' # Or 'B'
                     )
@@ -346,6 +417,9 @@ class EnvironmentalAnalyzer:
                 # print(f"Applied {final_col_outliers.sum()} NaNs for {col} at {location}_{plant_type}")
 
             self.outlier_removed_data[location][plant_type] = df
+            outliers_removed_path = outliers_removed_dir / f"{location}_{plant_type}_outliers_removed.csv"
+            #save outliers removed df
+            df.to_csv(outliers_removed_path)
             # print(f"Finished outlier processing for {location}_{plant_type}")
 
         except Exception as e:
@@ -354,9 +428,9 @@ class EnvironmentalAnalyzer:
         
         try:
             # Create processed directory
-            output_dir = Path('./outputs/processed_data/env/daily')
-            if not output_dir.exists():
-                output_dir.mkdir(parents=True, exist_ok=True)
+            env_daily_resampled_dir = self.paths.env_daily_resampled_dir
+            if not env_daily_resampled_dir.exists():
+                env_daily_resampled_dir.mkdir(parents=True, exist_ok=True)
 
             # Get columns to resample (exclude solar_TIMESTAMP)
             data_cols = [col for col in df.columns if col != 'solar_TIMESTAMP' and col != 'lat' and col != 'long']
@@ -382,7 +456,7 @@ class EnvironmentalAnalyzer:
                                for col in daily_df.columns]
             
             # Save daily data
-            output_path = output_dir / f"daily_{location}_{plant_type}.csv"
+            output_path = env_daily_resampled_dir / f"daily_{location}_{plant_type}.csv"
             daily_df.to_csv(output_path, index=False)
             print(f"Saved daily resampled data to {output_path}")
 
@@ -391,7 +465,64 @@ class EnvironmentalAnalyzer:
         except Exception as e:
             print(f"Error during daily resampling: {str(e)}")
             return None
-            
+    def _get_timewindow(self, time_window: int, timesteps_data: Union[pd.Index, pd.Series, pd.DataFrame]) -> int:
+        """
+        Calculate the number of points in a time window based on the determined timestep.
+
+        Parameters:
+        -----------
+        time_window : int
+            Time window in seconds.
+        timesteps_data : Union[pd.Index, pd.Series, pd.DataFrame]
+            A pandas Index, Series, or DataFrame containing 'TIMESTAMP' information.
+            The method will infer the timestep from this data.
+
+        Returns:
+        --------
+        int : Number of points in the time window.
+        """
+
+        # Determine the timestamp Index from the input data
+        if isinstance(timesteps_data, pd.DataFrame):
+            if 'TIMESTAMP' in timesteps_data.columns:
+                timesteps = timesteps_data['TIMESTAMP']
+            elif timesteps_data.index.name == 'TIMESTAMP':
+                timesteps = timesteps_data.index
+            else:
+                raise ValueError("DataFrame must have a 'TIMESTAMP' column or its index named 'TIMESTAMP' to determine the timestep.")
+        elif isinstance(timesteps_data, pd.Series):
+            if timesteps_data.index.name == 'TIMESTAMP':
+                timesteps = timesteps_data.index
+            else:
+                # If Series itself is datetime series, use it directly, otherwise try its index
+                if pd.api.types.is_datetime64_any_dtype(timesteps_data):
+                    timesteps = timesteps_data
+                else:
+                    raise ValueError("Series must have a 'TIMESTAMP' index or contain datetime values directly to determine the timestep.")
+        elif isinstance(timesteps_data, pd.Index):
+            timesteps = timesteps_data
+        else:
+            raise TypeError("Input 'timesteps_data' must be a pandas Index, Series, or DataFrame with a 'TIMESTAMP' column or index.")
+
+        # Ensure the extracted timesteps are datetime objects
+        if not pd.api.types.is_datetime64_any_dtype(timesteps):
+            try:
+                timesteps = pd.to_datetime(timesteps)
+            except Exception as e:
+                raise ValueError(f"Could not convert 'timesteps_data' to datetime objects: {e}")
+
+        if len(timesteps) < 2:
+            raise ValueError("Timestamp data must contain at least two points to calculate the difference and determine the timestep.")
+
+        # Calculate the median timestep in minutes
+        # Using .to_series().diff() handles both Series and Index objects
+        timestep_seconds = timesteps.to_series().diff().median().total_seconds()
+
+        if timestep_seconds <= 0:
+            raise ValueError(f"Calculated timestep is non-positive ({timestep_seconds} minutes). "
+                             "This can happen if timestamps are identical or not in increasing order.")
+
+        return int(time_window / timestep_seconds)
     def _calculate_daytime_mask(self, timestamps: pd.DatetimeIndex, lat: float, lon: float, elevation: float, elevation_threshold: float = 0) -> pd.Series:
         """
         Calculates a boolean mask indicating daytime based on solar elevation.
@@ -423,6 +554,181 @@ class EnvironmentalAnalyzer:
             
         solar_position = pvlib.solarposition.get_solarposition(timestamps, lat, lon, altitude=elevation)
         return solar_position['elevation'] > elevation_threshold
+    def adaptive_centered_rolling(self, series, window_size, func=np.mean):
+        """
+        Apply rolling function with adaptive centered windows.
+        Near edges, borrows points from available side to maintain window size.
+        
+        Parameters:
+        -----------
+        series : pd.Series
+            Input time series
+        window_size : int
+            Size of rolling window
+        func : callable
+            Function to apply (np.mean, np.std, np.median, etc.)
+            
+        Returns:
+        --------
+        pd.Series : Result with same index as input
+        """
+        if window_size >= len(series):
+            # If window is larger than series, use entire series for all points
+            return pd.Series([func(series)] * len(series), index=series.index)
+        
+        result = pd.Series(index=series.index, dtype=float)
+        half_window = window_size // 2
+        
+        for i in range(len(series)):
+            # Calculate ideal centered window bounds
+            ideal_start = i - half_window
+            ideal_end = i + half_window + 1  # +1 for inclusive end
+            
+            # Adjust bounds to stay within series limits
+            actual_start = max(0, ideal_start)
+            actual_end = min(len(series), ideal_end)
+            
+            # If window is smaller than desired, extend to the available side
+            current_window_size = actual_end - actual_start
+            if current_window_size < window_size:
+                # Try to extend to the left
+                if actual_start > 0:
+                    extend_left = min(actual_start, window_size - current_window_size)
+                    actual_start -= extend_left
+                    current_window_size = actual_end - actual_start
+                
+                # Try to extend to the right
+                if current_window_size < window_size and actual_end < len(series):
+                    extend_right = min(len(series) - actual_end, window_size - current_window_size)
+                    actual_end += extend_right
+            
+            # Apply function to the window
+            window_data = series.iloc[actual_start:actual_end]
+            result.iloc[i] = func(window_data)
+        
+        return result
+    def _detect_outliers(self, series: pd.Series, n_std: float = 3, time_window: int = 1440, method: str = 'B') -> pd.Series:
+        """
+        Improved outlier detection with better edge handling
+        
+        Parameters:
+        -----------
+        series : pd.Series
+            Time series data
+        n_std : float
+            Number of standard deviations for outlier threshold
+        time_window : int
+            Rolling window size
+        method : str
+            'A': Monthly grouping
+            'B': Adaptive centered rolling (standard deviation)
+            'C': Adaptive centered rolling (MAD-based)
+            'D': Standard pandas rolling (for comparison)
+                    
+        Returns:
+        --------
+        pd.Series : Boolean mask where True indicates outliers
+        """
+        outliers = pd.Series(False, index=series.index)
+        
+        if method == 'A':
+            # Original monthly method (unchanged)
+            grouped = series.groupby([series.index.year, series.index.month])
+            
+            for (year, month), group in grouped:
+                if len(group) > 0:
+                    mean = group.mean()
+                    std = group.std()
+                    
+                    month_mask = (series.index.year == year) & (series.index.month == month)
+                    monthly_data = series[month_mask]
+                    
+                    monthly_outliers = (np.abs(monthly_data - mean) > n_std * std)
+                    outliers[monthly_data.index] = monthly_outliers
+                    
+                    n_outliers = monthly_outliers.sum()
+                    print(f"Month {month}/{year}: "
+                        f"{n_outliers} outliers out of {len(monthly_data)} points "
+                        f"({(n_outliers/len(monthly_data)*100):.1f}%)")
+        
+        elif method == 'B':
+            # Improved rolling with adaptive centering
+            print(f"Using adaptive centered rolling (window={time_window})")
+            
+            # Calculate adaptive rolling statistics
+            rolling_mean = self.adaptive_centered_rolling(series, time_window, np.mean)
+            rolling_std = self.adaptive_centered_rolling(series, time_window, np.std)
+            
+            # Handle potential zero std (constant values in window)
+            rolling_std = rolling_std.replace(0, rolling_std.mean())
+            
+            # Detect outliers
+            outliers = np.abs(series - rolling_mean) > (n_std * rolling_std)
+            
+            print(f"Adaptive rolling outliers detected: {outliers.sum()} out of {len(series)} points")
+            print(f"No NaN values in rolling statistics")
+        
+        elif method == 'C':
+            # Improved MAD with adaptive centering
+            print(f"Using adaptive centered MAD (window={time_window})")
+            
+            def rolling_mad(window_data):
+                """Calculate MAD for a window"""
+                if len(window_data) <= 1:
+                    return 0
+                median_val = np.median(window_data)
+                return np.median(np.abs(window_data - median_val))
+            
+            # Calculate adaptive rolling statistics
+            rolling_median = self.adaptive_centered_rolling(series, time_window, np.median)
+            rolling_mad_values = self.adaptive_centered_rolling(series, time_window, rolling_mad)
+            
+            # Scale MAD to be comparable to standard deviation
+            scaled_mad = rolling_mad_values / 0.6745
+            
+            # Add small epsilon to prevent division by zero
+            epsilon = 1e-10
+            scaled_mad = scaled_mad + epsilon
+            
+            # Calculate deviations and detect outliers
+            deviations = np.abs(series - rolling_median)
+            outliers = deviations > (n_std * scaled_mad)
+            
+            print(f"Adaptive MAD outliers detected: {outliers.sum()} out of {len(series)} points")
+            print(f"No NaN values in rolling statistics")
+        
+        elif method == 'D':
+            # Standard pandas rolling (for comparison)
+            print(f"Using standard pandas rolling (window={time_window})")
+            
+            rolling_mean = series.rolling(
+                window=time_window,
+                center=True,
+                min_periods=max(1, time_window//2)  # More conservative min_periods
+            ).mean()
+            
+            rolling_std = series.rolling(
+                window=time_window,
+                center=True,
+                min_periods=max(1, time_window//2)
+            ).std()
+            
+            # Handle NaN values more carefully
+            rolling_mean = rolling_mean.fillna(series.mean())
+            rolling_std = rolling_std.fillna(series.std())
+            
+            # Detect outliers
+            outliers = np.abs(series - rolling_mean) > (n_std * rolling_std)
+            
+            nan_count = series.rolling(time_window, center=True).mean().isna().sum()
+            print(f"Standard rolling outliers detected: {outliers.sum()} out of {len(series)} points")
+            print(f"Original NaN values in rolling: {nan_count}")
+        
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
+        return outliers
+    '''
     def _detect_outliers(self, series: pd.Series, n_std: float = 3, time_window:int = 1440 ,method: str = 'A') -> pd.Series:
         """
         Detect outliers using standard deviation within monthly windows
@@ -471,13 +777,13 @@ class EnvironmentalAnalyzer:
             rolling_mean = series.rolling(
                 window=time_window,
                 center=True,
-                min_periods=int(time_window/2)
+                min_periods=int(time_window)
             ).mean()
             
             rolling_std = series.rolling(
                 window=time_window,
                 center=True,
-                min_periods=int(time_window/2)
+                min_periods=int(time_window)
             ).std()
             
             # Handle edge cases with forward/backward fill
@@ -490,12 +796,47 @@ class EnvironmentalAnalyzer:
             
             print(f"Outliers detected: {outliers.sum()} out of {len(series)} points")
         elif method == 'C':
-            # Apply MAD-based spike detection using 30-min windows
-            window_size = time_window  # Number of points in window (e.g., 1440 for 30 min at 20 Hz)
             
+            # 1. Calculate the rolling median
+            rolling_median = series.rolling(
+                window=time_window,
+                center=True,
+                min_periods=int(time_window)
+            ).median()
+
+            # Fill NaNs at the edges of the series
+            rolling_median = rolling_median.ffill().bfill()
+
+            # 2. Calculate the absolute deviation from the rolling median
+            deviation = abs(series - rolling_median)
+
+            # 3. Calculate the rolling MAD of the deviation
+            rolling_mad = deviation.rolling(
+                window=time_window,
+                center=True,
+                min_periods=int(time_window)
+            ).median()
+
+            # Fill NaNs for the MAD series as well
+            rolling_mad = rolling_mad.ffill().bfill()
+
+            # 4. (Recommended) Scale the MAD to be comparable to standard deviation
+            # The scaling factor 1.4826 makes the MAD an unbiased estimator of the
+            # standard deviation for normal data.
+            scaled_mad = rolling_mad / 0.6745
+
+            # Add a small epsilon to prevent division by zero or issues with zero MAD
+            # This prevents flagging points as outliers when the signal is constant.
+            epsilon = 1e-10
+
+            # 5. Identify outliers
+            # Outliers are points where the deviation is greater than the threshold
+            # multiplied by the scaled MAD.
+            outliers = deviation > (n_std * scaled_mad + epsilon)
+            """
             # Process each window
-            for start_idx in range(0, len(series), window_size):
-                end_idx = min(start_idx + window_size, len(series))
+            for start_idx in range(0, len(series), time_window):
+                end_idx = min(start_idx + time_window, len(series))
                 window_data = series.iloc[start_idx:end_idx]
                 
                 if len(window_data) > 0:
@@ -513,11 +854,11 @@ class EnvironmentalAnalyzer:
                     
                     # Update outlier mask
                     outliers.iloc[start_idx:end_idx] = window_outliers
-                    
+            """
             
             print(f"MAD-based outliers detected: {outliers.sum()} out of {len(series)} points")
         return outliers
-
+    '''
     def _standardize_env_data(self, series: pd.Series, variable: str) -> pd.Series:
         """
         Standardizes a data series using pre-calculated min-max scaling values.
@@ -586,7 +927,7 @@ class EnvironmentalAnalyzer:
         
         for variable in plot_columns:
             # Load flagged data
-            flag_path = Path('./outputs/processed_data/env/filtered') / f"{location}_{plant_type}_{variable}_flagged.csv"
+            flag_path = self.paths.env_flagged_dir / f"{location}_{plant_type}_{variable}_flagged.csv"
             if flag_path.exists():
                 flagged_data = pd.read_csv(flag_path, parse_dates=['TIMESTAMP']).set_index('TIMESTAMP')
             else:
@@ -603,7 +944,7 @@ class EnvironmentalAnalyzer:
                 continue
             
             # Load outliers data
-            outlier_path = Path('./outputs/processed_data/env/outliers') / f"{location}_{plant_type}_{variable}_outliers.csv"
+            outlier_path = self.paths.env_outliers_dir / f"{location}_{plant_type}_{variable}_outliers.csv"
             if outlier_path.exists():
                 outliers_df = pd.read_csv(outlier_path, parse_dates=['timestamp']).set_index('timestamp')
             else:
@@ -627,7 +968,7 @@ class EnvironmentalAnalyzer:
                         markersize=3)
                 
                 # Plot flagged data if available
-                if flagged_data is not None:
+                if flagged_data is not None and not flagged_data.dropna().empty:
                     ax1.scatter(flagged_data.index, flagged_data.values,
                                   color='red', alpha=0.5, label='Flagged data',
                                   marker='x', s=50)
@@ -683,7 +1024,7 @@ class EnvironmentalAnalyzer:
                 plt.close(fig)
                 print(f"No valid data to plot for {variable}")
     
-    def plot_all(self, figsize=(12, 6), save_dir: str = None, skip_empty: bool = True, 
+    def plot_all(self, files_to_load: Optional[List[Path]] = None, figsize=(12, 6), save_dir: str = None, skip_empty: bool = True, 
                  plot_limit: int = None, progress_update: bool = True):
         """
         Plot all environmental variables for all sites with enhanced error handling and progress tracking
@@ -698,7 +1039,18 @@ class EnvironmentalAnalyzer:
         # release memory by empty some dictionaries
         self.env_raw_data = {}
         self.env_data = {}
-
+        if not self.outlier_removed_data:
+           
+            print("Loading outlier removed data from saved files...")
+            for file in files_to_load:
+                parts = file.stem.split('_')
+                location = '_'.join(parts[:2])
+                plant_type = '_'.join(parts[2:-2])
+                df = pd.read_csv(file, parse_dates=['TIMESTAMP'])
+                df = df.set_index('TIMESTAMP')
+                if location not in self.outlier_removed_data:
+                    self.outlier_removed_data[location] = {}
+                self.outlier_removed_data[location][plant_type] = df
         # Create summary dictionary to store processing results
         summary = {
             'total_locations': len(self.outlier_removed_data),
@@ -835,7 +1187,7 @@ class EnvironmentalAnalyzer:
             
             # Create processed directory for standardized data
             try:
-                std_dir = Path('./outputs/processed_data/env/standardized')
+                std_dir = self.paths.env_standardized_dir
                 if not std_dir.exists():
                     std_dir.mkdir(parents=True, exist_ok=True)
             except Exception as e:

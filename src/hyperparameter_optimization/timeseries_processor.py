@@ -1,7 +1,7 @@
 from pathlib import Path
 import sys
 import os
-
+import logging
 # Set environment variables for determinism BEFORE importing TensorFlow
 os.environ['TF_DETERMINISTIC_OPS'] = '1'
 os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
@@ -302,9 +302,9 @@ class SegmentedWindowGenerator:
         # Ensure min_segment_length is at least min_total_length
         if min_segment_length is None or min_segment_length < min_total_length:
             min_segment_length = min_total_length
-        
-        print(f"Minimum segment length required: {min_segment_length}")
-        
+
+        logging.info(f"Minimum segment length required: {min_segment_length}")
+
         for segment in segments:
             # Skip segments that are too short
             if len(segment) < min_segment_length:

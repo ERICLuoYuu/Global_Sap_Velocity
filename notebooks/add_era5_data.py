@@ -99,7 +99,7 @@ era5_data['TIMESTAMP'] = pd.to_datetime(era5_data['datetime'], utc=True)
 # This allows you to set the index for other operations while keeping a column for merging
 
 
-        # Create a copy of TIMESTAMP for merging
+# Create a copy of TIMESTAMP for merging
 era5_data.set_index('TIMESTAMP', inplace=True)
 era5_data = era5_data[[col for col in era5_data.columns if col != 'datetime' and col != 'site_id' and col != 'latitude' and col != 'longitude' ]]
 # for 'surface_solar_radiation_downwards_hourly', 'surface_net_solar_radiation_hourly' and 'total_precipitation_hourly' assign 0 to negtive values

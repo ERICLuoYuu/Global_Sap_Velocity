@@ -16,34 +16,17 @@ PREDICTION_DIR = OUTPUT_DIR / "predictions"
 
 # ERA5-Land data settings
 ERA5LAND_DIR = Path('D:/Temp/era5land_vars')
-ERA5LAND_TEMP_DIR = DATA_DIR / "temp" / "era5land_extracted"
-#ERA5LAND_TEMP_DIR = Path('D:/Temp/era5land_extracted/')
+#ERA5LAND_TEMP_DIR = DATA_DIR / "temp" / "era5land_extracted"
+ERA5LAND_TEMP_DIR = Path('D:/Temp/era5land_extracted/')
 BIOMES_FILE = RAW_DATA_DIR / "spatial_features" / "biomes" / "biomes.shp"
 
 # Create directories if they don't exist
 for directory in [ERA5LAND_TEMP_DIR, MODEL_DIR, PREDICTION_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
-# ERA5-Land variables needed for prediction
-REQUIRED_VARIABLES = [
-    "dewpoint_temperature_2m",  # For VPD calculation
-    "temperature_2m",           # For VPD and temperature
-    "surface_solar_radiation_downwards",  # For solar radiation
-    "10m_u_component_of_wind",  # For wind speed
-    "10m_v_component_of_wind"   # For wind speed
-]
-REQUIRED_VARIABLES_PREDICTION = [
-    "2m_temperature",           # For VPD and temperature
-    "surface_solar_radiation_downwards",  # For solar radiation
-    'wind_speed',  # For wind speed
-    'vpd',         # For VPD calculation
-    'ext_rad',    # For solar radiation
-    'ppfd_in'     # For solar radiation
-
-]
 # Model settings
-DEFAULT_MODEL = "model_xgb_regression"  # Default model to use for prediction
-FEATURE_SCALER = "feature_scaler.pkl"
+DEFAULT_MODEL = "xgb/default_daily_without_coordinates/FINAL_xgb_default_daily_without_coordinates.joblib"
+FEATURE_SCALER = "xgb/default_daily_without_coordinates/FINAL_scaler_default_daily_without_coordinates.pkl"
 LABEL_SCALER = "label_scaler.pkl"
 
 # Prediction settings
@@ -52,11 +35,11 @@ DEFAULT_OUTPUT_FORMAT = "csv"  # Default output format (csv, json)
 
 # Coordinate settings for study area
 # Default to a broad region (can be overridden by user input)
-DEFAULT_LAT_MIN = 60
-DEFAULT_LAT_MAX = 65
-DEFAULT_LON_MIN = 100
-DEFAULT_LON_MAX = 110
-
+# set global extent as default, exclude antarctica and arctic regions
+DEFAULT_LAT_MIN = -60
+DEFAULT_LAT_MAX = 78
+DEFAULT_LON_MIN = -180
+DEFAULT_LON_MAX = 180
 # Processing settings
 DASK_MEMORY_LIMIT = "8GB"
 DASK_CREATE_CLIENT = False
@@ -85,15 +68,6 @@ BIOME_TYPES = [
     'Woodland/Shrubland'
 ]
 
-# Variables renaming dictionary (ERA5 names to model feature names)
-VARIABLE_RENAME = {
-    'temperature_2m': 'ta',
-    "surface_solar_radiation_downwards": "sw_in",
-    "wind_speed": "ws",
-    "vpd": "vpd",
-    "ext_rad": "ext_rad",  # Will be calculated from solar radiation
-    "ppfd_in": "ppfd_in"   # Will be calculated from solar radiation
-}
 # Climate data file paths
 TEMP_CLIMATE_FILE = Path('data/raw/grided/spatial_features/wc2.1_2.5m_bio/wc2.1_2.5m_bio_1.tif')
 PRECIP_CLIMATE_FILE = Path('data/raw/grided/spatial_features/wc2.1_2.5m_bio/wc2.1_2.5m_bio_12.tif')
@@ -112,3 +86,47 @@ BIOME_TYPES = [
 MAX_GRID_CELLS = 1000  # Maximum number of grid cells to process at once
 
 
+
+
+
+# LAI data directory
+LAI_DATA_DIR = Path('./data/raw/grided/globmap_lai/')
+
+# Dask settings
+DASK_CREATE_CLIENT = False
+DASK_MEMORY_LIMIT = '4GB'
+
+# Required ERA5-Land variables
+REQUIRED_VARIABLES = [
+    'temperature_2m',
+    'dewpoint_temperature_2m',
+    'total_precipitation',
+    'surface_solar_radiation_downwards',
+    '10m_u_component_of_wind',
+    '10m_v_component_of_wind',
+    'volumetric_soil_water_layer_1',
+    'soil_temperature_level_1',
+    'potential_evaporation',  # For PET calculation
+]
+
+# Variable renaming mapping (source name -> model feature name)
+VARIABLE_RENAME = {
+    'surface_solar_radiation_downwards': 'sw_in',
+    'ppfd_in': 'ppfd_in',
+    'ext_rad': 'ext_rad',
+    'wind_speed': 'ws',
+    'temperature_2m': 'ta',
+    'vpd': 'vpd',
+    'LAI': 'LAI',
+    'precip_pet_ratio': 'prcip/PET',
+    'pft': 'pft',
+    'canopy_height': 'canopy_height',
+    'elevation': 'elevation',
+    'annual_mean_temperature': 'mean_annual_temp',
+    'annual_precipitation': 'mean_annual_precip',
+    'volumetric_soil_water_layer_1': 'volumetric_soil_water_layer_1',
+    'soil_temperature_level_1': 'soil_temperature_level_1',
+}
+
+# Time features flag
+TIME_FEATURES = True  # Set to True if you want cyclical time features

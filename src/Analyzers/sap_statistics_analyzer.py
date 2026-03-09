@@ -401,6 +401,21 @@ class SapFlowStatisticsAnalyzer:
             # Check if column contains site_id (these are tree measurements)
             if site_id in col:
                 sap_cols.append(col)
+
+        # If no columns found, try shorter prefixes (handles sub-site suffixes,
+        # e.g. site_id 'COL_MAC_SAF_RAD' -> columns use base 'COL_MAC_SAF')
+        if not sap_cols:
+            parts = site_id.split('_')
+            for n in range(len(parts) - 1, 1, -1):
+                prefix = '_'.join(parts[:n])
+                sap_cols = [
+                    col for col in df.columns
+                    if 'TIMESTAMP' not in col.upper() and prefix in col
+                ]
+                if sap_cols:
+                    logger.debug(f"Site {site_id}: matched columns using prefix '{prefix}'")
+                    break
+
         return sap_cols
     
     def compute_raw_site_statistics(self, df: pd.DataFrame, site_id: str) -> Dict:

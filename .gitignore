@@ -34,6 +34,21 @@ models/
 # --- Outputs & Results ---
 # Ignore all outputs, figures, logs, and generated files
 outputs/
+# Ignore data and plot files
+*.xlsx
+*.xls
+*.rds
+*.html
+*.txt
+
+# Ignore documents and shortcuts
+*.docx
+*.pptx
+*.lnk
+*.pdf
+
+__pycache__/
+*.pyc
 *.csv
 *.png
 *.jpeg

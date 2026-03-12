@@ -19,7 +19,8 @@ class SapwoodPlotter:
     Creates dual-subplot visualizations with sap flow and optional environmental data
     """
     
-    def __init__(self, data_dir: str, output_dir: str, env_dir: str = None):
+    def __init__(self, data_dir: str, output_dir: str, env_dir: str = None,
+                 env_var: str = None):
         """
         Initialize the plotter with directory paths
         
@@ -31,14 +32,43 @@ class SapwoodPlotter:
             Directory to save output HTML plots
         env_dir : str, optional
             Directory containing env_data.csv files (if available)
+        env_var : str, optional
+            Single environmental variable to plot alongside sap flow
+            (e.g. 'ta', 'vpd', 'sw_in', 'precip', 'ws', 'pa').
+            If None, no env subplot is added.
         """
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
         self.env_dir = Path(env_dir) if env_dir else self.data_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.env_var = env_var
         
         # Default unit label
         self.sap_unit = 'cm³·cm⁻²·h⁻¹'
+    
+    # --- env variable display helpers ---
+    _ENV_LABELS = {
+        'ta':        'Air Temperature (°C)',
+        'ta_qc':     'TA QC Flag',
+        'vpd':       'VPD (hPa)',
+        'vpd_qc':    'VPD QC Flag',
+        'sw_in':     'SW Radiation (W/m²)',
+        'sw_in_qc':  'SW_IN QC Flag',
+        'pa':        'Pressure (kPa)',
+        'pa_qc':     'PA QC Flag',
+        'ws':        'Wind Speed (m/s)',
+        'ws_qc':     'WS QC Flag',
+        'precip':    'Precipitation (mm)',
+        'precip_qc': 'Precip QC Flag',
+        'ppfd':      'PPFD (µmol/m²/s)',
+        'rh':        'Relative Humidity (%)',
+        'ts':        'Soil Temperature (°C)',
+        'swc':       'Soil Water Content (%)',
+    }
+
+    def _env_label(self, col_name: str) -> str:
+        """Return a human-readable axis label for an env variable."""
+        return self._ENV_LABELS.get(col_name, col_name)
     
     def _load_env_data(self, site_prefix: str) -> Optional[pd.DataFrame]:
         """Load environmental data for a given site"""
@@ -51,7 +81,13 @@ class SapwoodPlotter:
             matches = list(self.env_dir.glob(pattern))
             if matches:
                 try:
-                    df = pd.read_csv(matches[0], parse_dates=['timestamp'])
+                    df = pd.read_csv(matches[0])
+                    
+                    # Normalise timestamp column to lowercase 'timestamp'
+                    if 'TIMESTAMP' in df.columns and 'timestamp' not in df.columns:
+                        df = df.rename(columns={'TIMESTAMP': 'timestamp'})
+                    
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed')
                     df.set_index('timestamp', drop=False, inplace=True)
                     
                     # Check if there are any actual env columns (not just timestamp)
@@ -110,21 +146,31 @@ class SapwoodPlotter:
         go.Figure
             Plotly figure object
         """
-        has_env = env_df is not None and len([c for c in env_df.columns if c not in ['timestamp', 'Unnamed: 0']]) > 0
+        env_cols = []
+        if env_df is not None and self.env_var:
+            available = [c for c in env_df.columns if c not in ['timestamp', 'TIMESTAMP', 'Unnamed: 0']]
+            if self.env_var in available:
+                env_cols = [self.env_var]
+            else:
+                print(f"    Warning: env variable '{self.env_var}' not found. Available: {available}")
+        has_env = len(env_cols) > 0
+        n_rows = 2 if has_env else 1
         
+        # Build subplot titles and row heights
+        subplot_titles = [f'Sapwood Sap Flow - {site_name} (All Trees)']
         if has_env:
-            fig = make_subplots(
-                rows=2, cols=1,
-                subplot_titles=(f'Sapwood Sap Flow - {site_name} (All Trees)', 'Environmental Data'),
-                vertical_spacing=0.12,
-                row_heights=[0.6, 0.4],
-                shared_xaxes=True
-            )
+            row_heights = [0.65, 0.35]
+            subplot_titles.append(self._env_label(self.env_var))
         else:
-            fig = make_subplots(
-                rows=1, cols=1,
-                subplot_titles=(f'Sapwood Sap Flow - {site_name} (All Trees)',),
-            )
+            row_heights = [1.0]
+        
+        fig = make_subplots(
+            rows=n_rows, cols=1,
+            subplot_titles=tuple(subplot_titles),
+            vertical_spacing=0.08,
+            row_heights=row_heights,
+            shared_xaxes=True,
+        )
         
         colors = self._get_color_palette(len(tree_columns))
         
@@ -158,26 +204,26 @@ class SapwoodPlotter:
                 row=1, col=1
             )
         
-        # Add environmental data if available
+        # Add the single environmental variable subplot
         if has_env:
-            env_cols = [c for c in env_df.columns if c not in ['timestamp', 'Unnamed: 0']]
-            for env_col in env_cols[:3]:  # Limit to 3 env variables
-                valid_env = env_df[['timestamp', env_col]].dropna()
-                if not valid_env.empty:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=valid_env['timestamp'],
-                            y=valid_env[env_col],
-                            mode='lines',
-                            name=env_col,
-                            line=dict(width=1),
-                            hovertemplate=f'<b>{env_col}</b><br>' +
-                                          '<b>Time:</b> %{x}<br>' +
-                                          '<b>Value:</b> %{y:.3f}<extra></extra>',
-                            legendgroup='env'
-                        ),
-                        row=2, col=1
-                    )
+            env_col = env_cols[0]
+            valid_env = env_df[['timestamp', env_col]].dropna() if 'timestamp' in env_df.columns else env_df[['TIMESTAMP', env_col]].dropna().rename(columns={'TIMESTAMP': 'timestamp'})
+            if not valid_env.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=valid_env['timestamp'],
+                        y=valid_env[env_col],
+                        mode='lines',
+                        name=self._env_label(env_col),
+                        line=dict(color='#2ca02c', width=1),
+                        hovertemplate=f'<b>{self._env_label(env_col)}</b><br>' +
+                                      '<b>Time:</b> %{x}<br>' +
+                                      '<b>Value:</b> %{y:.3f}<extra></extra>',
+                        legendgroup='env',
+                        showlegend=False,
+                    ),
+                    row=2, col=1
+                )
         
         # Calculate stats
         date_start = pd.to_datetime(sap_df['timestamp'].min())
@@ -206,20 +252,23 @@ class SapwoodPlotter:
             )
         )
         
-        # Explicitly set datetime axis type for all x-axes
-        fig.update_xaxes(title_text="Timestamp", type='date', row=1, col=1)
-        if has_env:
-            fig.update_xaxes(type='date', row=2, col=1)
+        # Set datetime axis type for all x-axes
+        for r in range(1, n_rows + 1):
+            fig.update_xaxes(type='date', row=r, col=1)
+        fig.update_xaxes(title_text="Timestamp", row=n_rows, col=1)
         
         fig.update_yaxes(title_text=f"Sap Flow ({self.sap_unit})", row=1, col=1)
         
         if has_env:
-            fig.update_yaxes(title_text="Environmental Variables", row=2, col=1)
+            fig.update_yaxes(
+                title_text=self._env_label(env_cols[0]),
+                row=2, col=1,
+            )
         
-        # Add range slider
+        # Add range slider on the bottom-most subplot
         fig.update_xaxes(
             rangeslider_visible=True,
-            row=2 if has_env else 1, col=1
+            row=n_rows, col=1
         )
         
         return fig
@@ -255,21 +304,28 @@ class SapwoodPlotter:
         if valid_data.empty:
             return None
         
-        has_env = env_df is not None and len([c for c in env_df.columns if c not in ['timestamp', 'Unnamed: 0']]) > 0
+        env_cols = []
+        if env_df is not None and self.env_var:
+            available = [c for c in env_df.columns if c not in ['timestamp', 'TIMESTAMP', 'Unnamed: 0']]
+            if self.env_var in available:
+                env_cols = [self.env_var]
+        has_env = len(env_cols) > 0
+        n_rows = 2 if has_env else 1
         
+        subplot_titles = [f'Sap Flow - {tree_col}']
         if has_env:
-            fig = make_subplots(
-                rows=2, cols=1,
-                subplot_titles=(f'Sap Flow - {tree_col}', 'Environmental Data'),
-                vertical_spacing=0.12,
-                row_heights=[0.6, 0.4],
-                shared_xaxes=True
-            )
+            row_heights = [0.65, 0.35]
+            subplot_titles.append(self._env_label(self.env_var))
         else:
-            fig = make_subplots(
-                rows=1, cols=1,
-                subplot_titles=(f'Sap Flow - {tree_col}',),
-            )
+            row_heights = [1.0]
+        
+        fig = make_subplots(
+            rows=n_rows, cols=1,
+            subplot_titles=tuple(subplot_titles),
+            vertical_spacing=0.08,
+            row_heights=row_heights,
+            shared_xaxes=True,
+        )
         
         # Main sap flow trace
         fig.add_trace(
@@ -286,26 +342,24 @@ class SapwoodPlotter:
             row=1, col=1
         )
         
-        # Add environmental data if available
+        # Add the single environmental variable subplot
         if has_env:
-            env_cols = [c for c in env_df.columns if c not in ['timestamp', 'Unnamed: 0']]
-            env_colors = ['#2ca02c', '#ff7f0e', '#d62728']
-            for j, env_col in enumerate(env_cols[:3]):
-                valid_env = env_df[['timestamp', env_col]].dropna()
-                if not valid_env.empty:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=valid_env['timestamp'],
-                            y=valid_env[env_col],
-                            mode='lines',
-                            name=env_col,
-                            line=dict(color=env_colors[j % len(env_colors)], width=1),
-                            hovertemplate=f'<b>{env_col}</b><br>' +
-                                          '<b>Time:</b> %{x}<br>' +
-                                          '<b>Value:</b> %{y:.3f}<extra></extra>',
-                        ),
-                        row=2, col=1
-                    )
+            env_col = env_cols[0]
+            valid_env = env_df[['timestamp', env_col]].dropna() if 'timestamp' in env_df.columns else env_df[['TIMESTAMP', env_col]].dropna().rename(columns={'TIMESTAMP': 'timestamp'})
+            if not valid_env.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=valid_env['timestamp'],
+                        y=valid_env[env_col],
+                        mode='lines',
+                        name=self._env_label(env_col),
+                        line=dict(color='#2ca02c', width=1),
+                        hovertemplate=f'<b>{self._env_label(env_col)}</b><br>' +
+                                      '<b>Time:</b> %{x}<br>' +
+                                      '<b>Value:</b> %{y:.3f}<extra></extra>',
+                    ),
+                    row=2, col=1
+                )
         
         # Stats
         date_start = pd.to_datetime(valid_data['timestamp'].min())
@@ -331,20 +385,23 @@ class SapwoodPlotter:
             showlegend=True
         )
         
-        # Explicitly set datetime axis type for all x-axes
-        fig.update_xaxes(title_text="Timestamp", type='date', row=1, col=1)
-        if has_env:
-            fig.update_xaxes(type='date', row=2, col=1)
+        # Set datetime axis type for all x-axes
+        for r in range(1, n_rows + 1):
+            fig.update_xaxes(type='date', row=r, col=1)
+        fig.update_xaxes(title_text="Timestamp", row=n_rows, col=1)
         
         fig.update_yaxes(title_text=f"Sap Flow ({self.sap_unit})", row=1, col=1)
         
         if has_env:
-            fig.update_yaxes(title_text="Environmental Variables", row=2, col=1)
+            fig.update_yaxes(
+                title_text=self._env_label(env_cols[0]),
+                row=2, col=1,
+            )
         
-        # Add range slider
+        # Add range slider on the bottom-most subplot
         fig.update_xaxes(
             rangeslider_visible=True,
-            row=2 if has_env else 1, col=1
+            row=n_rows, col=1
         )
         
         return fig
@@ -441,13 +498,16 @@ def main():
     parser.add_argument('--data-dir', required=True, help='Directory containing sapflow_sapwood.csv files')
     parser.add_argument('--output-dir', required=True, help='Directory to save output HTML plots')
     parser.add_argument('--env-dir', default=None, help='Directory containing env_data.csv files')
+    parser.add_argument('--env-var', default='SW_IN',
+                        help='Single env variable to plot (e.g. ta, vpd, sw_in, precip, ws, pa)')
     parser.add_argument('--no-individual', action='store_true', help='Skip individual tree plots')
     args = parser.parse_args()
     
     plotter = SapwoodPlotter(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
-        env_dir=args.env_dir
+        env_dir=args.env_dir,
+        env_var=args.env_var,
     )
     plotter.process_all_files(create_individual=not args.no_individual)
 
@@ -464,7 +524,8 @@ if __name__ == "__main__":
     plotter = SapwoodPlotter(
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
-        env_dir=DATA_DIR  # env_data.csv files are in the same directory
+        env_dir=DATA_DIR,  # env_data.csv files are in the same directory
+        env_var='sw_in',   # shortwave incoming radiation
     )
     
     # Process all sapwood files, creating both overview and individual plots

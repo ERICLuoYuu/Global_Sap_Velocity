@@ -1,0 +1,33 @@
+# Ruff configuration for global-sap-velocity (Python 3.10, scientific ML pipeline)
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes (unused imports, undefined names)
+  "I",   # isort (import ordering)
+  "N",   # pep8-naming
+  "UP",  # pyupgrade
+  "B",   # flake8-bugbear (common bugs)
+  "SIM", # flake8-simplify
+]
+ignore = [
+  "E501",  # line too long (handled by formatter, not linter)
+  "N803",  # argument name should be lowercase (scientific code uses X, Y)
+  "N806",  # variable in function should be lowercase (scientific conventions)
+  "B008",  # do not perform function calls in default arguments
+  "SIM108", # ternary operator (sometimes less readable in scientific code)
+]
+
+[lint.per-file-ignores]
+# Test files: allow assert statements, unused imports
+"**/tests/**/*.py" = ["F401", "S101"]
+# Pipeline scripts: allow broad exception handling
+"Sapflow-internal/*.py" = ["B007"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false

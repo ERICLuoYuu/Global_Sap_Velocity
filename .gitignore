@@ -78,3 +78,4 @@ __pycache__/
 # This ensures that a directory structure like 'outputs/figures/' can exist
 # in the repo even if it's empty.
 !.gitkeep
+everything-claude-code/

@@ -79,3 +79,4 @@ __pycache__/
 # in the repo even if it's empty.
 !.gitkeep
 everything-claude-code/
+.worktrees/

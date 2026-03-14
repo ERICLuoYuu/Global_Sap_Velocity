@@ -52,6 +52,62 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def read_prediction_file(
+    filepath: str,
+    usecols: Optional[List[str]] = None,
+    chunksize: Optional[int] = None,
+) -> "pd.DataFrame | pd.io.parsers.readers.TextFileReader":
+    """Read a prediction file (CSV or Parquet) based on file extension.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to the prediction file (.csv or .parquet).
+    usecols : list of str, optional
+        Columns to read.
+    chunksize : int, optional
+        If given and file is CSV, return an iterator of DataFrames.
+        Ignored for Parquet files (read all at once).
+
+    Returns
+    -------
+    pd.DataFrame or TextFileReader
+        The loaded data.  For Parquet files, always returns a full
+        DataFrame regardless of *chunksize*.
+    """
+    ext = Path(filepath).suffix.lower()
+    if ext == ".parquet":
+        df = pd.read_parquet(filepath, columns=usecols, engine="pyarrow")
+        if chunksize is not None:
+            # Simulate chunked reading for Parquet by yielding slices
+            return _parquet_chunk_iter(df, chunksize)
+        return df
+    else:
+        return pd.read_csv(
+            filepath, usecols=usecols, chunksize=chunksize,
+            low_memory=False,
+        )
+
+
+def _parquet_chunk_iter(df: pd.DataFrame, chunksize: int):
+    """Yield DataFrame in chunks to match CSV chunked API.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Full DataFrame to chunk.
+    chunksize : int
+        Number of rows per chunk.
+
+    Yields
+    ------
+    pd.DataFrame
+        A slice of *df* with at most *chunksize* rows.
+    """
+    for start in range(0, len(df), chunksize):
+        yield df.iloc[start : start + chunksize]
+
+
 # ---------------------------------------------------------------------------
 # Reusable helpers (ported from prediction_visualization.py for portability)
 # ---------------------------------------------------------------------------
@@ -141,6 +197,7 @@ def rasterize_all_timestamps(
     lat_range: Optional[Tuple[float, float]] = None,
     lon_range: Optional[Tuple[float, float]] = None,
     chunk_size: int = 500_000,
+    **kwargs: Any,
 ) -> List[Tuple[str, str]]:
     """Read a CSV once and produce one GeoTIFF per unique timestamp.
 
@@ -151,7 +208,7 @@ def rasterize_all_timestamps(
     Parameters
     ----------
     csv_path : str
-        Path to the prediction CSV file.
+        Path to the prediction file (CSV or Parquet).
     output_dir : str
         Directory for output GeoTIFFs.
     value_column : str
@@ -182,11 +239,13 @@ def rasterize_all_timestamps(
 
     # Accumulate per-timestamp aggregated data: {ts: DataFrame}
     ts_accum: Dict[str, List[pd.DataFrame]] = {}
+    _hourly_mode = kwargs.get("hourly_mode", False)
+    _hourly_agg = kwargs.get("hourly_agg", "mean")
 
     for chunk in tqdm(
-        pd.read_csv(csv_path, usecols=cols_needed, chunksize=chunk_size,
-                     low_memory=False),
-        desc="Reading CSV",
+        read_prediction_file(csv_path, usecols=cols_needed,
+                             chunksize=chunk_size),
+        desc="Reading prediction file",
     ):
         # Daytime filter
         if sw_in_threshold > 0 and "sw_in" in chunk.columns:
@@ -198,8 +257,20 @@ def rasterize_all_timestamps(
         if len(chunk) == 0:
             continue
 
-        # Partition by timestamp and accumulate
-        for ts_val, group in chunk.groupby(timestamp_col):
+        # For hourly data in daily mode: extract date from timestamp
+        if _hourly_mode:
+            try:
+                chunk["_date"] = pd.to_datetime(
+                    chunk[timestamp_col]
+                ).dt.date.astype(str)
+            except (ValueError, TypeError):
+                chunk["_date"] = chunk[timestamp_col].astype(str).str[:10]
+            group_col = "_date"
+        else:
+            group_col = timestamp_col
+
+        # Partition by timestamp (or date) and accumulate
+        for ts_val, group in chunk.groupby(group_col):
             ts_str = str(ts_val)
             agg = group.groupby(
                 ["latitude", "longitude"], as_index=False,
@@ -223,9 +294,17 @@ def rasterize_all_timestamps(
 
         # Merge accumulated partials and re-aggregate
         combined = pd.concat(ts_accum[ts_str], ignore_index=True)
+        agg_method = _hourly_agg if _hourly_mode else "mean"
         df = combined.groupby(
             ["latitude", "longitude"], as_index=False,
-        )[value_column].mean()
+        )[value_column].agg(agg_method).rename(
+            columns={value_column: value_column}
+            if agg_method == "mean"
+            else {}
+        )
+        # Ensure column name is consistent after agg
+        if value_column not in df.columns:
+            df = df.rename(columns={agg_method: value_column})
 
         if len(df) == 0:
             logger.warning("No valid data for %s – skipping.", ts_str)
@@ -797,8 +876,12 @@ def run_batch(
     output_dir: str,
     run_id: str,
     value_column: str = "sap_velocity_cnn_lstm",
+    value_columns: Optional[List[str]] = None,
     timestamp_col: str = "timestamp.1",
-    csv_glob: str = "*predictions*.csv",
+    time_scale: str = "daily",
+    hourly_agg: str = "mean",
+    hourly_maps: bool = False,
+    file_glob: str = "*predictions*.*",
     sw_in_threshold: float = 15.0,
     resolution: float = 0.1,
     lat_range: Optional[Tuple[float, float]] = None,
@@ -825,7 +908,7 @@ def run_batch(
         Column with predicted sap velocity values.
     timestamp_col : str
         Timestamp column name in the CSV.
-    csv_glob : str
+    file_glob : str
         Glob pattern to select CSV files within *input_dir*.
     sw_in_threshold : float
         Minimum ``sw_in`` for daytime filtering (≤ 0 to disable).
@@ -862,61 +945,87 @@ def run_batch(
     os.makedirs(run_dir, exist_ok=True)
     logger.info("=== Prediction Visualization Pipeline ===")
     logger.info("Run ID   : %s", run_id)
-    logger.info("Input    : %s/%s", input_dir, csv_glob)
+    logger.info("Input    : %s/%s", input_dir, file_glob)
     logger.info("Output   : %s", run_dir)
     logger.info("Column   : %s", value_column)
     logger.info("Resolution: %.4f°", resolution)
     logger.info("SW_in thr: %.1f", sw_in_threshold)
 
     # Discover CSV files
-    pattern = os.path.join(input_dir, csv_glob)
-    csv_files = sorted(globmod.glob(pattern))
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV files matched pattern: {pattern}")
-    logger.info("Found %d CSV file(s).", len(csv_files))
+    pattern = os.path.join(input_dir, file_glob)
+    pred_files = sorted(globmod.glob(pattern))
+    # Filter to only CSV and Parquet files
+    pred_files = [f for f in pred_files if f.endswith((".csv", ".parquet"))]
+    if not pred_files:
+        raise FileNotFoundError(
+            f"No prediction files (CSV/Parquet) matched pattern: {pattern}"
+        )
+    logger.info("Found %d prediction file(s).", len(pred_files))
 
-    # Process each CSV → per-timestamp GeoTIFFs (single-pass per CSV)
-    all_tifs: List[str] = []
-    for csv_path in csv_files:
+    # Determine which columns to process
+    columns_to_process = value_columns if value_columns else [value_column]
+    hourly_mode = time_scale == "hourly" and not hourly_maps
+
+    # Process each file → per-timestamp GeoTIFFs (single-pass per file)
+    all_tifs: Dict[str, List[str]] = {col: [] for col in columns_to_process}
+    for csv_path in pred_files:
         csv_basename = Path(csv_path).stem
         logger.info("--- Processing %s ---", csv_basename)
 
-        ts_results = rasterize_all_timestamps(
-            csv_path=csv_path,
-            output_dir=run_dir,
-            value_column=value_column,
-            timestamp_col=timestamp_col,
-            sw_in_threshold=sw_in_threshold,
-            resolution=resolution,
-            lat_range=lat_range,
-            lon_range=lon_range,
-        )
-        for ts_str, tif_path in ts_results:
-            all_tifs.append(tif_path)
-            if render_png:
-                png_path = tif_path.replace(".tif", ".png")
-                plot_map(
-                    tif_path, png_path,
-                    title=f"Sap Velocity – {ts_str}",
-                    dpi=dpi,
-                )
+        for vcol in columns_to_process:
+            # Create model-specific subdirectory if multi-model
+            if len(columns_to_process) > 1:
+                model_name = vcol.replace("sap_velocity_", "")
+                model_dir = os.path.join(run_dir, model_name)
+            else:
+                model_dir = run_dir
 
-    logger.info("Generated %d per-timestamp GeoTIFFs.", len(all_tifs))
+            ts_results = rasterize_all_timestamps(
+                csv_path=csv_path,
+                output_dir=model_dir,
+                value_column=vcol,
+                timestamp_col=timestamp_col,
+                sw_in_threshold=sw_in_threshold,
+                resolution=resolution,
+                lat_range=lat_range,
+                lon_range=lon_range,
+                hourly_mode=hourly_mode,
+                hourly_agg=hourly_agg,
+            )
+            for ts_str, tif_path in ts_results:
+                all_tifs[vcol].append(tif_path)
+                if render_png:
+                    png_path = tif_path.replace(".tif", ".png")
+                    plot_map(
+                        tif_path, png_path,
+                        title=f"Sap Velocity ({vcol}) – {ts_str}",
+                        dpi=dpi,
+                    )
 
-    # Compute composites
-    if len(all_tifs) >= 2 and stats:
-        composite_dir = os.path.join(run_dir, "composites")
-        compute_composites(
-            tif_paths=all_tifs,
-            output_dir=composite_dir,
-            stats=stats,
-            render_png=render_png,
-            dpi=dpi,
-        )
-    elif len(all_tifs) == 1:
-        logger.info("Only 1 timestamp – skipping composite generation.")
-    else:
-        logger.warning("No GeoTIFFs produced – skipping composites.")
+    # Compute composites per model
+    for vcol in columns_to_process:
+        tifs = all_tifs[vcol]
+        if len(columns_to_process) > 1:
+            model_name = vcol.replace("sap_velocity_", "")
+            comp_dir = os.path.join(run_dir, model_name, "composites")
+        else:
+            comp_dir = os.path.join(run_dir, "composites")
+
+        total_tifs = len(tifs)
+        logger.info("Generated %d per-timestamp GeoTIFFs for %s.", total_tifs, vcol)
+
+        if total_tifs >= 2 and stats:
+            compute_composites(
+                tif_paths=tifs,
+                output_dir=comp_dir,
+                stats=stats,
+                render_png=render_png,
+                dpi=dpi,
+            )
+        elif total_tifs == 1:
+            logger.info("Only 1 timestamp for %s – skipping composites.", vcol)
+        else:
+            logger.warning("No GeoTIFFs for %s – skipping composites.", vcol)
 
     elapsed = time.time() - wall_start
     logger.info("=== Pipeline complete in %.1fs ===", elapsed)
@@ -996,6 +1105,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--dpi", type=int, default=200,
         help="DPI for PNG output.",
     )
+    parser.add_argument(
+        "--input-format", type=str, default="auto",
+        choices=["auto", "csv", "parquet"],
+        help="Input file format. 'auto' detects by extension.",
+    )
+    parser.add_argument(
+        "--time-scale", type=str, default="daily",
+        choices=["daily", "hourly"],
+        help="Temporal scale of prediction data.",
+    )
+    parser.add_argument(
+        "--hourly-agg", type=str, default="mean",
+        choices=["mean", "median", "max", "min", "sum"],
+        help="Aggregation method for hourly→daily (only when --time-scale hourly).",
+    )
+    parser.add_argument(
+        "--hourly-maps", action="store_true",
+        help="Generate per-hour maps instead of daily aggregates (hourly mode only).",
+    )
+    parser.add_argument(
+        "--value-columns", nargs="+", default=None,
+        help="Multiple value columns for multi-model maps. Overrides --value-column.",
+    )
     return parser
 
 
@@ -1019,7 +1151,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         run_id=args.run_id,
         value_column=args.value_column,
         timestamp_col=args.timestamp_col,
-        csv_glob=args.csv_glob,
+        file_glob=args.csv_glob,
         sw_in_threshold=args.sw_threshold,
         resolution=args.resolution,
         lat_range=lat_range,

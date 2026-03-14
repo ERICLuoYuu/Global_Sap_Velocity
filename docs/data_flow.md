@@ -207,7 +207,7 @@ flowchart TD
 
     subgraph PREDICT ["6 - Global Prediction  [src/make_prediction/]"]
         ERA5_PROC["process_era5land_gee_opt_fix.py  ERA5LandGEEProcessor<br/>Fetch ERA5-Land from GEE per grid cell<br/>Derive VPD  PET  ppfd  wind speed<br/>Add LAI  PFT  canopy via GEE<br/>Add WorldClim bioclim + biome"]
-        PRED_SCR["predict_sap_velocity_sequantial.py<br/>Apply trained model per grid cell<br/>windowed inference  ModelConfig<br/>config.py for paths and params"]
+        PRED_SCR["predict_sap_velocity_sequential.py<br/>Apply trained model per grid cell<br/>windowed inference  ModelConfig<br/>config.py for paths and params"]
     end
 
     ERA5_GRID  -->|"ERA5-Land ImageCollection<br/>fetched per grid cell"| ERA5_PROC
@@ -278,5 +278,5 @@ flowchart TD
 | 3b Gap fill         | `notebooks/sap_gap_filling.py`, `env_gap_filling.py`                     | `sap/filtered/`, `env/filtered/`                        | `gap_filled_size1_after_filter/` (not used by merge)         |
 | 4 Merge             | `notebooks/merge_gap_filled_hourly_orginal.py`                           | QC sap + env + ERA5 site + LAI + PFT + WorldClim + soil | `outputs/processed_data/sapwood/merged/merged_data.csv`      |
 | 5 Train             | `src/hyperparameter_optimization/test_*.py`                              | `merged_data.csv`                                       | `outputs/models/` + `outputs/scalers/`                       |
-| 6 Predict           | `process_era5land_gee_opt_fix.py` + `predict_sap_velocity_sequantial.py` | Gridded ERA5-Land + models                              | `data/predictions/*.csv`                                     |
+| 6 Predict           | `process_era5land_gee_opt_fix.py` + `predict_sap_velocity_sequential.py` | Gridded ERA5-Land + models                              | `data/predictions/*.csv`                                     |
 | 7 Visualise         | `prediction_visualization*.py`                                           | Prediction CSVs                                         | `outputs/maps/*.tif` + `*.png`                               |

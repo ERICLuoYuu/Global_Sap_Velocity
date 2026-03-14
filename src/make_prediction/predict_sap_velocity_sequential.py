@@ -16,7 +16,6 @@ import argparse
 import pandas as pd
 import numpy as np
 import joblib
-import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
 import logging
@@ -955,7 +954,7 @@ def map_predictions_to_df_improved(df, predictions, window_metadata, model_name)
     
     logger.info(f"Successfully mapped {mapped_count} {model_name} predictions")
     
-    df_with_preds = df.copy()
+    pred_df = pd.DataFrame(index=df.index)
     column_name = f'sap_velocity_{model_name}'
     
     missing_indices = [idx for idx in target_indices if idx not in df.index]
@@ -963,13 +962,13 @@ def map_predictions_to_df_improved(df, predictions, window_metadata, model_name)
         logger.warning(f"Found {len(missing_indices)} target indices that don't exist in the DataFrame index")
         logger.debug(f"First few missing indices: {missing_indices[:5]}")
     
-    df_with_preds[column_name] = pred_series
-    df_with_preds[f'{column_name}_location'] = location_series
-    df_with_preds[f'{column_name}_window_start'] = window_start_series
-    df_with_preds[f'{column_name}_window_end'] = window_end_series
-    df_with_preds[f'{column_name}_window_pos'] = window_pos_series
+    pred_df[column_name] = pred_series
+    pred_df[f'{column_name}_location'] = location_series
+    pred_df[f'{column_name}_window_start'] = window_start_series
+    pred_df[f'{column_name}_window_end'] = window_end_series
+    pred_df[f'{column_name}_window_pos'] = window_pos_series
     
-    filled_count = df_with_preds[column_name].notna().sum()
+    filled_count = pred_df[column_name].notna().sum()
     if filled_count != mapped_count:
         logger.warning(f"Only {filled_count} of {mapped_count} predictions were added to DataFrame. Check index alignment.")
     
@@ -977,7 +976,7 @@ def map_predictions_to_df_improved(df, predictions, window_metadata, model_name)
     if mapped_pct < 80:
         logger.warning(f"Only {mapped_pct:.1f}% of {model_name} predictions were mapped. Check index alignment and shift value.")
     
-    return df_with_preds
+    return pred_df
 
 
 def map_flat_predictions_to_df(df: pd.DataFrame, predictions: np.ndarray, indices: List[int], model_name: str) -> pd.DataFrame:
@@ -1002,16 +1001,16 @@ def map_flat_predictions_to_df(df: pd.DataFrame, predictions: np.ndarray, indice
     """
     logger.info(f"Mapping {len(predictions)} flat {model_name} predictions back to DataFrame")
     
-    df_with_preds = df.copy()
+    pred_df = pd.DataFrame(index=df.index)
     column_name = f'sap_velocity_{model_name}'
     
     pred_series = pd.Series(predictions.flatten(), index=indices, dtype=float)
-    df_with_preds[column_name] = pred_series
+    pred_df[column_name] = pred_series
     
-    filled_count = df_with_preds[column_name].notna().sum()
+    filled_count = pred_df[column_name].notna().sum()
     logger.info(f"Successfully mapped {filled_count} {model_name} predictions")
     
-    return df_with_preds
+    return pred_df
 
 
 def verify_prediction_mapping(df_predictions, model_name):
@@ -1326,14 +1325,8 @@ def make_predictions_improved(df, models, feature_columns, label_scaler, input_w
     if model_configs is None:
         model_configs = {}
     
-    # Log scaler status
     if label_scaler is None:
-        logger.info("No label scaler provided. Predictions will not be inverse-scaled.")
-    if label_scaler is None:
-        logger.warning("Label scaler is None. Predictions will be in scaled space.")
-    
-    if model_configs is None:
-        model_configs = {}
+        logger.info("No label scaler provided. Predictions will be in scaled space.")
     
     results_df = df.copy()
     
@@ -1558,7 +1551,7 @@ def validate_predictions(df_predictions, feature_columns):
         if time_cols and time_cols[0] in df_predictions.columns:
             try:
                 time_col = pd.to_datetime(df_predictions[time_cols[0]])
-            except:
+            except (ValueError, TypeError, KeyError):
                 pass
     
     if time_col is not None:
@@ -1599,7 +1592,7 @@ def validate_predictions(df_predictions, feature_columns):
                         logger.warning(f"Column {col} shows very low correlation with {feat}: {corr:.3f}")
                         validation_results[f"{col}_{feat}_correlation"] = False
                         validation_passed = False
-                except:
+                except (ValueError, ZeroDivisionError, IndexError):
                     pass
     
     if validation_passed:
@@ -1609,237 +1602,6 @@ def validate_predictions(df_predictions, feature_columns):
         logger.warning(f"Failed validations: {[k for k, v in validation_results.items() if not v]}")
     
     return validation_passed
-
-
-# =============================================================================
-# Visualization Functions (KEPT FROM ORIGINAL)
-# =============================================================================
-
-def visualize_predictions(df_predictions, output_dir, feature_columns, include_feature_importance=True, models=None):
-    """
-    Create visualizations of the predictions and optionally feature importance.
-    
-    Parameters:
-    -----------
-    df_predictions : pandas.DataFrame
-        DataFrame with original features and added prediction columns
-    output_dir : Path
-        Directory to save visualizations
-    feature_columns : list
-        List of feature columns used in the model
-    include_feature_importance : bool
-        Whether to generate feature importance plots
-    models : dict, optional
-        Dictionary of loaded models
-    """
-    logger.info("Creating visualizations...")
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    plt.style.use('seaborn-v0_8-whitegrid')
-
-    output_dir.mkdir(exist_ok=True, parents=True)
-    df_plot = df_predictions.copy()
-
-    # Get prediction columns (excluding metadata)
-    pred_cols = [col for col in df_plot.columns 
-                 if col.startswith('sap_velocity_') 
-                 and not any(x in col for x in ['_location', '_window_start', '_window_end', '_window_pos'])]
-    ensemble_col = 'sap_velocity_ensemble' if 'sap_velocity_ensemble' in pred_cols else None
-    individual_pred_cols = [col for col in pred_cols if col != ensemble_col]
-
-    if not pred_cols:
-        logger.warning("No prediction columns found for visualization.")
-        return
-
-    # Find or create time column for plotting
-    time_col = None
-    if isinstance(df_plot.index, pd.DatetimeIndex):
-        time_col = df_plot.index.name or 'datetime'
-        df_plot[time_col] = df_plot.index
-        logger.info(f"Using DatetimeIndex for plotting.")
-    else:
-        time_cols = [c for c in df_plot.columns if 'time' in c.lower() or 'date' in c.lower()]
-        for col in time_cols:
-            try:
-                df_plot[col] = pd.to_datetime(df_plot[col])
-                time_col = col
-                logger.info(f"Using column '{time_col}' as datetime for plotting.")
-                break
-            except:
-                continue
-        
-        if time_col is None:
-            logger.warning("No suitable time column found. Using row number for x-axis.")
-            time_col = 'row_number'
-            df_plot[time_col] = range(len(df_plot))
-
-    # Identify locations
-    location_col = None
-    if 'name' in df_plot.columns:
-        location_col = 'name'
-        unique_locations = sorted(df_plot['name'].unique())
-        logger.info(f"Found {len(unique_locations)} locations using 'name' column.")
-    elif 'latitude' in df_plot.columns and 'longitude' in df_plot.columns:
-        location_col = ('latitude', 'longitude')
-        df_plot['lat_rounded'] = df_plot['latitude'].round(2)
-        df_plot['lon_rounded'] = df_plot['longitude'].round(2)
-        unique_locations = sorted(df_plot[['lat_rounded', 'lon_rounded']].drop_duplicates().values.tolist())
-        logger.info(f"Found {len(unique_locations)} locations using lat/lon coordinates.")
-    else:
-        logger.info("No location columns found. Plotting data as a single sequence.")
-        unique_locations = ['single_sequence']
-
-    # Limit number of plots
-    max_plots = 10
-    if len(unique_locations) > max_plots:
-        logger.warning(f"Limiting visualization to {max_plots} locations.")
-        locations_to_plot = unique_locations[:max_plots]
-    else:
-        locations_to_plot = unique_locations
-
-    # Create plots for each location
-    for i, location_id in enumerate(locations_to_plot):
-        try:
-            if location_col == 'name':
-                location_data = df_plot[df_plot['name'] == location_id].copy()
-                loc_str = str(location_id)
-            elif location_col == ('latitude', 'longitude'):
-                lat, lon = location_id
-                location_data = df_plot[(df_plot['lat_rounded'] == lat) & 
-                                       (df_plot['lon_rounded'] == lon)].copy()
-                loc_str = f"Lat={lat:.2f}_Lon={lon:.2f}"
-            else:
-                location_data = df_plot.copy()
-                loc_str = "All_Data"
-            
-            if location_data.empty:
-                logger.warning(f"No data for location {loc_str}. Skipping plot.")
-                continue
-            
-            location_data = location_data.sort_values(by=time_col)
-            
-            # Create figure with subplots
-            fig, axes = plt.subplots(2, 1, figsize=(15, 10), sharex=True, 
-                                     gridspec_kw={'height_ratios': [3, 1]})
-            
-            # Plot 1: Predictions
-            ax = axes[0]
-            
-            if ensemble_col and ensemble_col in location_data.columns:
-                ensemble_data = location_data[[time_col, ensemble_col]].dropna()
-                if not ensemble_data.empty:
-                    ax.plot(ensemble_data[time_col], ensemble_data[ensemble_col], 
-                           label='Ensemble', color='black', linewidth=2.5, zorder=10)
-            
-            palette = sns.color_palette("tab10", len(individual_pred_cols))
-            for j, col in enumerate(individual_pred_cols):
-                if col in location_data.columns:
-                    model_data = location_data[[time_col, col]].dropna()
-                    if not model_data.empty:
-                        model_type = col.replace('sap_velocity_', '')
-                        ax.plot(model_data[time_col], model_data[col], 
-                               label=f'{model_type.upper()}', color=palette[j], 
-                               alpha=0.8, linewidth=1.5)
-            
-            ax.set_title(f'Sap Velocity Predictions - {loc_str}')
-            ax.set_ylabel('Sap Velocity')
-            ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
-            
-            if isinstance(location_data[time_col].iloc[0], pd.Timestamp):
-                ax.tick_params(axis='x', rotation=45)
-            
-            # Plot 2: Key Features
-            ax = axes[1]
-            key_features = ['ta', 'vpd', 'ppfd_in', 'sw_in']
-            plot_features = [f for f in key_features if f in location_data.columns]
-            
-            if plot_features:
-                norm_data = location_data[plot_features].copy()
-                for col in plot_features:
-                    min_val, max_val = norm_data[col].min(), norm_data[col].max()
-                    if max_val > min_val:
-                        norm_data[col] = (norm_data[col] - min_val) / (max_val - min_val)
-                    else:
-                        norm_data[col] = 0.5
-                
-                for j, col in enumerate(plot_features):
-                    ax.plot(location_data[time_col], norm_data[col], 
-                           label=col, linewidth=1)
-                
-                ax.set_title('Key Environmental Variables (Normalized)')
-                ax.set_ylabel('Normalized Value')
-                ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
-            else:
-                ax.set_visible(False)
-            
-            axes[-1].set_xlabel(time_col.replace('_', ' ').title())
-            
-            plt.tight_layout()
-            safe_loc_str = loc_str.replace(' ', '_').replace('=', '').replace('.', 'p')
-            safe_loc_str = safe_loc_str.replace(',', '').replace('/', '_').replace('\\', '_')
-            filename = f'predictions_{safe_loc_str}.png'
-            filepath = output_dir / filename
-            
-            plt.savefig(filepath, bbox_inches='tight', dpi=150)
-            logger.info(f"Saved plot: {filepath}")
-            plt.close(fig)
-            
-        except Exception as e:
-            logger.error(f"Error creating plot for location {location_id}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-
-    # Feature Importance Plots
-    if include_feature_importance and models is not None and feature_columns:
-        logger.info("Generating feature importance plots...")
-        
-        for model_type, model in models.items():
-            try:
-                importances = None
-                
-                if hasattr(model, 'feature_importances_'):
-                    importances = model.feature_importances_
-                elif hasattr(model, 'coef_') and hasattr(model.coef_, 'shape'):
-                    if len(model.coef_.shape) == 1:
-                        importances = np.abs(model.coef_)
-                    elif len(model.coef_.shape) == 2:
-                        importances = np.mean(np.abs(model.coef_), axis=0)
-                
-                if importances is not None:
-                    if len(importances) == len(feature_columns):
-                        imp_df = pd.DataFrame({
-                            'Feature': feature_columns,
-                            'Importance': importances
-                        })
-                        imp_df = imp_df.sort_values('Importance', ascending=False)
-                        
-                        if len(imp_df) > 20:
-                            imp_df = imp_df.head(20)
-                        
-                        plt.figure(figsize=(10, max(6, len(imp_df) * 0.3)))
-                        ax = sns.barplot(x='Importance', y='Feature', data=imp_df, palette='viridis')
-                        plt.title(f'Feature Importance - {model_type.upper()}')
-                        plt.tight_layout()
-                        
-                        for p, importance in zip(ax.patches, imp_df['Importance']):
-                            width = p.get_width()
-                            plt.text(width + width * 0.02, p.get_y() + p.get_height()/2, 
-                                    f'{importance:.3f}', ha='left', va='center')
-                        
-                        filepath = output_dir / f'feature_importance_{model_type}.png'
-                        plt.savefig(filepath, bbox_inches='tight', dpi=150)
-                        logger.info(f"Saved feature importance plot: {filepath}")
-                        plt.close()
-                        
-                        # Save as CSV
-                        imp_df.to_csv(output_dir / f'feature_importance_{model_type}.csv', index=False)
-                    else:
-                        logger.warning(f"Feature importance dimensions mismatch for {model_type}: "
-                                       f"{len(importances)} importances vs {len(feature_columns)} features")
-            except Exception as e:
-                logger.error(f"Error creating feature importance plot for {model_type}: {e}")
-
-    logger.info(f"Visualization complete. Results saved to {output_dir}")
 
 
 # =============================================================================
@@ -1870,14 +1632,19 @@ def parse_args():
                         help='Prediction shift steps ahead (used if not in config).')
     parser.add_argument('--label-width', type=int, default=DEFAULT_PARAMS['LABEL_WIDTH'],
                         help='Time steps in the label window (informational).')
-    parser.add_argument('--visualize', action='store_true',
-                        help='Create visualizations of predictions.')
-    parser.add_argument('--feature-importance', action='store_true',
-                        help='Generate feature importance plots for applicable models.')
     parser.add_argument('--validate', action='store_true',
                         help='Perform validation checks on predictions.')
     parser.add_argument('--list-runs', action='store_true',
                         help='List available run_ids for the specified model_type and exit.')
+    parser.add_argument('--time-scale', type=str, default='daily',
+                        choices=['daily', 'hourly'],
+                        help='Temporal scale of predictions.')
+    parser.add_argument('--output-format', type=str, default='parquet',
+                        choices=['parquet', 'csv'],
+                        help='Output file format (parquet for ~70%% size reduction).')
+    parser.add_argument('--compression', type=str, default='gzip',
+                        choices=['gzip', 'snappy', 'none'],
+                        help='Compression for Parquet output (gzip=smaller, snappy=faster).')
 
     return parser.parse_args()
 
@@ -1885,6 +1652,25 @@ def parse_args():
 # =============================================================================
 # Main Function
 # =============================================================================
+
+
+def _extract_year_from_filename(stem: str) -> str:
+    """Extract 4-digit year from filename like prediction_2015_01_daily.
+
+    Parameters
+    ----------
+    stem : str
+        Filename stem (no extension).
+
+    Returns
+    -------
+    str
+        4-digit year string, or 'unknown' if not found.
+    """
+    import re
+    match = re.search(r'((?:19|20)\d{2})', stem)
+    return match.group(1) if match else 'unknown'
+
 
 def main():
     """Main execution function"""
@@ -1907,12 +1693,15 @@ def main():
             logger.info(f"No runs found for model type: {model_type}")
         sys.exit(0)
 
-    # input will be a directory, check existence and get files
+    # Input directory validation and file discovery
     input_dir = Path(args.input_dir)
-    input_files = list(input_dir.glob('*.csv'))
-    print(f"Found {len(input_files)} input files in {input_dir}")
     if not input_dir.is_dir():
         logger.error(f"Input directory not found: {input_dir}")
+        sys.exit(1)
+    input_files = list(input_dir.glob('*.csv'))
+    print(f"Found {len(input_files)} input files in {input_dir}")
+    if not input_files:
+        logger.error(f"No CSV files found in {input_dir}")
         sys.exit(1)
     for input_file in input_files:
         logger.info(f"Processing input file: {input_file}")
@@ -1920,8 +1709,8 @@ def main():
         if args.output:
             output_dir = Path(args.output)
         else:
-            output_base = Path('./outputs')
-            output_dir = output_base / input_file.stem
+            year = _extract_year_from_filename(input_file.stem)
+            output_dir = Path('./outputs/prediction') / args.time_scale / year
         output_dir.mkdir(exist_ok=True, parents=True)
 
         # Log setup information
@@ -2046,9 +1835,23 @@ def main():
             logger.info(f"Prediction validation {'passed' if validation_passed else 'failed'}")
 
         # Save predictions
-        output_file = output_dir / f"{input_file.stem}_predictions_{model_type}_{run_id}.csv"
+        if args.output_format == 'parquet':
+            ext = '.parquet'
+            compression = args.compression if args.compression != 'none' else None
+        else:
+            ext = '.csv'
+            compression = None
+        output_file = output_dir / f"{input_file.stem}_predictions_{model_type}_{run_id}{ext}"
         try:
-            df_final.to_csv(output_file)
+            if args.output_format == 'parquet':
+                df_final.to_parquet(
+                    output_file,
+                    compression=compression,
+                    engine='pyarrow',
+                    index=False,
+                )
+            else:
+                df_final.to_csv(output_file, index=False)
             logger.info(f"Saved predictions to {output_file}")
         except Exception as e:
             logger.error(f"Error saving predictions: {e}")
@@ -2073,16 +1876,6 @@ def main():
             logger.info(f"Saved config summary to {config_summary_file}")
         except Exception as e:
             logger.warning(f"Could not save config summary: {e}")
-
-        # Create visualizations
-        if args.visualize:
-            visualize_predictions(
-                df_final, 
-                output_dir, 
-                feature_columns,
-                include_feature_importance=args.feature_importance,
-                models=models
-            )
 
         # Finish
         end_time = time.time()

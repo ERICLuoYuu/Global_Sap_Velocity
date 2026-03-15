@@ -51,6 +51,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Canonical timestamp column candidates (tried in order)
+_TIMESTAMP_CANDIDATES = [
+    "timestamp", "timestamp.1", "date", "datetime", "time",
+    "Date", "Timestamp", "TIMESTAMP",
+]
+
+
+def _resolve_timestamp_column(
+    columns: "Iterable[str]",
+    preferred: str = "timestamp",
+) -> str:
+    """Find the best timestamp column from available column names.
+
+    Tries *preferred* first, then falls back through a list of common
+    timestamp-like names, and finally searches for any column containing
+    ``'time'`` or ``'date'`` (case-insensitive).
+
+    Parameters
+    ----------
+    columns : iterable of str
+        Available column names.
+    preferred : str
+        Column name to try first.
+
+    Returns
+    -------
+    str
+        Resolved column name.
+
+    Raises
+    ------
+    KeyError
+        If no suitable column is found.
+    """
+    cols_list = list(columns)
+    cols_set = set(cols_list)
+    if preferred in cols_set:
+        return preferred
+    for candidate in _TIMESTAMP_CANDIDATES:
+        if candidate in cols_set:
+            return candidate
+    for col in cols_list:
+        if "time" in col.lower() or "date" in col.lower():
+            return col
+    raise KeyError(
+        f"No timestamp column found. Tried: {preferred!r} and "
+        f"{_TIMESTAMP_CANDIDATES}. Available: {sorted(cols_set)}"
+    )
+
 
 def read_prediction_file(
     filepath: str,
@@ -150,34 +199,46 @@ def get_valid_block_size(
 
 def discover_timestamps(
     csv_path: str,
-    timestamp_col: str = "timestamp.1",
+    timestamp_col: str = "timestamp",
     chunk_size: int = 500_000,
 ) -> List[str]:
-    """Scan a CSV and return a sorted list of unique timestamp strings.
+    """Scan a prediction file and return a sorted list of unique timestamps.
+
+    When *timestamp_col* is not found in the file header, the function
+    falls back through common timestamp column names automatically.
 
     Parameters
     ----------
     csv_path : str
-        Path to the prediction CSV.
+        Path to the prediction CSV or Parquet file.
     timestamp_col : str
-        Name of the timestamp column to scan.
+        Preferred timestamp column name.
     chunk_size : int
         Number of rows per chunk for memory-efficient reading.
 
     Returns
     -------
     list of str
-        Sorted unique timestamp strings found in the CSV.
+        Sorted unique timestamp strings found in the file.
     """
     logger.info("Discovering timestamps in %s …", os.path.basename(csv_path))
+    ext = Path(csv_path).suffix.lower()
+
+    # Resolve actual column name from file header
+    if ext == ".parquet":
+        import pyarrow.parquet as pq
+        schema_cols = pq.read_schema(csv_path).names
+    else:
+        with open(csv_path, "r") as fh:
+            schema_cols = fh.readline().strip().split(",")
+    resolved_col = _resolve_timestamp_column(schema_cols, preferred=timestamp_col)
+    if resolved_col != timestamp_col:
+        logger.info("Timestamp column resolved: %r -> %r", timestamp_col, resolved_col)
+
     unique_ts: set = set()
-    for chunk in pd.read_csv(
-        csv_path,
-        usecols=[timestamp_col],
-        chunksize=chunk_size,
-        low_memory=False,
-    ):
-        unique_ts.update(chunk[timestamp_col].dropna().unique())
+    for chunk in read_prediction_file(csv_path, usecols=[resolved_col],
+                                      chunksize=chunk_size):
+        unique_ts.update(chunk[resolved_col].dropna().unique())
     sorted_ts = sorted(unique_ts)
     logger.info("Found %d unique timestamps.", len(sorted_ts))
     return sorted_ts
@@ -191,7 +252,7 @@ def rasterize_all_timestamps(
     csv_path: str,
     output_dir: str,
     value_column: str = "sap_velocity_cnn_lstm",
-    timestamp_col: str = "timestamp.1",
+    timestamp_col: str = "timestamp",
     sw_in_threshold: float = 15.0,
     resolution: float = 0.1,
     lat_range: Optional[Tuple[float, float]] = None,
@@ -231,6 +292,16 @@ def rasterize_all_timestamps(
     """
     start = time.time()
     logger.info("Single-pass rasterization of %s …", os.path.basename(csv_path))
+
+    # Auto-resolve timestamp column from file header
+    ext = Path(csv_path).suffix.lower()
+    if ext == ".parquet":
+        import pyarrow.parquet as pq
+        schema_cols = pq.read_schema(csv_path).names
+    else:
+        with open(csv_path, "r") as fh:
+            schema_cols = fh.readline().strip().split(",")
+    timestamp_col = _resolve_timestamp_column(schema_cols, preferred=timestamp_col)
 
     cols_needed = ["latitude", "longitude", timestamp_col, value_column]
     if sw_in_threshold > 0:
@@ -877,7 +948,7 @@ def run_batch(
     run_id: str,
     value_column: str = "sap_velocity_cnn_lstm",
     value_columns: Optional[List[str]] = None,
-    timestamp_col: str = "timestamp.1",
+    timestamp_col: str = "timestamp",
     time_scale: str = "daily",
     hourly_agg: str = "mean",
     hourly_maps: bool = False,
@@ -1064,8 +1135,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Name of the predicted-value column in the CSV.",
     )
     parser.add_argument(
-        "--timestamp-col", default="timestamp.1",
-        help="Name of the timestamp column in the CSV.",
+        "--timestamp-col", default="timestamp",
+        help="Preferred timestamp column name.  When the specified column "
+             "is not found, the script auto-detects common alternatives "
+             "(timestamp.1, date, datetime, etc.).",
     )
     parser.add_argument(
         "--csv-glob", default="*predictions*.csv",

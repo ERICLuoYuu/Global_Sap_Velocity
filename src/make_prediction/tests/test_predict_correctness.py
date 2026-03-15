@@ -423,12 +423,12 @@ class TestRowIdentity:
     ) -> None:
         """Timestamp column must not be modified by feature preparation."""
         df = synthetic_era5_input.iloc[:, 1:]
-        original_ts = df["timestamp.1"].values.copy()
+        original_ts = df["timestamp"].values.copy()
 
         feature_cols = [c for c in FEATURE_NAMES if c in df.columns]
         prepare_flat_features(df, feature_cols)
 
-        np.testing.assert_array_equal(df["timestamp.1"].values, original_ts)
+        np.testing.assert_array_equal(df["timestamp"].values, original_ts)
 
 
 # ===================================================================

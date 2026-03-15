@@ -643,6 +643,45 @@ def load_scalers(models_dir: Path, model_type: str, run_id: str) -> Tuple[Option
     return feature_scaler, label_scaler
 
 
+# Canonical timestamp column candidates (tried in order)
+_TIMESTAMP_CANDIDATES = [
+    "timestamp", "timestamp.1", "date", "datetime", "time",
+    "Date", "Timestamp", "TIMESTAMP",
+]
+
+
+def _resolve_timestamp_column(
+    columns: "Iterable[str]",
+    preferred: str = "timestamp",
+) -> "Optional[str]":
+    """Find the best timestamp column from available column names.
+
+    Parameters
+    ----------
+    columns : iterable of str
+        Available column names.
+    preferred : str
+        Column name to try first.
+
+    Returns
+    -------
+    str or None
+        Resolved column name, or *None* if nothing matches.
+    """
+    cols_list = list(columns)
+    cols_set = set(cols_list)
+    if preferred in cols_set:
+        return preferred
+    for candidate in _TIMESTAMP_CANDIDATES:
+        if candidate in cols_set:
+            return candidate
+    # Fallback: first column containing 'time' or 'date'
+    for col in cols_list:
+        if "time" in col.lower() or "date" in col.lower():
+            return col
+    return None
+
+
 def load_preprocessed_data(data_file):
     """
     Load preprocessed ERA5-Land data from CSV.
@@ -683,8 +722,14 @@ def load_preprocessed_data(data_file):
         df = pd.read_csv(data_file_path, low_memory=False).dropna()
         df = df.iloc[:, 1:]
         
-        timestamp_col = 'timestamp.1'
-        df = df.sort_values(by=timestamp_col) if timestamp_col in df.columns else df
+        # Detect and normalise the timestamp column to 'timestamp'
+        ts_col = _resolve_timestamp_column(df.columns)
+        if ts_col and ts_col != "timestamp":
+            df = df.rename(columns={ts_col: "timestamp"})
+            logger.info(f"Renamed timestamp column '{ts_col}' -> 'timestamp'")
+            ts_col = "timestamp"
+        if ts_col:
+            df = df.sort_values(by=ts_col)
 
         logger.info(f"Loaded data with {len(df)} rows and {len(df.columns)} columns")
         
@@ -751,13 +796,9 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
     location_indices_map = {}
     
     # Identify time column for sorting
-    time_col = None
-    if 'timestamp.1' in df_processed.columns:
-        time_col = 'timestamp.1'
-        logger.info(f"Using 'timestamp.1' column for time reference.")
-    elif 'timestamp' in df_processed.columns:
-        time_col = 'timestamp'
-        logger.info(f"Using 'timestamp' column for time reference.")
+    time_col = _resolve_timestamp_column(df_processed.columns)
+    if time_col:
+        logger.info(f"Using '{time_col}' column for time reference.")
     else:
         time_cols = [col for col in df_processed.columns 
                     if 'time' in col.lower() or 'date' in col.lower()]

@@ -116,7 +116,7 @@ def synthetic_predictions(rng: np.random.Generator) -> pd.DataFrame:
 
     5 known points + 95 random points, each appearing in 5 timestamps.
     All coordinates snapped to 0.1 degree grid.
-    Columns: latitude, longitude, timestamp.1, sap_velocity_xgb, sap_velocity_rf
+    Columns: latitude, longitude, timestamp, sap_velocity_xgb, sap_velocity_rf
     """
     rows = []
 
@@ -137,7 +137,7 @@ def synthetic_predictions(rng: np.random.Generator) -> pd.DataFrame:
             rows.append({
                 "latitude": pt["lat"],
                 "longitude": pt["lon"],
-                "timestamp.1": ts,
+                "timestamp": ts,
                 "sap_velocity_xgb": pt["sap_xgb"],
                 "sap_velocity_rf": pt["sap_rf"],
             })
@@ -146,14 +146,14 @@ def synthetic_predictions(rng: np.random.Generator) -> pd.DataFrame:
             rows.append({
                 "latitude": lat,
                 "longitude": lon,
-                "timestamp.1": ts,
+                "timestamp": ts,
                 "sap_velocity_xgb": round(float(rng.uniform(0.5, 25.0)), 4),
                 "sap_velocity_rf": round(float(rng.uniform(0.5, 25.0)), 4),
             })
 
     df = pd.DataFrame(rows)
     # Ensure timestamp column is string (matching real pipeline output)
-    df["timestamp.1"] = df["timestamp.1"].astype(str)
+    df["timestamp"] = df["timestamp"].astype(str)
     return df
 
 
@@ -176,7 +176,7 @@ def synthetic_era5_input(rng: np.random.Generator) -> pd.DataFrame:
                 "idx": 0,  # dummy index column (dropped by iloc[:, 1:])
                 "latitude": lat,
                 "longitude": lon,
-                "timestamp.1": str(ts),
+                "timestamp": str(ts),
                 "ta": float(rng.uniform(260, 310)),
                 "vpd": float(rng.uniform(0, 5)),
                 "sw_in": float(rng.uniform(0, 400)),

@@ -1,0 +1,50 @@
+2026-03-14 12:50:35 [INFO] === Prediction Visualization Pipeline ===
+2026-03-14 12:50:35 [INFO] Run ID   : smoke_test_daily
+2026-03-14 12:50:35 [INFO] Input    : /scratch/tmp/yluo2/gsv/outputs/prediction/prediction_2015_01_daily*xgb*.csv
+2026-03-14 12:50:35 [INFO] Output   : /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/smoke_test_daily
+2026-03-14 12:50:35 [INFO] Column   : sap_velocity_xgb
+2026-03-14 12:50:35 [INFO] Resolution: 0.1000°
+2026-03-14 12:50:35 [INFO] SW_in thr: 0.0
+2026-03-14 12:50:35 [INFO] Found 1 prediction file(s).
+2026-03-14 12:50:35 [INFO] --- Processing prediction_2015_01_daily_predictions_xgb_default_daily_without_coordinates ---
+2026-03-14 12:50:35 [INFO] Single-pass rasterization of prediction_2015_01_daily_predictions_xgb_default_daily_without_coordinates.csv …
+Reading prediction file: 0it [00:00, ?it/s]Reading prediction file: 1it [00:03,  3.07s/it]Reading prediction file: 2it [00:04,  2.33s/it]Reading prediction file: 3it [00:06,  2.10s/it]Reading prediction file: 4it [00:08,  1.98s/it]Reading prediction file: 5it [00:10,  1.92s/it]Reading prediction file: 6it [00:12,  1.87s/it]Reading prediction file: 7it [00:13,  1.84s/it]Reading prediction file: 8it [00:15,  1.83s/it]Reading prediction file: 9it [00:17,  1.82s/it]Reading prediction file: 10it [00:19,  1.81s/it]Reading prediction file: 11it [00:21,  1.80s/it]Reading prediction file: 12it [00:22,  1.80s/it]Reading prediction file: 13it [00:24,  1.80s/it]Reading prediction file: 14it [00:26,  1.80s/it]Reading prediction file: 15it [00:28,  1.79s/it]Reading prediction file: 16it [00:30,  1.79s/it]Reading prediction file: 17it [00:31,  1.79s/it]Reading prediction file: 18it [00:33,  1.79s/it]Reading prediction file: 19it [00:35,  1.79s/it]Reading prediction file: 20it [00:37,  1.79s/it]Reading prediction file: 21it [00:38,  1.79s/it]Reading prediction file: 22it [00:40,  1.79s/it]Reading prediction file: 23it [00:42,  1.79s/it]Reading prediction file: 24it [00:44,  1.78s/it]Reading prediction file: 25it [00:46,  1.78s/it]Reading prediction file: 26it [00:47,  1.79s/it]Reading prediction file: 27it [00:49,  1.79s/it]Reading prediction file: 28it [00:51,  1.79s/it]Reading prediction file: 29it [00:53,  1.79s/it]Reading prediction file: 30it [00:55,  1.79s/it]Reading prediction file: 31it [00:56,  1.79s/it]Reading prediction file: 32it [00:58,  1.79s/it]Reading prediction file: 33it [01:00,  1.79s/it]Reading prediction file: 34it [01:02,  1.79s/it]Reading prediction file: 35it [01:04,  1.79s/it]Reading prediction file: 36it [01:05,  1.80s/it]Reading prediction file: 37it [01:07,  1.79s/it]Reading prediction file: 38it [01:09,  1.79s/it]Reading prediction file: 39it [01:11,  1.78s/it]Reading prediction file: 40it [01:12,  1.66s/it]Reading prediction file: 40it [01:12,  1.81s/it]
+2026-03-14 12:51:49 [INFO] Rasterized 2015-01-01 00:00:00+00:00 → sap_velocity_2015-01-01_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:49 [INFO] Rasterized 2015-01-02 00:00:00+00:00 → sap_velocity_2015-01-02_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:50 [INFO] Rasterized 2015-01-03 00:00:00+00:00 → sap_velocity_2015-01-03_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:50 [INFO] Rasterized 2015-01-04 00:00:00+00:00 → sap_velocity_2015-01-04_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:50 [INFO] Rasterized 2015-01-05 00:00:00+00:00 → sap_velocity_2015-01-05_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:51 [INFO] Rasterized 2015-01-06 00:00:00+00:00 → sap_velocity_2015-01-06_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:51 [INFO] Rasterized 2015-01-07 00:00:00+00:00 → sap_velocity_2015-01-07_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:52 [INFO] Rasterized 2015-01-08 00:00:00+00:00 → sap_velocity_2015-01-08_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:52 [INFO] Rasterized 2015-01-09 00:00:00+00:00 → sap_velocity_2015-01-09_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:53 [INFO] Rasterized 2015-01-10 00:00:00+00:00 → sap_velocity_2015-01-10_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:53 [INFO] Rasterized 2015-01-11 00:00:00+00:00 → sap_velocity_2015-01-11_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:54 [INFO] Rasterized 2015-01-12 00:00:00+00:00 → sap_velocity_2015-01-12_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:54 [INFO] Rasterized 2015-01-13 00:00:00+00:00 → sap_velocity_2015-01-13_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:55 [INFO] Rasterized 2015-01-14 00:00:00+00:00 → sap_velocity_2015-01-14_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:55 [INFO] Rasterized 2015-01-15 00:00:00+00:00 → sap_velocity_2015-01-15_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:55 [INFO] Rasterized 2015-01-16 00:00:00+00:00 → sap_velocity_2015-01-16_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:56 [INFO] Rasterized 2015-01-17 00:00:00+00:00 → sap_velocity_2015-01-17_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:56 [INFO] Rasterized 2015-01-18 00:00:00+00:00 → sap_velocity_2015-01-18_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:57 [INFO] Rasterized 2015-01-19 00:00:00+00:00 → sap_velocity_2015-01-19_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:57 [INFO] Rasterized 2015-01-20 00:00:00+00:00 → sap_velocity_2015-01-20_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:58 [INFO] Rasterized 2015-01-21 00:00:00+00:00 → sap_velocity_2015-01-21_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:58 [INFO] Rasterized 2015-01-22 00:00:00+00:00 → sap_velocity_2015-01-22_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:59 [INFO] Rasterized 2015-01-23 00:00:00+00:00 → sap_velocity_2015-01-23_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:59 [INFO] Rasterized 2015-01-24 00:00:00+00:00 → sap_velocity_2015-01-24_00-00-00.tif (641274 pixels)
+2026-03-14 12:51:59 [INFO] Rasterized 2015-01-25 00:00:00+00:00 → sap_velocity_2015-01-25_00-00-00.tif (641274 pixels)
+2026-03-14 12:52:00 [INFO] Rasterized 2015-01-26 00:00:00+00:00 → sap_velocity_2015-01-26_00-00-00.tif (641274 pixels)
+2026-03-14 12:52:00 [INFO] Rasterized 2015-01-27 00:00:00+00:00 → sap_velocity_2015-01-27_00-00-00.tif (641274 pixels)
+2026-03-14 12:52:01 [INFO] Rasterized 2015-01-28 00:00:00+00:00 → sap_velocity_2015-01-28_00-00-00.tif (641274 pixels)
+2026-03-14 12:52:01 [INFO] Rasterized 2015-01-29 00:00:00+00:00 → sap_velocity_2015-01-29_00-00-00.tif (641274 pixels)
+2026-03-14 12:52:02 [INFO] Rasterized 2015-01-30 00:00:00+00:00 → sap_velocity_2015-01-30_00-00-00.tif (641274 pixels)
+2026-03-14 12:52:02 [INFO] Rasterized 2015-01-31 00:00:00+00:00 → sap_velocity_2015-01-31_00-00-00.tif (641274 pixels)
+2026-03-14 12:52:02 [INFO] Single-pass complete: 31 timestamps, 86.7s.
+2026-03-14 12:52:02 [INFO] Generated 31 per-timestamp GeoTIFFs for sap_velocity_xgb.
+2026-03-14 12:52:02 [INFO] Computing composites from 31 GeoTIFFs …
+Streaming composites:   0%|          | 0/31 [00:00<?, ?it/s]Streaming composites:   3%|▎         | 1/31 [00:00<00:10,  2.90it/s]Streaming composites:   6%|▋         | 2/31 [00:00<00:09,  2.94it/s]Streaming composites:  10%|▉         | 3/31 [00:01<00:09,  2.96it/s]Streaming composites:  13%|█▎        | 4/31 [00:01<00:09,  2.95it/s]Streaming composites:  16%|█▌        | 5/31 [00:01<00:08,  2.96it/s]Streaming composites:  19%|█▉        | 6/31 [00:02<00:08,  2.97it/s]Streaming composites:  23%|██▎       | 7/31 [00:02<00:08,  2.96it/s]Streaming composites:  26%|██▌       | 8/31 [00:02<00:07,  2.97it/s]Streaming composites:  29%|██▉       | 9/31 [00:03<00:07,  2.98it/s]Streaming composites:  32%|███▏      | 10/31 [00:03<00:07,  2.97it/s]Streaming composites:  35%|███▌      | 11/31 [00:03<00:06,  2.98it/s]Streaming composites:  39%|███▊      | 12/31 [00:04<00:06,  2.99it/s]Streaming composites:  42%|████▏     | 13/31 [00:04<00:06,  2.98it/s]Streaming composites:  45%|████▌     | 14/31 [00:04<00:05,  2.97it/s]Streaming composites:  48%|████▊     | 15/31 [00:05<00:05,  2.98it/s]Streaming composites:  52%|█████▏    | 16/31 [00:05<00:05,  2.97it/s]Streaming composites:  55%|█████▍    | 17/31 [00:05<00:04,  2.98it/s]Streaming composites:  58%|█████▊    | 18/31 [00:06<00:04,  3.01it/s]Streaming composites:  61%|██████▏   | 19/31 [00:06<00:04,  2.99it/s]Streaming composites:  65%|██████▍   | 20/31 [00:06<00:03,  2.98it/s]Streaming composites:  68%|██████▊   | 21/31 [00:07<00:03,  2.99it/s]Streaming composites:  71%|███████   | 22/31 [00:07<00:03,  2.97it/s]Streaming composites:  74%|███████▍  | 23/31 [00:07<00:02,  2.97it/s]Streaming composites:  77%|███████▋  | 24/31 [00:08<00:02,  2.98it/s]Streaming composites:  81%|████████  | 25/31 [00:08<00:02,  2.96it/s]Streaming composites:  84%|████████▍ | 26/31 [00:08<00:01,  2.97it/s]Streaming composites:  87%|████████▋ | 27/31 [00:09<00:01,  2.93it/s]Streaming composites:  90%|█████████ | 28/31 [00:09<00:01,  2.93it/s]Streaming composites:  94%|█████████▎| 29/31 [00:09<00:00,  2.94it/s]Streaming composites:  97%|█████████▋| 30/31 [00:10<00:00,  2.96it/s]Streaming composites: 100%|██████████| 31/31 [00:10<00:00,  2.95it/s]Streaming composites: 100%|██████████| 31/31 [00:10<00:00,  2.97it/s]
+2026-03-14 12:52:13 [INFO] Wrote /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/smoke_test_daily/composites/sap_velocity_composite_mean.tif
+2026-03-14 12:52:13 [INFO] Wrote /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/smoke_test_daily/composites/sap_velocity_composite_count.tif
+2026-03-14 12:52:13 [INFO] Composite generation done in 10.9s.
+2026-03-14 12:52:13 [INFO] === Pipeline complete in 98.2s ===

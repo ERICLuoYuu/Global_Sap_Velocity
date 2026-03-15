@@ -72,7 +72,7 @@ class TestRasterizationCorrectness:
         df = pd.DataFrame({
             "latitude": [48.5, 48.5, 48.5],
             "longitude": [11.5, 11.5, 11.5],
-            "timestamp.1": ["2015-07-01"] * 3,
+            "timestamp": ["2015-07-01"] * 3,
             "sap_velocity_xgb": values,
         })
         csv_path = str(tmp_path / "dup.csv")
@@ -82,7 +82,7 @@ class TestRasterizationCorrectness:
         results = rasterize_all_timestamps(
             csv_path=csv_path, output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
         assert len(results) == 1
@@ -169,7 +169,7 @@ class TestRasterizationCorrectness:
         results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 
@@ -401,7 +401,7 @@ class TestEndToEndContract:
         results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 
@@ -409,7 +409,7 @@ class TestEndToEndContract:
 
         result_map = {ts: path for ts, path in results}
         for ts_str, tif_path in results:
-            ts_data = pred_df[pred_df["timestamp.1"] == ts_str]
+            ts_data = pred_df[pred_df["timestamp"] == ts_str]
             with rasterio.open(tif_path) as src:
                 band = src.read(1)
                 for _, row in ts_data.iterrows():
@@ -429,14 +429,14 @@ class TestEndToEndContract:
         results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 
         pred_df = pd.read_csv(csv_files[0])
 
         for ts_str, tif_path in results:
-            ts_data = pred_df[pred_df["timestamp.1"] == ts_str]
+            ts_data = pred_df[pred_df["timestamp"] == ts_str]
             expected_pixels = set()
             for _, row in ts_data.iterrows():
                 r, c = coord_to_pixel(row["latitude"], row["longitude"])
@@ -456,13 +456,13 @@ class TestEndToEndContract:
         """Unique timestamps in predictions == GeoTIFF filenames (1:1)."""
         csv_files = list(prediction_csv_dir.glob("*.csv"))
         pred_df = pd.read_csv(csv_files[0])
-        expected_ts = set(pred_df["timestamp.1"].unique())
+        expected_ts = set(pred_df["timestamp"].unique())
 
         out_dir = str(tmp_path / "bijection")
         results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 
@@ -484,12 +484,12 @@ class TestEndToEndContract:
         results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 
         for ts_str, tif_path in results:
-            ts_data = pred_df[pred_df["timestamp.1"] == ts_str]
+            ts_data = pred_df[pred_df["timestamp"] == ts_str]
             n_unique_coords = len(
                 ts_data.drop_duplicates(subset=["latitude", "longitude"])
             )
@@ -527,7 +527,7 @@ class TestEndToEndContract:
         results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 
@@ -560,7 +560,7 @@ class TestFormatCompatibility:
         results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
         assert len(results) == 5, f"Expected 5 GeoTIFFs, got {len(results)}"
@@ -574,7 +574,7 @@ class TestFormatCompatibility:
         results = rasterize_all_timestamps(
             csv_path=str(pq_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
         assert len(results) == 5, f"Expected 5 GeoTIFFs, got {len(results)}"
@@ -593,13 +593,13 @@ class TestFormatCompatibility:
         csv_results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=csv_out,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
         pq_results = rasterize_all_timestamps(
             csv_path=str(pq_files[0]), output_dir=pq_out,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 
@@ -623,7 +623,7 @@ class TestFormatCompatibility:
         self, synthetic_predictions: pd.DataFrame,
     ) -> None:
         """Prediction DataFrame has all required columns."""
-        required = {"latitude", "longitude", "timestamp.1", "sap_velocity_xgb"}
+        required = {"latitude", "longitude", "timestamp", "sap_velocity_xgb"}
         actual = set(synthetic_predictions.columns)
         missing = required - actual
         assert not missing, f"Missing required columns: {missing}"
@@ -659,7 +659,7 @@ class TestEdgeCases:
         """1 row -> 1 GeoTIFF with 1 non-NaN pixel."""
         df = pd.DataFrame({
             "latitude": [48.5], "longitude": [11.5],
-            "timestamp.1": ["2015-07-01"],
+            "timestamp": ["2015-07-01"],
             "sap_velocity_xgb": [4.2],
         })
         csv_path = str(tmp_path / "single.csv")
@@ -669,7 +669,7 @@ class TestEdgeCases:
         results = rasterize_all_timestamps(
             csv_path=csv_path, output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
         assert len(results) == 1
@@ -686,7 +686,7 @@ class TestEdgeCases:
         df = pd.DataFrame({
             "latitude": [48.5] * 5,
             "longitude": [11.5] * 5,
-            "timestamp.1": [str(ts) for ts in TIMESTAMPS],
+            "timestamp": [str(ts) for ts in TIMESTAMPS],
             "sap_velocity_xgb": [1.0, 2.0, 3.0, 4.0, 5.0],
         })
         csv_path = str(tmp_path / "same_coord.csv")
@@ -696,7 +696,7 @@ class TestEdgeCases:
         results = rasterize_all_timestamps(
             csv_path=csv_path, output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
         assert len(results) == 5
@@ -711,7 +711,7 @@ class TestEdgeCases:
         df = pd.DataFrame({
             "latitude": [48.5, -3.0],
             "longitude": [11.5, -60.0],
-            "timestamp.1": ["2015-07-01", "2015-07-01"],
+            "timestamp": ["2015-07-01", "2015-07-01"],
             "sap_velocity_xgb": [0.0001, 150.0],
         })
         csv_path = str(tmp_path / "extreme.csv")
@@ -721,7 +721,7 @@ class TestEdgeCases:
         results = rasterize_all_timestamps(
             csv_path=csv_path, output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 
@@ -738,7 +738,7 @@ class TestEdgeCases:
         df = pd.DataFrame({
             "latitude": [48.5, 48.5],
             "longitude": [11.5, 11.5],
-            "timestamp.1": ["2015-07-01", "2015-07-02"],
+            "timestamp": ["2015-07-01", "2015-07-02"],
             "sap_velocity_xgb": [4.2, np.nan],
         })
         csv_path = str(tmp_path / "empty_ts.csv")
@@ -748,7 +748,7 @@ class TestEdgeCases:
         results = rasterize_all_timestamps(
             csv_path=csv_path, output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
         # At minimum, the NaN-only timestamp should not crash
@@ -760,7 +760,7 @@ class TestEdgeCases:
         df = pd.DataFrame({
             "latitude": [48.5],
             "longitude": [11.5],
-            "timestamp.1": ["2015-07-01"],
+            "timestamp": ["2015-07-01"],
             "sap_velocity_xgb": [4.2],
             "sap_velocity_rf": [3.8],
         })
@@ -775,7 +775,7 @@ class TestEdgeCases:
             output_dir=out_dir,
             run_id="test_multi",
             value_columns=["sap_velocity_xgb", "sap_velocity_rf"],
-            timestamp_col="timestamp.1",
+            timestamp_col="timestamp",
             file_glob="multi.csv",
             sw_in_threshold=0,
             resolution=RESOLUTION,
@@ -802,7 +802,7 @@ class TestEdgeCases:
         results = rasterize_all_timestamps(
             csv_path=str(csv_files[0]), output_dir=out_dir,
             value_column="sap_velocity_xgb",
-            timestamp_col="timestamp.1", sw_in_threshold=0,
+            timestamp_col="timestamp", sw_in_threshold=0,
             resolution=RESOLUTION, lat_range=LAT_RANGE, lon_range=LON_RANGE,
         )
 

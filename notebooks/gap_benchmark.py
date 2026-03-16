@@ -561,7 +561,7 @@ def build_ml_features(s: pd.Series, n_lags: int = N_LAGS, env_df: "pd.DataFrame 
 def _fit_ml_on_ground_truth(gt_series: pd.Series, model_cls, model_kwargs: dict, env_df: "pd.DataFrame | None" = None):
     """Pre-train an ML model on the full ground truth (no gaps).
 
-    Returns (model, scaler, features) or None if insufficient data.
+    Returns (model, scaler) or None if insufficient data.
     """
     features = build_ml_features(gt_series, env_df=env_df)
     train_mask = gt_series.notna() & features.notna().all(axis=1)
@@ -571,7 +571,7 @@ def _fit_ml_on_ground_truth(gt_series: pd.Series, model_cls, model_kwargs: dict,
     X_train_s = scaler.fit_transform(features[train_mask].values)
     model = model_cls(**model_kwargs)
     model.fit(X_train_s, gt_series[train_mask].values)
-    return model, scaler, features
+    return model, scaler
 
 
 def _predict_ml_at_gaps(s: pd.Series, cached, env_df: "pd.DataFrame | None" = None) -> pd.Series:
@@ -581,7 +581,7 @@ def _predict_ml_at_gaps(s: pd.Series, cached, env_df: "pd.DataFrame | None" = No
     """
     if cached is None:
         return fill_linear(s)
-    model, scaler, _ = cached
+    model, scaler = cached
     features = build_ml_features(s, env_df=env_df)
     test_mask = s.isna() & features.notna().all(axis=1)
     filled = s.copy()
@@ -862,6 +862,20 @@ def _predict_at_gaps(
         env_aligned = env_df.reindex(s.index).ffill().bfill().fillna(0)
         env_vals = env_aligned.values.astype(np.float32)
         n_features = 1 + env_vals.shape[1]
+    # Fill gap positions before the lookback window with linear interpolation.
+    # The autoregressive DL predictor needs `window` context steps.
+    # Use the full series for interpolation context (not just the prefix),
+    # which gives linear interpolation anchors from both sides of the gap.
+    _prefix_end = min(window, len(vals))
+    _any_prefix_nan = any(np.isnan(vals[i]) for i in range(_prefix_end))
+    if _any_prefix_nan:
+        _full_interp = filled.interpolate(method="linear", limit_direction="both")
+        for i in range(_prefix_end):
+            if np.isnan(vals[i]):
+                _v = _full_interp.iloc[i]
+                _v = max(0.0, float(_v)) if not np.isnan(_v) else 0.0
+                vals[i] = _v
+                filled.iloc[i] = _v
     for i in range(window, len(vals)):
         if np.isnan(vals[i]):
             ctx_sap = vals[i - window : i].copy()
@@ -912,11 +926,11 @@ def _fit_dl_on_ground_truth(gt_series: pd.Series, build_model_fn, env_df: "pd.Da
     """Pre-train a DL model on the full ground truth (no gaps).
 
     Returns (model, scaler_X, scaler_y) or None if insufficient data.
-    Calls clear_session() once per segment — not per replicate.
+    Caller should call keras.backend.clear_session() once before the
+    pre-fitting loop, NOT per segment (to preserve cached model weights).
     """
     if not _HAS_TF:
         return None
-    keras.backend.clear_session()
     n_features = 1
     if env_df is not None:
         env_cols = [c for c in env_df.columns if c in ENV_FEATURE_COLS]
@@ -1850,9 +1864,29 @@ def _benchmark_one_segment(
                     filled = _predict_dl_at_gaps_cached(gs.copy(), cached_model, env_df=env_df).clip(lower=0)
                 elif method_name in _DL_BUILD_FNS and _DL_BUILD_FNS[method_name] is not None:
                     # DL uncached fallback — call _dl_fill directly with explicit env_df
-                    filled = _dl_fill(gs.copy(), _DL_BUILD_FNS[method_name], env_df=env_df if is_env else None).clip(
-                        lower=0
+                    filled = _dl_fill(
+                        gs.copy(),
+                        _DL_BUILD_FNS[method_name],
+                        env_df=env_df if is_env else None,
+                    ).clip(lower=0)
+                elif is_env and cached_model is None:
+                    # Env method with failed model cache (insufficient training rows).
+                    # Emit NaN metrics rather than silently falling back to linear
+                    # (which would misattribute linear results to the env method).
+                    met = {k: np.nan for k in ["rmse", "mae", "r2", "mape", "nse"]}
+                    results.append(
+                        {
+                            "time_scale": scale,
+                            "site": site,
+                            "method": method_name,
+                            "group": group,
+                            "gap_size": gsize,
+                            "replicate": ri,
+                            "env_features": is_env,
+                            **met,
+                        }
                     )
+                    continue
                 else:
                     filled = method_fn(gs.copy()).clip(lower=0)
                 tv = gt.iloc[gidx].values
@@ -1880,17 +1914,21 @@ _ML_CACHE_METHODS = {"C_rf", "C_xgb", "C_knn", "Ce_rf_env", "Ce_xgb_env", "Ce_kn
 
 
 def _set_thread_env(threads: int) -> None:
-    """Set thread control environment variables for the current process."""
+    """Set thread control environment variables for the current process.
+
+    Sets OMP/MKL/OpenBLAS/TF env vars. These must be set BEFORE the
+    respective libraries are first used to take effect on native thread pools.
+    For loky workers, the main process sets these before Parallel() is called,
+    and workers inherit the env at fork time.
+    """
     t = str(threads)
     os.environ["OMP_NUM_THREADS"] = t
     os.environ["MKL_NUM_THREADS"] = t
     os.environ["OPENBLAS_NUM_THREADS"] = t
     os.environ["NUMEXPR_NUM_THREADS"] = t
-    if _HAS_TF:
-        import tensorflow as _tf
-
-        _tf.config.threading.set_inter_op_parallelism_threads(1)
-        _tf.config.threading.set_intra_op_parallelism_threads(threads)
+    # TF thread pool env vars (read at TF initialization, not at runtime)
+    os.environ["TF_NUM_INTEROP_THREADS"] = "1"
+    os.environ["TF_NUM_INTRAOP_THREADS"] = t
 
 
 def run_phase5(ground_truth_store):
@@ -1915,19 +1953,32 @@ def run_phase5(ground_truth_store):
     _n_methods = len(METHODS)
 
     # ── Resume logic ─────────────────────────────────────────────────────────
+    # Uses sentinel files to reliably track completed (scale, method) pairs.
+    # A sentinel is written ONLY after a method fully completes all segments.
+    # This avoids row-count ambiguity (env methods may process fewer segments).
+    _done_dir = STATS_OUT / "gap_experiment_done"
+    _done_dir.mkdir(parents=True, exist_ok=True)
     _done_pairs: set = set()
-    if _partial_path.exists():
+    for _sf in _done_dir.glob("*.done"):
+        _parts = _sf.stem.split("__", 1)
+        if len(_parts) == 2:
+            _done_pairs.add((_parts[0], _parts[1]))
+
+    if _partial_path.exists() and _done_pairs:
         try:
             _prev = pd.read_csv(_partial_path)
             if not _prev.empty and "time_scale" in _prev.columns and "method" in _prev.columns:
-                _done_pairs = set(zip(_prev["time_scale"], _prev["method"]))
-                all_results = _prev.to_dict("records")
+                _keep_mask = _prev.apply(lambda r: (r["time_scale"], r["method"]) in _done_pairs, axis=1)
+                all_results = _prev[_keep_mask].to_dict("records")
+                # Rewrite partial CSV with only clean completed data
+                pd.DataFrame(all_results).to_csv(_partial_path, index=False)
                 print(
-                    f"  ▶ Resuming: loaded {len(all_results):,} rows, "
-                    f"{len(_done_pairs)} (scale,method) pairs already done"
+                    f"  Resume: loaded {len(all_results):,} rows from {len(_done_pairs)} completed (scale,method) pairs"
                 )
         except Exception as _e:
-            print(f"  ⚠ Could not load partial results for resume: {_e}")
+            print(f"  Could not load partial results for resume: {_e}")
+    elif _done_pairs:
+        print(f"  Resume: {len(_done_pairs)} completed pairs (no partial CSV)")
 
     print(f"Segments: {_n_sites}  Methods: {_n_methods}  Replicates: {N_REPLICATES}")
     print(f"Hourly gap sizes: {HOURLY_GAP_SIZES}")
@@ -2002,6 +2053,10 @@ def run_phase5(ground_truth_store):
             # ── Pre-fit models per segment (sequential — models not picklable) ─
             _segment_caches: dict = {}
             if _is_ml_cacheable or _is_dl_cacheable:
+                # Clear TF session once before the loop (not per segment)
+                # to reset layer name counters without invalidating cached weights
+                if _is_dl_cacheable and _HAS_TF:
+                    keras.backend.clear_session()
                 print(f"  Pre-fitting {_mname} models on {_n_sites} segments...")
                 for _key, _sdata in ground_truth_store.items():
                     _gt = _sdata.get(_scale)
@@ -2091,10 +2146,15 @@ def run_phase5(ground_truth_store):
 
             _fails = sum(1 for r in _m_rows if np.isnan(r.get("r2", 0.0)))
             all_results.extend(_m_rows)
-            pd.DataFrame(all_results).to_csv(_partial_path, index=False)
+            # Append only new rows to partial CSV (avoid rewriting full file on NFS)
+            _new_df = pd.DataFrame(_m_rows)
+            _write_header = not _partial_path.exists() or _partial_path.stat().st_size == 0
+            _new_df.to_csv(_partial_path, mode="a", header=_write_header, index=False)
+            # Write sentinel to mark this (scale, method) as fully completed
+            (_done_dir / f"{_scale}__{_mname}.done").write_text(f"rows={len(_m_rows)} fails={_fails}\n")
             _el = time.time() - _t0
             _par_tag = f"parallel={_n_workers}w" if _use_parallel else "sequential"
-            print(f"  ✓ {_mname} [{_scale}] done in {_el:.0f}s | rows={len(_m_rows):,} | fails={_fails} | {_par_tag}")
+            print(f"  {_mname} [{_scale}] done in {_el:.0f}s | rows={len(_m_rows):,} | fails={_fails} | {_par_tag}")
             gc.collect()
 
     df_results = pd.DataFrame(all_results)

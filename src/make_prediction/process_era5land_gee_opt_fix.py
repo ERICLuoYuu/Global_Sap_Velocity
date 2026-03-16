@@ -723,6 +723,12 @@ class ERA5LandGEEProcessor:
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
 
+        # Fix 2.1: Month-level checkpoint — skip if monthly file already exists
+        monthly_output = output_dir / f"prediction_{year}_{month:02d}_daily.csv"
+        if monthly_output.exists() and monthly_output.stat().st_size > 1000:
+            print(f"Month {year}-{month:02d} already processed ({monthly_output.name}), skipping")
+            return str(monthly_output)
+
         # Temporary directory for chunk files
         temp_chunk_dir = self.temp_dir / f"month_{year}_{month:02d}_chunks"
         temp_chunk_dir.mkdir(exist_ok=True, parents=True)
@@ -743,12 +749,6 @@ class ERA5LandGEEProcessor:
                 chunk_dfs = []
 
                 for day in range(chunk_start_day, chunk_end_day + 1):
-                    # Fix 2.1: Check if this day has already been processed (idempotency)
-                    day_checkpoint = output_dir / f"prediction_{year}_{month:02d}_{day:02d}.csv"
-                    if day_checkpoint.exists() and day_checkpoint.stat().st_size > 1000:
-                        print(f"\n  Day {day}: Already processed ({day_checkpoint.name}), skipping")
-                        continue
-
                     print(f"\n  Processing day {day}...")
 
                     # Clear previous data
@@ -2992,11 +2992,16 @@ class ERA5LandGEEProcessor:
         # ============================================================
         print("\nApplying zero-value mask to ERA5-Land data...")
         self.mask_zero_values(threshold=1e-10)
-        # Load raw static datasets (only once)
-        if not hasattr(self, "_static_raw_loaded") or not self._static_raw_loaded:
-            print("\nLoading raw static datasets...")
+        # Load raw static datasets (reload when year changes for year-dependent PFT)
+        if (
+            not hasattr(self, "_static_raw_loaded")
+            or not self._static_raw_loaded
+            or getattr(self, "_static_year", None) != year
+        ):
+            print(f"\nLoading raw static datasets for year {year}...")
             self.load_static_datasets(year, shapefile=shapefile)
             self._static_raw_loaded = True
+            self._static_year = year
 
         # Load raw LAI data
         self.load_lai_data_raw(year, month, day, shapefile=shapefile)
@@ -6442,10 +6447,13 @@ class ERA5LandGEEProcessor:
             # Multiple DataFrames (points)
             saved_paths = []
             for i, single_df in enumerate(df):
+                single_df = single_df.copy()  # avoid mutating caller's data
                 name = single_df.get("name", f"point_{i}").iloc[0] if "name" in single_df.columns else f"point_{i}"
                 file_path = output_path.parent / f"{output_path.stem}_{name}{output_path.suffix}"
-                single_df["ta"] = single_df["ta"] - 273.15  # Convert to Celsius
-                single_df["td"] = single_df["td"] - 273.15  # Convert to Celsius
+                if "ta" in single_df.columns:
+                    single_df["ta"] = single_df["ta"] - 273.15  # Convert to Celsius
+                if "td" in single_df.columns:
+                    single_df["td"] = single_df["td"] - 273.15  # Convert to Celsius
                 single_df.to_csv(file_path, index_label="timestamp")
                 print(f"Saved dataset to {file_path}")
                 saved_paths.append(str(file_path))

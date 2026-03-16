@@ -439,10 +439,13 @@ def fill_mdv(s: pd.Series, window_days: int = 7) -> pd.Series:
             continue
         missing_times = s.index[missing_at_period]
         # Vectorized lookup: for each missing time, find obs within ±window
-        obs_times = obs_same_period.index.values
+        # Use pandas Index for tz-aware comparison (numpy arrays lose tz info)
+        obs_idx = obs_same_period.index
         obs_vals = obs_same_period.values
         for ts in missing_times:
-            mask = (obs_times >= (ts - window_td)) & (obs_times <= (ts + window_td))
+            w_start = ts - window_td
+            w_end = ts + window_td
+            mask = (obs_idx >= w_start) & (obs_idx <= w_end)
             if mask.any():
                 filled[ts] = max(0.0, float(np.mean(obs_vals[mask])))
     if filled.isna().any():

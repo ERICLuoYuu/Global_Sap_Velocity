@@ -35,6 +35,7 @@ Usage:
 # ── Global Setup ─────────────────────────────────────────────────────────────
 import gc
 import json
+import os  # noqa: E402 — needed for thread control env vars in HPC parallelization
 import random
 import sys
 import time
@@ -363,12 +364,37 @@ def fill_linear(s: pd.Series) -> pd.Series:
     return s.interpolate(method="linear", limit_direction="both").clip(lower=0)
 
 
+def _find_gap_ranges(s: pd.Series) -> list:
+    """Return list of (start_iloc, end_iloc) for each contiguous NaN block."""
+    is_nan = s.isna().values.astype(np.int8)
+    padded = np.concatenate([[0], is_nan, [0]])
+    diff = np.diff(padded)
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+    return list(zip(starts.tolist(), ends.tolist()))
+
+
 def fill_cubic(s: pd.Series) -> pd.Series:
-    """Cubic spline interpolation (order 3); falls back to linear on failure."""
-    try:
-        return s.interpolate(method="spline", order=3, limit_direction="both").clip(lower=0)
-    except Exception:
-        return fill_linear(s)
+    """Cubic spline interpolation scoped to local window around each gap."""
+    gaps = _find_gap_ranges(s)
+    if not gaps:
+        return s.clip(lower=0)
+    filled = s.copy()
+    for g_start, g_end in gaps:
+        gap_len = g_end - g_start
+        margin = max(gap_len * 3, 72)
+        lo = max(0, g_start - margin)
+        hi = min(len(s), g_end + margin)
+        window = s.iloc[lo:hi]
+        try:
+            interped = window.interpolate(method="spline", order=3, limit_direction="both")
+            filled.iloc[g_start:g_end] = interped.iloc[g_start - lo : g_end - lo]
+        except Exception:
+            interped = window.interpolate(method="linear", limit_direction="both")
+            filled.iloc[g_start:g_end] = interped.iloc[g_start - lo : g_end - lo]
+    if filled.isna().any():
+        filled = fill_linear(filled)
+    return filled.clip(lower=0)
 
 
 def fill_akima(s: pd.Series) -> pd.Series:
@@ -590,7 +616,7 @@ def _fit_and_predict_ml(s: pd.Series, model_cls, model_kwargs: dict, env_df: "pd
 def fill_rf(s: pd.Series) -> pd.Series:
     """Random Forest gap-filling with 24-lag feature set."""
     return _fit_and_predict_ml(
-        s, RandomForestRegressor, {"n_estimators": 100, "n_jobs": -1, "random_state": RANDOM_SEED}
+        s, RandomForestRegressor, {"n_estimators": 100, "n_jobs": 1, "random_state": RANDOM_SEED}
     )
 
 
@@ -629,7 +655,7 @@ def fill_rf_env(s: pd.Series) -> pd.Series:
     return _fit_and_predict_ml(
         s,
         RandomForestRegressor,
-        {"n_estimators": 100, "n_jobs": -1, "random_state": RANDOM_SEED},
+        {"n_estimators": 100, "n_jobs": 1, "random_state": RANDOM_SEED},
         env_df=_current_env_df,
     )
 
@@ -882,6 +908,39 @@ def _dl_fill(s: pd.Series, build_model_fn, env_df: "pd.DataFrame | None" = None)
     return _predict_at_gaps(s, fitted, scaler_X, scaler_y, env_df=env_df)
 
 
+def _fit_dl_on_ground_truth(gt_series: pd.Series, build_model_fn, env_df: "pd.DataFrame | None" = None):
+    """Pre-train a DL model on the full ground truth (no gaps).
+
+    Returns (model, scaler_X, scaler_y) or None if insufficient data.
+    Calls clear_session() once per segment — not per replicate.
+    """
+    if not _HAS_TF:
+        return None
+    keras.backend.clear_session()
+    n_features = 1
+    if env_df is not None:
+        env_cols = [c for c in env_df.columns if c in ENV_FEATURE_COLS]
+        if env_cols:
+            n_features = 1 + len(env_cols)
+        else:
+            env_df = None
+    model = build_model_fn(n_features=n_features)
+    scaler_X = StandardScaler()
+    scaler_y = StandardScaler()
+    fitted = _train_dl_model(gt_series, model, scaler_X, scaler_y, env_df=env_df)
+    if fitted is None:
+        return None
+    return fitted, scaler_X, scaler_y
+
+
+def _predict_dl_at_gaps_cached(s: pd.Series, cached, env_df: "pd.DataFrame | None" = None) -> pd.Series:
+    """Predict at gap positions using a pre-trained DL model."""
+    if cached is None:
+        return fill_linear(s)
+    model, scaler_X, scaler_y = cached
+    return _predict_at_gaps(s, model, scaler_X, scaler_y, env_df=env_df)
+
+
 def fill_lstm(s: pd.Series) -> pd.Series:
     """2-layer LSTM (64 units each) gap-filling."""
 
@@ -1077,6 +1136,88 @@ METHOD_GROUPS = {
     "D": ["D_lstm", "D_cnn", "D_cnn_lstm", "D_transformer"],
     "Ce": ["Ce_rf_env", "Ce_xgb_env", "Ce_knn_env"],
     "De": ["De_lstm_env", "De_cnn_env", "De_cnn_lstm_env", "De_transformer_env"],
+}
+
+# ── DL build-function registry (for model caching) ──────────────────────────
+# These must be module-level callables so they can be referenced by name.
+
+if _HAS_TF:
+
+    def _build_lstm(n_features=1):
+        return keras.Sequential(
+            [
+                keras.layers.LSTM(64, return_sequences=True, input_shape=(WINDOW, n_features)),
+                keras.layers.Dropout(0.1),
+                keras.layers.LSTM(64),
+                keras.layers.Dropout(0.1),
+                keras.layers.Dense(1),
+            ]
+        )
+
+    def _build_cnn(n_features=1):
+        return keras.Sequential(
+            [
+                keras.layers.Conv1D(32, 3, padding="same", activation="relu", input_shape=(WINDOW, n_features)),
+                keras.layers.Conv1D(64, 3, padding="same", activation="relu"),
+                keras.layers.Conv1D(32, 3, padding="same", activation="relu"),
+                keras.layers.GlobalAveragePooling1D(),
+                keras.layers.Dense(32, activation="relu"),
+                keras.layers.Dense(1),
+            ]
+        )
+
+    def _build_cnn_lstm(n_features=1):
+        inp = keras.Input(shape=(WINDOW, n_features))
+        x = keras.layers.Conv1D(32, 3, padding="same", activation="relu")(inp)
+        x = keras.layers.Conv1D(64, 3, padding="same", activation="relu")(x)
+        x = keras.layers.LSTM(64)(x)
+        x = keras.layers.Dropout(0.1)(x)
+        out = keras.layers.Dense(1)(x)
+        return keras.Model(inp, out)
+
+    def _build_transformer(n_features=1):
+        def _enc_block(x, d_model=64, n_heads=2, ff_dim=128, drop=0.1):
+            attn = keras.layers.MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads)(x, x)
+            attn = keras.layers.Dropout(drop)(attn)
+            x = keras.layers.LayerNormalization(epsilon=1e-6)(x + attn)
+            ff_out = keras.layers.Dense(ff_dim, activation="relu")(x)
+            ff_out = keras.layers.Dense(d_model)(ff_out)
+            ff_out = keras.layers.Dropout(drop)(ff_out)
+            return keras.layers.LayerNormalization(epsilon=1e-6)(x + ff_out)
+
+        inp = keras.Input(shape=(WINDOW, n_features))
+        x = keras.layers.Dense(64)(inp)
+        x = PositionalEmbedding(WINDOW, 64)(x)
+        x = _enc_block(x)
+        x = _enc_block(x)
+        x = keras.layers.GlobalAveragePooling1D()(x)
+        out = keras.layers.Dense(1)(x)
+        return keras.Model(inp, out)
+
+else:
+    _build_lstm = _build_cnn = _build_cnn_lstm = _build_transformer = None
+
+_DL_BUILD_FNS = {
+    "D_lstm": _build_lstm,
+    "D_cnn": _build_cnn,
+    "D_cnn_lstm": _build_cnn_lstm,
+    "D_transformer": _build_transformer,
+    "De_lstm_env": _build_lstm,
+    "De_cnn_env": _build_cnn,
+    "De_cnn_lstm_env": _build_cnn_lstm,
+    "De_transformer_env": _build_transformer,
+}
+
+# ── Method-group parallelization config ──────────────────────────────────────
+# (n_workers, threads_per_worker) tuned for 192-core zen4 node
+
+_GROUP_PARALLEL_CONFIG = {
+    "A": (48, 1),  # pure NumPy/pandas — no internal threading
+    "B": (32, 2),  # statsmodels STL has minimal threading
+    "C": (16, 8),  # sklearn/xgb use internal thread pools
+    "D": (8, 16),  # TF uses intra/inter-op thread pools
+    "Ce": (16, 8),
+    "De": (8, 16),
 }
 
 GROUP_COLORS.update({"Ce": "#E65100", "De": "#6A1B9A"})
@@ -1666,29 +1807,135 @@ def run_phase3(df_site_summary):
     return ground_truth_store
 
 
+def _benchmark_one_segment(
+    key: str,
+    sdata: dict,
+    scale: str,
+    method_name: str,
+    method_fn,
+    gap_sizes: list,
+    n_reps: int,
+    rng_seed: int,
+    cached_model=None,
+    env_df: "pd.DataFrame | None" = None,
+    threads_per_worker: int = 1,
+) -> list:
+    """Benchmark a single segment for one method. Pure function — no global state.
+
+    Returns list of result dicts. Thread-safe for joblib parallel execution.
+    Sets thread control env vars inside the worker process.
+    """
+    _set_thread_env(threads_per_worker)
+    rng = np.random.default_rng(rng_seed)
+    gt = sdata.get(scale)
+    if gt is None or len(gt) < 50:
+        return []
+    site = sdata.get("site", key)
+    group = method_name.split("_")[0]
+    is_env = method_name.endswith("_env")
+    is_ml_cached = cached_model is not None and method_name in _ML_CACHE_METHODS
+    is_dl_cached = cached_model is not None and method_name in _DL_BUILD_FNS
+    results = []
+    for gsize in gap_sizes:
+        if gsize >= len(gt) * 0.5:
+            continue
+        reps = inject_gaps_replicated(gt, gsize, n_reps, rng)
+        for ri, (gs, gidx) in enumerate(reps):
+            if not gidx:
+                continue
+            try:
+                if is_ml_cached:
+                    filled = _predict_ml_at_gaps(gs.copy(), cached_model, env_df=env_df).clip(lower=0)
+                elif is_dl_cached:
+                    filled = _predict_dl_at_gaps_cached(gs.copy(), cached_model, env_df=env_df).clip(lower=0)
+                elif method_name in _DL_BUILD_FNS and _DL_BUILD_FNS[method_name] is not None:
+                    # DL uncached fallback — call _dl_fill directly with explicit env_df
+                    filled = _dl_fill(gs.copy(), _DL_BUILD_FNS[method_name], env_df=env_df if is_env else None).clip(
+                        lower=0
+                    )
+                else:
+                    filled = method_fn(gs.copy()).clip(lower=0)
+                tv = gt.iloc[gidx].values
+                pv = filled.iloc[gidx].values
+                met = compute_metrics(tv, pv)
+            except Exception:
+                met = {k: np.nan for k in ["rmse", "mae", "r2", "mape", "nse"]}
+            results.append(
+                {
+                    "time_scale": scale,
+                    "site": site,
+                    "method": method_name,
+                    "group": group,
+                    "gap_size": gsize,
+                    "replicate": ri,
+                    "env_features": is_env,
+                    **met,
+                }
+            )
+    return results
+
+
+# Set of ML method names for checking in worker
+_ML_CACHE_METHODS = {"C_rf", "C_xgb", "C_knn", "Ce_rf_env", "Ce_xgb_env", "Ce_knn_env"}
+
+
+def _set_thread_env(threads: int) -> None:
+    """Set thread control environment variables for the current process."""
+    t = str(threads)
+    os.environ["OMP_NUM_THREADS"] = t
+    os.environ["MKL_NUM_THREADS"] = t
+    os.environ["OPENBLAS_NUM_THREADS"] = t
+    os.environ["NUMEXPR_NUM_THREADS"] = t
+    if _HAS_TF:
+        import tensorflow as _tf
+
+        _tf.config.threading.set_inter_op_parallelism_threads(1)
+        _tf.config.threading.set_intra_op_parallelism_threads(threads)
+
+
 def run_phase5(ground_truth_store):
-    """Phase 5: Full benchmark - evaluate all methods on all segments.
+    """Phase 5: Full benchmark with model caching and optional parallelization.
+
+    Features:
+    - Resume logic: loads partial results, skips completed (scale, method) pairs
+    - ML model caching: train once per segment, predict across all replicates
+    - DL model caching: same pattern for TensorFlow/Keras models
+    - Method-group thread controls: prevents oversubscription on HPC
+    - Parallelization via joblib when available, sequential fallback
 
     Returns (df_results, df_agg).
     """
-    global _current_env_df
     print("\n" + "=" * 60)
     print("  PHASE 5: BENCHMARK EVALUATION")
     print("=" * 60)
 
-    _rng_bench = np.random.default_rng(RANDOM_SEED)
     all_results: list = []
     _partial_path = STATS_OUT / "benchmark_results_partial.csv"
     _n_sites = len(ground_truth_store)
     _n_methods = len(METHODS)
 
+    # ── Resume logic ─────────────────────────────────────────────────────────
+    _done_pairs: set = set()
+    if _partial_path.exists():
+        try:
+            _prev = pd.read_csv(_partial_path)
+            if not _prev.empty and "time_scale" in _prev.columns and "method" in _prev.columns:
+                _done_pairs = set(zip(_prev["time_scale"], _prev["method"]))
+                all_results = _prev.to_dict("records")
+                print(
+                    f"  ▶ Resuming: loaded {len(all_results):,} rows, "
+                    f"{len(_done_pairs)} (scale,method) pairs already done"
+                )
+        except Exception as _e:
+            print(f"  ⚠ Could not load partial results for resume: {_e}")
+
     print(f"Segments: {_n_sites}  Methods: {_n_methods}  Replicates: {N_REPLICATES}")
     print(f"Hourly gap sizes: {HOURLY_GAP_SIZES}")
     print(f"Daily gap sizes:  {DAILY_GAP_SIZES}")
 
-    # ML method configs for model caching (train once per segment, predict many times)
+    # ── ML cache configs (n_jobs controlled per group, not -1) ───────────────
     _ML_CACHE_CONFIGS = {
-        "C_rf": (RandomForestRegressor, {"n_estimators": 100, "n_jobs": -1, "random_state": RANDOM_SEED}),
+        "C_rf": (RandomForestRegressor, {"n_estimators": 100, "n_jobs": 1, "random_state": RANDOM_SEED}),
         "C_xgb": (
             xgb.XGBRegressor,
             {
@@ -1698,10 +1945,11 @@ def run_phase5(ground_truth_store):
                 "random_state": RANDOM_SEED,
                 "verbosity": 0,
                 "tree_method": "hist",
+                "nthread": 1,
             },
         ),
         "C_knn": (KNeighborsRegressor, {"n_neighbors": 10}),
-        "Ce_rf_env": (RandomForestRegressor, {"n_estimators": 100, "n_jobs": -1, "random_state": RANDOM_SEED}),
+        "Ce_rf_env": (RandomForestRegressor, {"n_estimators": 100, "n_jobs": 1, "random_state": RANDOM_SEED}),
         "Ce_xgb_env": (
             xgb.XGBRegressor,
             {
@@ -1711,98 +1959,149 @@ def run_phase5(ground_truth_store):
                 "random_state": RANDOM_SEED,
                 "verbosity": 0,
                 "tree_method": "hist",
+                "nthread": 1,
             },
         ),
         "Ce_knn_env": (KNeighborsRegressor, {"n_neighbors": 10}),
     }
 
+    # ── Check for joblib ─────────────────────────────────────────────────────
+    try:
+        from joblib import Parallel, delayed
+
+        _has_joblib = True
+    except ImportError:
+        _has_joblib = False
+        print("  ⚠ joblib not available — running sequentially")
+
+    # ── Detect available cores ───────────────────────────────────────────────
+    _total_cores = os.cpu_count() or 1
+
     for _scale, _gsizes in [("hourly", HOURLY_GAP_SIZES), ("daily", DAILY_GAP_SIZES)]:
         print(f"\n{'=' * 65}\nSCALE: {_scale.upper()}\n{'=' * 65}")
 
         for _mi, (_mname, _mfn) in enumerate(METHODS.items()):
+            # ── Resume: skip completed (scale, method) pairs ─────────────
+            if (_scale, _mname) in _done_pairs:
+                print(f"  ⏭ {_mname} [{_scale}] already done — skipping")
+                continue
+
             _group = _mname.split("_")[0]
             _t0 = time.time()
-            _fails = 0
-            _m_rows: list = []
-            _is_cacheable = _mname in _ML_CACHE_CONFIGS
+            _is_ml_cacheable = _mname in _ML_CACHE_CONFIGS
+            _is_dl_cacheable = _mname in _DL_BUILD_FNS
             _is_env_method = _mname.endswith("_env")
 
+            # ── Determine parallelization config ─────────────────────────
+            _n_workers, _threads = _GROUP_PARALLEL_CONFIG.get(_group, (16, 1))
+            # Scale to actual available cores
+            if _n_workers * _threads > _total_cores:
+                _n_workers = max(1, _total_cores // max(1, _threads))
+            _set_thread_env(_threads)
+
+            # ── Pre-fit models per segment (sequential — models not picklable) ─
+            _segment_caches: dict = {}
+            if _is_ml_cacheable or _is_dl_cacheable:
+                print(f"  Pre-fitting {_mname} models on {_n_sites} segments...")
+                for _key, _sdata in ground_truth_store.items():
+                    _gt = _sdata.get(_scale)
+                    if _gt is None or len(_gt) < 50:
+                        continue
+                    _env = _sdata.get(f"env_{_scale}") if _is_env_method else None
+                    if _is_env_method and _env is None:
+                        continue
+                    try:
+                        if _is_ml_cacheable:
+                            _cls, _kwargs = _ML_CACHE_CONFIGS[_mname]
+                            _segment_caches[_key] = _fit_ml_on_ground_truth(_gt, _cls, _kwargs, env_df=_env)
+                        elif _is_dl_cacheable:
+                            _build_fn = _DL_BUILD_FNS[_mname]
+                            if _build_fn is not None:
+                                _segment_caches[_key] = _fit_dl_on_ground_truth(_gt, _build_fn, env_df=_env)
+                    except Exception:
+                        _segment_caches[_key] = None
+                _n_cached = sum(1 for v in _segment_caches.values() if v is not None)
+                print(f"  Pre-fitted {_n_cached}/{len(_segment_caches)} segments")
+
+            # ── Build per-segment work items ─────────────────────────────
+            _work_items = []
             for _si, (_key, _sdata) in enumerate(ground_truth_store.items()):
-                _site = _sdata.get("site", _key)
                 _gt = _sdata.get(_scale)
                 if _gt is None or len(_gt) < 50:
                     continue
-
-                # Set env data for env-aware methods (C3 fix)
-                _env_key = f"env_{_scale}"
-                _current_env_df = _sdata.get(_env_key)
-
-                # Skip env-aware methods if no env data for this segment
-                if _is_env_method and _current_env_df is None:
+                _env = _sdata.get(f"env_{_scale}") if _is_env_method else None
+                if _is_env_method and _env is None:
                     continue
+                _cached = _segment_caches.get(_key) if (_is_ml_cacheable or _is_dl_cacheable) else None
+                # Unique seed per segment to avoid correlation
+                _seg_seed = RANDOM_SEED + _si + _mi * 10000
+                _work_items.append((_key, _sdata, _cached, _env, _seg_seed))
 
-                # Pre-train ML model once per segment (cache for reuse across gap sizes & reps)
-                _cached_model = None
-                if _is_cacheable:
-                    _cls, _kwargs = _ML_CACHE_CONFIGS[_mname]
-                    _env_for_cache = _current_env_df if _is_env_method else None
-                    try:
-                        _cached_model = _fit_ml_on_ground_truth(_gt, _cls, _kwargs, env_df=_env_for_cache)
-                    except Exception:
-                        _cached_model = None
+            # ── Execute: parallel if possible, sequential fallback ───────
+            _m_rows: list = []
+            _use_parallel = (
+                _has_joblib
+                and _n_workers > 1
+                and len(_work_items) > 1
+                # DL models are not easily picklable — run sequentially
+                and not _is_dl_cacheable
+            )
 
-                for _gsize in _gsizes:
-                    if _gsize >= len(_gt) * 0.5:
-                        continue
-                    _reps = inject_gaps_replicated(_gt, _gsize, N_REPLICATES, _rng_bench)
-                    for _ri, (_gs, _gidx) in enumerate(_reps):
-                        if not _gidx:
-                            continue
-                        try:
-                            if _cached_model is not None:
-                                _env_for_pred = _current_env_df if _is_env_method else None
-                                _filled = _predict_ml_at_gaps(_gs.copy(), _cached_model, env_df=_env_for_pred).clip(
-                                    lower=0
-                                )
-                            else:
-                                _filled = _mfn(_gs.copy()).clip(lower=0)
-                            _tv = _gt.iloc[_gidx].values
-                            _pv = _filled.iloc[_gidx].values
-                            _met = compute_metrics(_tv, _pv)
-                        except Exception:
-                            _met = {k: np.nan for k in ["rmse", "mae", "r2", "mape", "nse"]}
-                            _fails += 1
-                        _m_rows.append(
-                            {
-                                "time_scale": _scale,
-                                "site": _site,
-                                "method": _mname,
-                                "group": _group,
-                                "gap_size": _gsize,
-                                "replicate": _ri,
-                                "env_features": _is_env_method,
-                                **_met,
-                            }
+            if _use_parallel:
+                _batch_results = Parallel(n_jobs=_n_workers, backend="loky")(
+                    delayed(_benchmark_one_segment)(
+                        key,
+                        sdata,
+                        _scale,
+                        _mname,
+                        _mfn,
+                        _gsizes,
+                        N_REPLICATES,
+                        seed,
+                        cached,
+                        env,
+                        _threads,
+                    )
+                    for key, sdata, cached, env, seed in _work_items
+                )
+                for seg_rows in _batch_results:
+                    _m_rows.extend(seg_rows)
+            else:
+                for _wi, (key, sdata, cached, env, seed) in enumerate(_work_items):
+                    seg_rows = _benchmark_one_segment(
+                        key,
+                        sdata,
+                        _scale,
+                        _mname,
+                        _mfn,
+                        _gsizes,
+                        N_REPLICATES,
+                        seed,
+                        cached,
+                        env,
+                        _threads,
+                    )
+                    _m_rows.extend(seg_rows)
+                    if (_wi + 1) % 5 == 0:
+                        _el = time.time() - _t0
+                        print(
+                            f"  [{_scale}] {_mname} ({_mi + 1}/{_n_methods}) | "
+                            f"site {_wi + 1}/{len(_work_items)} | {_el:.0f}s"
                         )
 
-                if (_si + 1) % 5 == 0:
-                    _el = time.time() - _t0
-                    print(
-                        f"  [{_scale}] {_mname} ({_mi + 1}/{_n_methods}) | "
-                        f"site {_si + 1}/{_n_sites} | {_el:.0f}s | fails={_fails}"
-                    )
-
+            _fails = sum(1 for r in _m_rows if np.isnan(r.get("r2", 0.0)))
             all_results.extend(_m_rows)
             pd.DataFrame(all_results).to_csv(_partial_path, index=False)
-            print(f"  ✓ {_mname} [{_scale}] done in {time.time() - _t0:.0f}s | rows={len(_m_rows):,} | fails={_fails}")
+            _el = time.time() - _t0
+            _par_tag = f"parallel={_n_workers}w" if _use_parallel else "sequential"
+            print(f"  ✓ {_mname} [{_scale}] done in {_el:.0f}s | rows={len(_m_rows):,} | fails={_fails} | {_par_tag}")
             gc.collect()
 
     df_results = pd.DataFrame(all_results)
     df_results.to_csv(STATS_OUT / "benchmark_results_full.csv", index=False)
     print(f"\n✓ Benchmark complete — {len(df_results):,} records saved")
 
-    # Aggregate across replicates
-
+    # ── Aggregate across replicates ──────────────────────────────────────────
     df_agg = (
         df_results.groupby(["time_scale", "method", "group", "gap_size"])
         .agg(

@@ -30,7 +30,9 @@ SITE_MD_DIR = _paths.raw_csv_dir
 
 
 # -- Import the module under test -------------------------------------------
-from notebooks.gap_benchmark import (
+from notebooks.gap_benchmark import (  # noqa: E402
+    _benchmark_one_segment,
+    _find_gap_ranges,
     _infer_site_name,
     compute_metrics,
     detect_gaps_in_series,
@@ -247,3 +249,100 @@ class TestPerformance:
             fill_mdv(gapped.copy())
         elapsed = time.time() - t0
         assert elapsed < 30.0, f"B_mdv took {elapsed:.1f}s (budget: 30s)"
+
+
+# ============================================================================
+# NEW: CUBIC LOCAL-WINDOW AND WORKER TESTS
+# ============================================================================
+
+
+class TestCubicLocalWindow:
+    """Verify cubic local-window scoping produces correct results."""
+
+    def test_find_gap_ranges_single(self):
+        s = pd.Series([1, 2, np.nan, np.nan, 5, 6])
+        gaps = _find_gap_ranges(s)
+        assert gaps == [(2, 4)]
+
+    def test_find_gap_ranges_multiple(self):
+        s = pd.Series([1, np.nan, 3, np.nan, np.nan, 6])
+        gaps = _find_gap_ranges(s)
+        assert gaps == [(1, 2), (3, 5)]
+
+    def test_find_gap_ranges_no_gaps(self):
+        s = pd.Series([1, 2, 3, 4])
+        assert _find_gap_ranges(s) == []
+
+    def test_cubic_matches_linear_quality(self):
+        """Cubic should be at least as good as linear for smooth data."""
+        rng = np.random.default_rng(42)
+        n = 2000
+        t = np.arange(n)
+        signal = np.clip(5.0 + 3.0 * np.sin(2 * np.pi * t / 24) + rng.normal(0, 0.1, n), 0, None)
+        idx = pd.date_range("2020-01-01", periods=n, freq="h", tz="UTC")
+        s = pd.Series(signal, index=idx)
+        gapped = s.copy()
+        gapped.iloc[100:112] = np.nan
+        cubic_filled = fill_cubic(gapped.copy())
+        linear_filled = fill_linear(gapped.copy())
+        cubic_err = np.abs(cubic_filled.iloc[100:112] - s.iloc[100:112]).mean()
+        linear_err = np.abs(linear_filled.iloc[100:112] - s.iloc[100:112]).mean()
+        # Cubic should be comparable or better
+        assert cubic_err < linear_err * 2.0, f"Cubic error {cubic_err:.4f} much worse than linear {linear_err:.4f}"
+
+
+class TestBenchmarkWorker:
+    """Test the _benchmark_one_segment worker function."""
+
+    @pytest.fixture
+    def synthetic_segment(self):
+        rng = np.random.default_rng(42)
+        n = 2000
+        t = np.arange(n)
+        signal = np.clip(5.0 + 3.0 * np.sin(2 * np.pi * t / 24) + rng.normal(0, 0.3, n), 0, None)
+        idx = pd.date_range("2020-01-01", periods=n, freq="h", tz="UTC")
+        gt = pd.Series(signal, index=idx, name="synthetic")
+        return {
+            "hourly": gt,
+            "daily": gt.resample("D").mean(),
+            "site": "TEST_SITE",
+            "col": "synthetic",
+            "biome": "ENF",
+            "env_hourly": None,
+            "env_daily": None,
+        }
+
+    def test_worker_returns_results(self, synthetic_segment):
+        results = _benchmark_one_segment(
+            key="TEST__synthetic",
+            sdata=synthetic_segment,
+            scale="hourly",
+            method_name="A_linear",
+            method_fn=fill_linear,
+            gap_sizes=[24],
+            n_reps=3,
+            rng_seed=42,
+        )
+        assert len(results) > 0
+        assert all(r["method"] == "A_linear" for r in results)
+        assert all(r["time_scale"] == "hourly" for r in results)
+
+    def test_worker_no_nans_in_metrics(self, synthetic_segment):
+        results = _benchmark_one_segment(
+            key="TEST__synthetic",
+            sdata=synthetic_segment,
+            scale="hourly",
+            method_name="A_linear",
+            method_fn=fill_linear,
+            gap_sizes=[6],
+            n_reps=3,
+            rng_seed=42,
+        )
+        for r in results:
+            assert not np.isnan(r["r2"]), f"NaN R² in result: {r}"
+
+    def test_worker_skips_short_segment(self):
+        idx = pd.date_range("2020-01-01", periods=10, freq="h", tz="UTC")
+        sdata = {"hourly": pd.Series(np.ones(10), index=idx), "site": "X", "col": "y"}
+        results = _benchmark_one_segment("X__y", sdata, "hourly", "A_linear", fill_linear, [6], 3, 42)
+        assert results == []

@@ -57,7 +57,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", module="statsmodels")
 warnings.filterwarnings("ignore", module="sklearn")
 warnings.filterwarnings("ignore", module="xgboost")
-warnings.filterwarnings("ignore", module="tensorflow")
+warnings.filterwarnings("ignore", module="torch")
 
 RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
@@ -683,24 +683,176 @@ def fill_knn_env(s: pd.Series, k: int = 10) -> pd.Series:
     return _fit_and_predict_ml(s, KNeighborsRegressor, {"n_neighbors": k_actual}, env_df=_current_env_df)
 
 
-# ── Group D: Deep Learning ────────────────────────────────────────────────────
-_HAS_TF = False
+# ── Group D: Deep Learning (PyTorch) ──────────────────────────────────────────
+_HAS_TORCH = False
 try:
-    import tensorflow as tf
-    from tensorflow import keras
+    import torch  # noqa: E402
+    import torch.nn as _nn
+    from torch.utils.data import DataLoader, TensorDataset
 
-    tf.random.set_seed(RANDOM_SEED)
-    _HAS_TF = True
+    torch.manual_seed(RANDOM_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(RANDOM_SEED)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    _HAS_TORCH = True
+    _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _N_GPUS = torch.cuda.device_count() if torch.cuda.is_available() else 0
 except ImportError:
-    pass  # TF not installed; DL methods fall back to linear
+    torch = None
+    _nn = None
+    _DEVICE = None
+    _N_GPUS = 0
 DL_EPOCHS = 50
 DL_PATIENCE = 5
 DL_BATCH = 32
 DL_VAL_SPLIT = 0.1
 
 
-if not _HAS_TF:
-    # Stub DL functions when TensorFlow unavailable
+# ── PyTorch model classes ─────────────────────────────────────────────────────
+
+if _HAS_TORCH:
+
+    class LSTMModel(_nn.Module):
+        """2-layer LSTM (64 units each) — matches original Keras architecture."""
+
+        def __init__(self, n_features: int = 1):
+            super().__init__()
+            self.lstm1 = _nn.LSTM(n_features, 64, batch_first=True)
+            self.drop1 = _nn.Dropout(0.1)
+            self.lstm2 = _nn.LSTM(64, 64, batch_first=True)
+            self.drop2 = _nn.Dropout(0.1)
+            self.fc = _nn.Linear(64, 1)
+
+        def forward(self, x):
+            out, _ = self.lstm1(x)
+            out = self.drop1(out)
+            out, _ = self.lstm2(out)
+            out = self.drop2(out[:, -1, :])
+            return self.fc(out)
+
+    class BiLSTMModel(_nn.Module):
+        """Bidirectional LSTM — uses both past and future context around gaps."""
+
+        def __init__(self, n_features: int = 1):
+            super().__init__()
+            self.lstm = _nn.LSTM(n_features, 64, batch_first=True, bidirectional=True)
+            self.drop = _nn.Dropout(0.1)
+            self.fc = _nn.Linear(128, 1)
+
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            out = self.drop(out[:, -1, :])
+            return self.fc(out)
+
+    class GRUModel(_nn.Module):
+        """2-layer GRU — simpler LSTM variant with fewer parameters."""
+
+        def __init__(self, n_features: int = 1):
+            super().__init__()
+            self.gru = _nn.GRU(n_features, 64, num_layers=2, dropout=0.1, batch_first=True)
+            self.fc = _nn.Linear(64, 1)
+
+        def forward(self, x):
+            out, _ = self.gru(x)
+            return self.fc(out[:, -1, :])
+
+    class CNNModel(_nn.Module):
+        """3-layer 1D-CNN (32→64→32, kernel=3) — matches original Keras architecture."""
+
+        def __init__(self, n_features: int = 1):
+            super().__init__()
+            self.conv1 = _nn.Conv1d(n_features, 32, 3, padding=1)
+            self.conv2 = _nn.Conv1d(32, 64, 3, padding=1)
+            self.conv3 = _nn.Conv1d(64, 32, 3, padding=1)
+            self.fc1 = _nn.Linear(32, 32)
+            self.fc2 = _nn.Linear(32, 1)
+
+        def forward(self, x):
+            # x: (batch, seq, features) → Conv1d needs (batch, features, seq)
+            x = x.permute(0, 2, 1)
+            x = torch.relu(self.conv1(x))
+            x = torch.relu(self.conv2(x))
+            x = torch.relu(self.conv3(x))
+            x = x.mean(dim=2)  # global average pooling
+            x = torch.relu(self.fc1(x))
+            return self.fc2(x)
+
+    class CNNLSTMModel(_nn.Module):
+        """CNN-LSTM hybrid: Conv1D(32→64) → LSTM(64) → Dense(1)."""
+
+        def __init__(self, n_features: int = 1):
+            super().__init__()
+            self.conv1 = _nn.Conv1d(n_features, 32, 3, padding=1)
+            self.conv2 = _nn.Conv1d(32, 64, 3, padding=1)
+            self.lstm = _nn.LSTM(64, 64, batch_first=True)
+            self.drop = _nn.Dropout(0.1)
+            self.fc = _nn.Linear(64, 1)
+
+        def forward(self, x):
+            x = x.permute(0, 2, 1)
+            x = torch.relu(self.conv1(x))
+            x = torch.relu(self.conv2(x))
+            x = x.permute(0, 2, 1)  # back to (batch, seq, 64)
+            out, _ = self.lstm(x)
+            out = self.drop(out[:, -1, :])
+            return self.fc(out)
+
+    class PositionalEmbedding(_nn.Module):
+        """Learned positional embedding for Transformer encoder."""
+
+        def __init__(self, seq_len: int, d_model: int):
+            super().__init__()
+            self.emb = _nn.Embedding(seq_len, d_model)
+            self.seq_len = seq_len
+
+        def forward(self, x):
+            pos = torch.arange(self.seq_len, device=x.device)
+            return x + self.emb(pos)
+
+    class TransformerModel(_nn.Module):
+        """Transformer encoder (2 blocks, 2 heads, d=64) — matches original Keras."""
+
+        def __init__(self, n_features: int = 1):
+            super().__init__()
+            self.input_proj = _nn.Linear(n_features, 64)
+            self.pos_emb = PositionalEmbedding(WINDOW, 64)
+            encoder_layer = _nn.TransformerEncoderLayer(
+                d_model=64,
+                nhead=2,
+                dim_feedforward=128,
+                dropout=0.1,
+                batch_first=True,
+            )
+            self.encoder = _nn.TransformerEncoder(encoder_layer, num_layers=2)
+            self.fc = _nn.Linear(64, 1)
+
+        def forward(self, x):
+            x = self.input_proj(x)
+            x = self.pos_emb(x)
+            x = self.encoder(x)
+            x = x.mean(dim=1)  # global average pooling
+            return self.fc(x)
+
+    # Registry mapping model name → class
+    _MODEL_CLASSES = {
+        "lstm": LSTMModel,
+        "bilstm": BiLSTMModel,
+        "gru": GRUModel,
+        "cnn": CNNModel,
+        "cnn_lstm": CNNLSTMModel,
+        "transformer": TransformerModel,
+    }
+
+else:
+    LSTMModel = BiLSTMModel = GRUModel = CNNModel = CNNLSTMModel = TransformerModel = None
+    PositionalEmbedding = None
+    _MODEL_CLASSES = {}
+
+
+# ── Stubs when PyTorch unavailable ────────────────────────────────────────────
+if not _HAS_TORCH:
+
     def fill_lstm(s):
         return fill_linear(s)
 
@@ -711,6 +863,12 @@ if not _HAS_TF:
         return fill_linear(s)
 
     def fill_transformer(s):
+        return fill_linear(s)
+
+    def fill_bilstm(s):
+        return fill_linear(s)
+
+    def fill_gru(s):
         return fill_linear(s)
 
     def fill_lstm_env(s):
@@ -725,34 +883,14 @@ if not _HAS_TF:
     def fill_transformer_env(s):
         return fill_linear(s)
 
-    PositionalEmbedding = None
+    def fill_bilstm_env(s):
+        return fill_linear(s)
 
-if _HAS_TF:
-
-    class PositionalEmbedding(keras.layers.Layer):
-        """
-        Learned positional embedding layer for the Transformer encoder.
-
-        Adds a trainable embedding vector for each sequence position.
-        """
-
-        def __init__(self, sequence_length: int, d_model: int, **kwargs):
-            super().__init__(**kwargs)
-            self.sequence_length = sequence_length
-            self.d_model = d_model
-            self.pos_emb = keras.layers.Embedding(input_dim=sequence_length, output_dim=d_model)
-
-        def call(self, x: tf.Tensor) -> tf.Tensor:
-            """Add positional embeddings to the input tensor."""
-            return x + self.pos_emb(tf.range(self.sequence_length))
-
-        def get_config(self) -> dict:
-            config = super().get_config()
-            config.update({"sequence_length": self.sequence_length, "d_model": self.d_model})
-            return config
+    def fill_gru_env(s):
+        return fill_linear(s)
 
 
-# Guard: all remaining DL functions check _HAS_TF internally
+# Guard: all remaining DL functions check _HAS_TORCH internally
 
 
 def _build_dl_sequences(s: pd.Series, window: int = WINDOW, env_df: "pd.DataFrame | None" = None):
@@ -802,60 +940,99 @@ def _build_dl_sequences(s: pd.Series, window: int = WINDOW, env_df: "pd.DataFram
 
 def _train_dl_model(
     s: pd.Series,
-    model,
+    model: "_nn.Module",
     scaler_X: StandardScaler,
     scaler_y: StandardScaler,
     env_df: "pd.DataFrame | None" = None,
-) -> "object | None":
+    device: "torch.device | None" = None,
+) -> "_nn.Module | None":
     """
-    Fit a compiled Keras model on observed, non-gap data.
+    Fit a PyTorch model on observed, non-gap data with early stopping.
 
-    Returns the fitted model or None when too few training samples exist.
+    Returns the fitted model (on device) or None when too few training samples.
     Scaler is applied per-feature across the flattened feature dimension (M5 fix).
     """
     X, y = _build_dl_sequences(s, env_df=env_df)
     if len(X) < 100:
         return None
+    if device is None:
+        device = _DEVICE if _DEVICE is not None else torch.device("cpu")
     # Scale per-feature: reshape (n, window, features) → (n*window, features)
     n_samples, window, n_features = X.shape
     X_flat = X.reshape(-1, n_features)
     X_scaled = scaler_X.fit_transform(X_flat).reshape(X.shape)
     ys = scaler_y.fit_transform(y.reshape(-1, 1)).ravel()
-    model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
-    model.fit(
-        X_scaled,
-        ys,
-        epochs=DL_EPOCHS,
-        batch_size=DL_BATCH,
-        validation_split=DL_VAL_SPLIT,
-        verbose=0,
-        callbacks=[keras.callbacks.EarlyStopping(patience=DL_PATIENCE, restore_best_weights=True)],
-    )
+
+    # Train/val split (last DL_VAL_SPLIT fraction for validation)
+    n_val = max(1, int(n_samples * DL_VAL_SPLIT))
+    n_train = n_samples - n_val
+    X_train_t = torch.tensor(X_scaled[:n_train], dtype=torch.float32)
+    y_train_t = torch.tensor(ys[:n_train], dtype=torch.float32).unsqueeze(1)
+    X_val_t = torch.tensor(X_scaled[n_train:], dtype=torch.float32).to(device)
+    y_val_t = torch.tensor(ys[n_train:], dtype=torch.float32).unsqueeze(1).to(device)
+
+    model = model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = _nn.MSELoss()
+
+    train_ds = TensorDataset(X_train_t, y_train_t)
+    # pin_memory=False: safe in loky worker subprocesses where CUDA may not be initialized
+    train_loader = DataLoader(train_ds, batch_size=DL_BATCH, shuffle=True, pin_memory=False)
+
+    best_val_loss = float("inf")
+    best_state = None
+    patience_counter = 0
+
+    for _epoch in range(DL_EPOCHS):
+        model.train()
+        for xb, yb in train_loader:
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
+            optimizer.zero_grad()
+            loss = loss_fn(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = loss_fn(model(X_val_t), y_val_t).item()
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= DL_PATIENCE:
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        model = model.to(device)
     return model
 
 
 def _predict_at_gaps(
     s: pd.Series,
-    model,
+    model: "_nn.Module",
     scaler_X: StandardScaler,
     scaler_y: StandardScaler,
     window: int = WINDOW,
     env_df: "pd.DataFrame | None" = None,
+    device: "torch.device | None" = None,
 ) -> pd.Series:
     """
-    Autoregressively predict values at gap positions using the trained model.
+    Autoregressively predict values at gap positions using a trained PyTorch model.
 
     Earlier predictions become context for later predictions within the same gap.
     Supports multi-feature input when env_df is provided.
 
     Note (H5): Autoregressive prediction compounds errors for long gaps.
-    For gaps >> window (e.g., 168-720h), early prediction errors feed into
-    later predictions, potentially causing drift. Monitor error growth by
-    comparing early vs late gap positions in evaluation.
     """
+    if device is None:
+        device = next(model.parameters()).device if _HAS_TORCH else torch.device("cpu")
     filled = s.copy()
     vals = s.values.copy().astype(np.float32)
-    # Prepare env values if available
     env_vals = None
     n_features = 1
     if env_df is not None:
@@ -863,9 +1040,6 @@ def _predict_at_gaps(
         env_vals = env_aligned.values.astype(np.float32)
         n_features = 1 + env_vals.shape[1]
     # Fill gap positions before the lookback window with linear interpolation.
-    # The autoregressive DL predictor needs `window` context steps.
-    # Use the full series for interpolation context (not just the prefix),
-    # which gives linear interpolation anchors from both sides of the gap.
     _prefix_end = min(window, len(vals))
     _any_prefix_nan = any(np.isnan(vals[i]) for i in range(_prefix_end))
     if _any_prefix_nan:
@@ -876,44 +1050,47 @@ def _predict_at_gaps(
                 _v = max(0.0, float(_v)) if not np.isnan(_v) else 0.0
                 vals[i] = _v
                 filled.iloc[i] = _v
-    for i in range(window, len(vals)):
-        if np.isnan(vals[i]):
-            ctx_sap = vals[i - window : i].copy()
-            ctx_sap = pd.Series(ctx_sap).ffill().bfill().fillna(0).values.astype(np.float32)
-            if env_vals is not None:
-                ctx_env = env_vals[i - window : i]
-                ctx = np.column_stack([ctx_sap, ctx_env])  # (window, n_features)
-            else:
-                ctx = ctx_sap[:, np.newaxis]  # (window, 1)
-            ctx_flat = ctx.reshape(-1, n_features)
-            ctx_sc = scaler_X.transform(ctx_flat).reshape(1, window, n_features)
-            pred = float(scaler_y.inverse_transform(model.predict(ctx_sc, verbose=0))[0, 0])
-            pred = max(0.0, pred)
-            vals[i] = pred
-            filled.iloc[i] = pred
+
+    model.eval()
+    with torch.no_grad():
+        for i in range(window, len(vals)):
+            if np.isnan(vals[i]):
+                ctx_sap = vals[i - window : i].copy()
+                ctx_sap = pd.Series(ctx_sap).ffill().bfill().fillna(0).values.astype(np.float32)
+                if env_vals is not None:
+                    ctx_env = env_vals[i - window : i]
+                    ctx = np.column_stack([ctx_sap, ctx_env])
+                else:
+                    ctx = ctx_sap[:, np.newaxis]
+                ctx_flat = ctx.reshape(-1, n_features)
+                ctx_sc = scaler_X.transform(ctx_flat).reshape(1, window, n_features)
+                ctx_t = torch.tensor(ctx_sc, dtype=torch.float32).to(device)
+                pred_sc = model(ctx_t).cpu().numpy()
+                pred = float(scaler_y.inverse_transform(pred_sc)[0, 0])
+                pred = max(0.0, pred)
+                vals[i] = pred
+                filled.iloc[i] = pred
     return filled.clip(lower=0)
 
 
-def _dl_fill(s: pd.Series, build_model_fn, env_df: "pd.DataFrame | None" = None) -> pd.Series:
+def _dl_fill(s: pd.Series, model_cls, env_df: "pd.DataFrame | None" = None) -> pd.Series:
     """
-    Generic DL gap-filling pipeline.
+    Generic DL gap-filling pipeline (PyTorch).
 
     Builds the model, trains on observed data, predicts at gaps.
-    Falls back to fill_linear when training fails or TF unavailable.
-    If env_df provided, builds multi-feature model (sap + env).
+    Falls back to fill_linear when training fails or PyTorch unavailable.
     """
-    if not _HAS_TF:
+    if not _HAS_TORCH:
         return fill_linear(s)
-    keras.backend.clear_session()
-    # Determine input feature dimension
     n_features = 1
     if env_df is not None:
         env_cols = [c for c in env_df.columns if c in ENV_FEATURE_COLS]
         if env_cols:
+            env_df = env_df[env_cols]  # filter to valid env columns only
             n_features = 1 + len(env_cols)
         else:
-            env_df = None  # no valid env columns
-    model = build_model_fn(n_features=n_features)
+            env_df = None
+    model = model_cls(n_features=n_features)
     scaler_X = StandardScaler()
     scaler_y = StandardScaler()
     fitted = _train_dl_model(s, model, scaler_X, scaler_y, env_df=env_df)
@@ -922,116 +1099,107 @@ def _dl_fill(s: pd.Series, build_model_fn, env_df: "pd.DataFrame | None" = None)
     return _predict_at_gaps(s, fitted, scaler_X, scaler_y, env_df=env_df)
 
 
-def _fit_dl_on_ground_truth(gt_series: pd.Series, build_model_fn, env_df: "pd.DataFrame | None" = None):
-    """Pre-train a DL model on the full ground truth (no gaps).
+def _fit_dl_on_ground_truth(gt_series: pd.Series, model_cls, env_df: "pd.DataFrame | None" = None):
+    """Pre-train a PyTorch DL model on the full ground truth (no gaps).
 
-    Returns (model, scaler_X, scaler_y) or None if insufficient data.
-    Caller should call keras.backend.clear_session() once before the
-    pre-fitting loop, NOT per segment (to preserve cached model weights).
+    Returns (model_cpu, scaler_X, scaler_y) or None if insufficient data.
+    Model is moved to CPU after training so it can be pickled by joblib.
     """
-    if not _HAS_TF:
+    if not _HAS_TORCH:
         return None
     n_features = 1
     if env_df is not None:
         env_cols = [c for c in env_df.columns if c in ENV_FEATURE_COLS]
         if env_cols:
+            env_df = env_df[env_cols]  # filter to valid env columns only
             n_features = 1 + len(env_cols)
         else:
             env_df = None
-    model = build_model_fn(n_features=n_features)
+    model = model_cls(n_features=n_features)
     scaler_X = StandardScaler()
     scaler_y = StandardScaler()
     fitted = _train_dl_model(gt_series, model, scaler_X, scaler_y, env_df=env_df)
     if fitted is None:
         return None
+    fitted = fitted.cpu()
+    gc.collect()
     return fitted, scaler_X, scaler_y
 
 
 def _predict_dl_at_gaps_cached(s: pd.Series, cached, env_df: "pd.DataFrame | None" = None) -> pd.Series:
-    """Predict at gap positions using a pre-trained DL model."""
+    """Predict at gap positions using a pre-trained DL model.
+
+    The cached model may be on CPU (from _fit_dl_on_ground_truth). In joblib
+    loky workers, each worker gets its own pickle copy, so the in-place
+    .to(device) only affects the worker's local copy — not the main cache.
+    In sequential mode, the model stays on GPU after the first call.
+    """
     if cached is None:
         return fill_linear(s)
     model, scaler_X, scaler_y = cached
+    # Apply the same env column filter as _fit_dl_on_ground_truth to ensure
+    # n_features matches between training and inference.
+    if env_df is not None:
+        env_cols = [c for c in env_df.columns if c in ENV_FEATURE_COLS]
+        env_df = env_df[env_cols] if env_cols else None
+    if _HAS_TORCH:
+        device = _DEVICE if _DEVICE is not None else torch.device("cpu")
+        model = model.to(device)
     return _predict_at_gaps(s, model, scaler_X, scaler_y, env_df=env_df)
 
 
-def fill_lstm(s: pd.Series) -> pd.Series:
-    """2-layer LSTM (64 units each) gap-filling."""
+# ── DL fill functions (PyTorch) ──────────────────────────────────────────────
 
-    def _build(n_features=1):
-        return keras.Sequential(
-            [
-                keras.layers.LSTM(64, return_sequences=True, input_shape=(WINDOW, n_features)),
-                keras.layers.Dropout(0.1),
-                keras.layers.LSTM(64),
-                keras.layers.Dropout(0.1),
-                keras.layers.Dense(1),
-            ]
-        )
+if _HAS_TORCH:
 
-    return _dl_fill(s, _build)
+    def fill_lstm(s: pd.Series) -> pd.Series:
+        """2-layer LSTM (64 units each) gap-filling."""
+        return _dl_fill(s, LSTMModel)
 
+    def fill_cnn(s: pd.Series) -> pd.Series:
+        """3-layer 1D-CNN (32→64→32, kernel=3) gap-filling."""
+        return _dl_fill(s, CNNModel)
 
-def fill_cnn(s: pd.Series) -> pd.Series:
-    """3-layer 1D-CNN (32→64→32, kernel=3) gap-filling."""
+    def fill_cnn_lstm(s: pd.Series) -> pd.Series:
+        """CNN-LSTM hybrid gap-filling."""
+        return _dl_fill(s, CNNLSTMModel)
 
-    def _build(n_features=1):
-        return keras.Sequential(
-            [
-                keras.layers.Conv1D(32, 3, padding="same", activation="relu", input_shape=(WINDOW, n_features)),
-                keras.layers.Conv1D(64, 3, padding="same", activation="relu"),
-                keras.layers.Conv1D(32, 3, padding="same", activation="relu"),
-                keras.layers.GlobalAveragePooling1D(),
-                keras.layers.Dense(32, activation="relu"),
-                keras.layers.Dense(1),
-            ]
-        )
+    def fill_transformer(s: pd.Series) -> pd.Series:
+        """Transformer encoder (2 blocks, 2 heads, d=64) gap-filling."""
+        return _dl_fill(s, TransformerModel)
 
-    return _dl_fill(s, _build)
+    def fill_bilstm(s: pd.Series) -> pd.Series:
+        """Bidirectional LSTM gap-filling."""
+        return _dl_fill(s, BiLSTMModel)
 
+    def fill_gru(s: pd.Series) -> pd.Series:
+        """2-layer GRU gap-filling."""
+        return _dl_fill(s, GRUModel)
 
-def fill_cnn_lstm(s: pd.Series) -> pd.Series:
-    """CNN-LSTM hybrid: Conv1D (32→64) → LSTM(64) → Dense(1)."""
+    # Env-aware DL fill functions
+    def fill_lstm_env(s: pd.Series) -> pd.Series:
+        """LSTM with sap + env features."""
+        return _dl_fill(s, LSTMModel, env_df=_current_env_df)
 
-    def _build(n_features=1):
-        inp = keras.Input(shape=(WINDOW, n_features))
-        x = keras.layers.Conv1D(32, 3, padding="same", activation="relu")(inp)
-        x = keras.layers.Conv1D(64, 3, padding="same", activation="relu")(x)
-        x = keras.layers.LSTM(64)(x)
-        x = keras.layers.Dropout(0.1)(x)
-        out = keras.layers.Dense(1)(x)
-        return keras.Model(inp, out)
+    def fill_cnn_env(s: pd.Series) -> pd.Series:
+        """1D-CNN with sap + env features."""
+        return _dl_fill(s, CNNModel, env_df=_current_env_df)
 
-    return _dl_fill(s, _build)
+    def fill_cnn_lstm_env(s: pd.Series) -> pd.Series:
+        """CNN-LSTM with sap + env features."""
+        return _dl_fill(s, CNNLSTMModel, env_df=_current_env_df)
 
+    def fill_transformer_env(s: pd.Series) -> pd.Series:
+        """Transformer with sap + env features."""
+        return _dl_fill(s, TransformerModel, env_df=_current_env_df)
 
-def fill_transformer(s: pd.Series) -> pd.Series:
-    """
-    Encoder-only Transformer: d_model=64, 2 attention heads, 2 encoder layers.
+    def fill_bilstm_env(s: pd.Series) -> pd.Series:
+        """Bidirectional LSTM with sap + env features."""
+        return _dl_fill(s, BiLSTMModel, env_df=_current_env_df)
 
-    Uses learned positional embeddings via PositionalEmbedding layer.
-    """
-
-    def _enc_block(x, d_model=64, n_heads=2, ff_dim=128, drop=0.1):
-        attn = keras.layers.MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads)(x, x)
-        attn = keras.layers.Dropout(drop)(attn)
-        x = keras.layers.LayerNormalization(epsilon=1e-6)(x + attn)
-        ff_out = keras.layers.Dense(ff_dim, activation="relu")(x)
-        ff_out = keras.layers.Dense(d_model)(ff_out)
-        ff_out = keras.layers.Dropout(drop)(ff_out)
-        return keras.layers.LayerNormalization(epsilon=1e-6)(x + ff_out)
-
-    def _build(n_features=1):
-        inp = keras.Input(shape=(WINDOW, n_features))
-        x = keras.layers.Dense(64)(inp)
-        x = PositionalEmbedding(WINDOW, 64)(x)
-        x = _enc_block(x)
-        x = _enc_block(x)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        out = keras.layers.Dense(1)(x)
-        return keras.Model(inp, out)
-
-    return _dl_fill(s, _build)
+    def fill_gru_env(s: pd.Series) -> pd.Series:
+        """GRU with sap + env features."""
+        return _dl_fill(s, GRUModel, env_df=_current_env_df)
 
 
 # ── Method registry ───────────────────────────────────────────────────────────
@@ -1050,88 +1218,11 @@ METHODS = {
     "D_cnn": fill_cnn,
     "D_cnn_lstm": fill_cnn_lstm,
     "D_transformer": fill_transformer,
+    "D_bilstm": fill_bilstm,
+    "D_gru": fill_gru,
 }
 
-# ── Env-aware methods (C3 fix) ───────────────────────────────────────────────
-# These use _current_env_df (set per-segment in Phase 5 benchmark loop)
-
-
-def fill_lstm_env(s: pd.Series) -> pd.Series:
-    """LSTM with sap + env features."""
-    return _dl_fill(
-        s,
-        lambda n_features=1: keras.Sequential(
-            [
-                keras.layers.LSTM(64, return_sequences=True, input_shape=(WINDOW, n_features)),
-                keras.layers.Dropout(0.1),
-                keras.layers.LSTM(64),
-                keras.layers.Dropout(0.1),
-                keras.layers.Dense(1),
-            ]
-        ),
-        env_df=_current_env_df,
-    )
-
-
-def fill_cnn_env(s: pd.Series) -> pd.Series:
-    """1D-CNN with sap + env features."""
-    return _dl_fill(
-        s,
-        lambda n_features=1: keras.Sequential(
-            [
-                keras.layers.Conv1D(32, 3, padding="same", activation="relu", input_shape=(WINDOW, n_features)),
-                keras.layers.Conv1D(64, 3, padding="same", activation="relu"),
-                keras.layers.Conv1D(32, 3, padding="same", activation="relu"),
-                keras.layers.GlobalAveragePooling1D(),
-                keras.layers.Dense(32, activation="relu"),
-                keras.layers.Dense(1),
-            ]
-        ),
-        env_df=_current_env_df,
-    )
-
-
-def fill_cnn_lstm_env(s: pd.Series) -> pd.Series:
-    """CNN-LSTM with sap + env features."""
-
-    def _build(n_features=1):
-        inp = keras.Input(shape=(WINDOW, n_features))
-        x = keras.layers.Conv1D(32, 3, padding="same", activation="relu")(inp)
-        x = keras.layers.Conv1D(64, 3, padding="same", activation="relu")(x)
-        x = keras.layers.LSTM(64)(x)
-        x = keras.layers.Dropout(0.1)(x)
-        out = keras.layers.Dense(1)(x)
-        return keras.Model(inp, out)
-
-    return _dl_fill(s, _build, env_df=_current_env_df)
-
-
-def fill_transformer_env(s: pd.Series) -> pd.Series:
-    """Transformer with sap + env features."""
-
-    def _enc_block(x, d_model=64, n_heads=2, ff_dim=128, drop=0.1):
-        attn = keras.layers.MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads)(x, x)
-        attn = keras.layers.Dropout(drop)(attn)
-        x = keras.layers.LayerNormalization(epsilon=1e-6)(x + attn)
-        ff_out = keras.layers.Dense(ff_dim, activation="relu")(x)
-        ff_out = keras.layers.Dense(d_model)(ff_out)
-        ff_out = keras.layers.Dropout(drop)(ff_out)
-        return keras.layers.LayerNormalization(epsilon=1e-6)(x + ff_out)
-
-    def _build(n_features=1):
-        inp = keras.Input(shape=(WINDOW, n_features))
-        x = keras.layers.Dense(64)(inp)
-        x = PositionalEmbedding(WINDOW, 64)(x)
-        x = _enc_block(x)
-        x = _enc_block(x)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        out = keras.layers.Dense(1)(x)
-        return keras.Model(inp, out)
-
-    return _dl_fill(s, _build, env_df=_current_env_df)
-
-
-# Add env-aware methods to registry
+# ── Env-aware methods ─────────────────────────────────────────────────────────
 METHODS_ENV = {
     "Ce_rf_env": fill_rf_env,
     "Ce_xgb_env": fill_xgb_env,
@@ -1140,6 +1231,8 @@ METHODS_ENV = {
     "De_cnn_env": fill_cnn_env,
     "De_cnn_lstm_env": fill_cnn_lstm_env,
     "De_transformer_env": fill_transformer_env,
+    "De_bilstm_env": fill_bilstm_env,
+    "De_gru_env": fill_gru_env,
 }
 METHODS.update(METHODS_ENV)
 
@@ -1147,91 +1240,46 @@ METHOD_GROUPS = {
     "A": ["A_linear", "A_cubic", "A_akima", "A_nearest"],
     "B": ["B_mdv", "B_rolling", "B_stl"],
     "C": ["C_rf", "C_xgb", "C_knn"],
-    "D": ["D_lstm", "D_cnn", "D_cnn_lstm", "D_transformer"],
+    "D": ["D_lstm", "D_cnn", "D_cnn_lstm", "D_transformer", "D_bilstm", "D_gru"],
     "Ce": ["Ce_rf_env", "Ce_xgb_env", "Ce_knn_env"],
-    "De": ["De_lstm_env", "De_cnn_env", "De_cnn_lstm_env", "De_transformer_env"],
+    "De": ["De_lstm_env", "De_cnn_env", "De_cnn_lstm_env", "De_transformer_env", "De_bilstm_env", "De_gru_env"],
 }
 
-# ── DL build-function registry (for model caching) ──────────────────────────
-# These must be module-level callables so they can be referenced by name.
+# ── DL build-class registry (for model caching) ─────────────────────────────
+# Maps method name → PyTorch nn.Module class. Models are picklable after .cpu().
 
-if _HAS_TF:
-
-    def _build_lstm(n_features=1):
-        return keras.Sequential(
-            [
-                keras.layers.LSTM(64, return_sequences=True, input_shape=(WINDOW, n_features)),
-                keras.layers.Dropout(0.1),
-                keras.layers.LSTM(64),
-                keras.layers.Dropout(0.1),
-                keras.layers.Dense(1),
-            ]
-        )
-
-    def _build_cnn(n_features=1):
-        return keras.Sequential(
-            [
-                keras.layers.Conv1D(32, 3, padding="same", activation="relu", input_shape=(WINDOW, n_features)),
-                keras.layers.Conv1D(64, 3, padding="same", activation="relu"),
-                keras.layers.Conv1D(32, 3, padding="same", activation="relu"),
-                keras.layers.GlobalAveragePooling1D(),
-                keras.layers.Dense(32, activation="relu"),
-                keras.layers.Dense(1),
-            ]
-        )
-
-    def _build_cnn_lstm(n_features=1):
-        inp = keras.Input(shape=(WINDOW, n_features))
-        x = keras.layers.Conv1D(32, 3, padding="same", activation="relu")(inp)
-        x = keras.layers.Conv1D(64, 3, padding="same", activation="relu")(x)
-        x = keras.layers.LSTM(64)(x)
-        x = keras.layers.Dropout(0.1)(x)
-        out = keras.layers.Dense(1)(x)
-        return keras.Model(inp, out)
-
-    def _build_transformer(n_features=1):
-        def _enc_block(x, d_model=64, n_heads=2, ff_dim=128, drop=0.1):
-            attn = keras.layers.MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads)(x, x)
-            attn = keras.layers.Dropout(drop)(attn)
-            x = keras.layers.LayerNormalization(epsilon=1e-6)(x + attn)
-            ff_out = keras.layers.Dense(ff_dim, activation="relu")(x)
-            ff_out = keras.layers.Dense(d_model)(ff_out)
-            ff_out = keras.layers.Dropout(drop)(ff_out)
-            return keras.layers.LayerNormalization(epsilon=1e-6)(x + ff_out)
-
-        inp = keras.Input(shape=(WINDOW, n_features))
-        x = keras.layers.Dense(64)(inp)
-        x = PositionalEmbedding(WINDOW, 64)(x)
-        x = _enc_block(x)
-        x = _enc_block(x)
-        x = keras.layers.GlobalAveragePooling1D()(x)
-        out = keras.layers.Dense(1)(x)
-        return keras.Model(inp, out)
-
-else:
-    _build_lstm = _build_cnn = _build_cnn_lstm = _build_transformer = None
-
-_DL_BUILD_FNS = {
-    "D_lstm": _build_lstm,
-    "D_cnn": _build_cnn,
-    "D_cnn_lstm": _build_cnn_lstm,
-    "D_transformer": _build_transformer,
-    "De_lstm_env": _build_lstm,
-    "De_cnn_env": _build_cnn,
-    "De_cnn_lstm_env": _build_cnn_lstm,
-    "De_transformer_env": _build_transformer,
-}
+_DL_BUILD_FNS = {}
+if _HAS_TORCH:
+    _DL_BUILD_FNS = {
+        "D_lstm": LSTMModel,
+        "D_cnn": CNNModel,
+        "D_cnn_lstm": CNNLSTMModel,
+        "D_transformer": TransformerModel,
+        "D_bilstm": BiLSTMModel,
+        "D_gru": GRUModel,
+        "De_lstm_env": LSTMModel,
+        "De_cnn_env": CNNModel,
+        "De_cnn_lstm_env": CNNLSTMModel,
+        "De_transformer_env": TransformerModel,
+        "De_bilstm_env": BiLSTMModel,
+        "De_gru_env": GRUModel,
+    }
 
 # ── Method-group parallelization config ──────────────────────────────────────
-# (n_workers, threads_per_worker) tuned for 192-core zen4 node
+# (n_workers, threads_per_worker)
+# D/De: now GPU-aware — 6 workers for 6 GPUs, 5 CPU threads each (32 cores ÷ 6)
+# Falls back to CPU config if no GPU detected.
+
+_GPU_WORKERS = max(1, _N_GPUS) if _N_GPUS > 0 else 8
+_GPU_THREADS = max(1, 32 // _GPU_WORKERS) if _N_GPUS > 0 else 4
 
 _GROUP_PARALLEL_CONFIG = {
     "A": (48, 1),  # pure NumPy/pandas — no internal threading
     "B": (32, 2),  # statsmodels STL has minimal threading
     "C": (16, 8),  # sklearn/xgb use internal thread pools
-    "D": (8, 16),  # TF uses intra/inter-op thread pools
+    "D": (_GPU_WORKERS, _GPU_THREADS),  # PyTorch — GPU or CPU parallel
     "Ce": (16, 8),
-    "De": (8, 16),
+    "De": (_GPU_WORKERS, _GPU_THREADS),
 }
 
 GROUP_COLORS.update({"Ce": "#E65100", "De": "#6A1B9A"})
@@ -1916,19 +1964,19 @@ _ML_CACHE_METHODS = {"C_rf", "C_xgb", "C_knn", "Ce_rf_env", "Ce_xgb_env", "Ce_kn
 def _set_thread_env(threads: int) -> None:
     """Set thread control environment variables for the current process.
 
-    Sets OMP/MKL/OpenBLAS/TF env vars. These must be set BEFORE the
+    Sets OMP/MKL/OpenBLAS env vars. These must be set BEFORE the
     respective libraries are first used to take effect on native thread pools.
     For loky workers, the main process sets these before Parallel() is called,
     and workers inherit the env at fork time.
+    Also sets PyTorch intra-op threads if available.
     """
     t = str(threads)
     os.environ["OMP_NUM_THREADS"] = t
     os.environ["MKL_NUM_THREADS"] = t
     os.environ["OPENBLAS_NUM_THREADS"] = t
     os.environ["NUMEXPR_NUM_THREADS"] = t
-    # TF thread pool env vars (read at TF initialization, not at runtime)
-    os.environ["TF_NUM_INTEROP_THREADS"] = "1"
-    os.environ["TF_NUM_INTRAOP_THREADS"] = t
+    if _HAS_TORCH:
+        torch.set_num_threads(int(t))
 
 
 def run_phase5(ground_truth_store):
@@ -1937,7 +1985,7 @@ def run_phase5(ground_truth_store):
     Features:
     - Resume logic: loads partial results, skips completed (scale, method) pairs
     - ML model caching: train once per segment, predict across all replicates
-    - DL model caching: same pattern for TensorFlow/Keras models
+    - DL model caching: PyTorch models trained on GPU, pickled to CPU for joblib
     - Method-group thread controls: prevents oversubscription on HPC
     - Parallelization via joblib when available, sequential fallback
 
@@ -2050,13 +2098,11 @@ def run_phase5(ground_truth_store):
                 _n_workers = max(1, _total_cores // max(1, _threads))
             _set_thread_env(_threads)
 
-            # ── Pre-fit models per segment (sequential — models not picklable) ─
+            # ── Pre-fit models per segment ────────────────────────────────
+            # DL models are trained on GPU then moved to CPU for pickling.
+            # This enables joblib parallelization of DL methods (PyTorch models are picklable).
             _segment_caches: dict = {}
             if _is_ml_cacheable or _is_dl_cacheable:
-                # Clear TF session once before the loop (not per segment)
-                # to reset layer name counters without invalidating cached weights
-                if _is_dl_cacheable and _HAS_TF:
-                    keras.backend.clear_session()
                 print(f"  Pre-fitting {_mname} models on {_n_sites} segments...")
                 for _key, _sdata in ground_truth_store.items():
                     _gt = _sdata.get(_scale)
@@ -2070,13 +2116,19 @@ def run_phase5(ground_truth_store):
                             _cls, _kwargs = _ML_CACHE_CONFIGS[_mname]
                             _segment_caches[_key] = _fit_ml_on_ground_truth(_gt, _cls, _kwargs, env_df=_env)
                         elif _is_dl_cacheable:
-                            _build_fn = _DL_BUILD_FNS[_mname]
-                            if _build_fn is not None:
-                                _segment_caches[_key] = _fit_dl_on_ground_truth(_gt, _build_fn, env_df=_env)
-                    except Exception:
+                            _model_cls = _DL_BUILD_FNS[_mname]
+                            if _model_cls is not None:
+                                _segment_caches[_key] = _fit_dl_on_ground_truth(_gt, _model_cls, env_df=_env)
+                                # Free GPU memory between segment training runs
+                                if _HAS_TORCH and torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                    except Exception as _e:
+                        print(f"    ⚠ Pre-fit failed for {_key} ({type(_e).__name__}): {_e}")
                         _segment_caches[_key] = None
                 _n_cached = sum(1 for v in _segment_caches.values() if v is not None)
                 print(f"  Pre-fitted {_n_cached}/{len(_segment_caches)} segments")
+                if _is_dl_cacheable and _HAS_TORCH and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             # ── Build per-segment work items ─────────────────────────────
             _work_items = []
@@ -2095,11 +2147,8 @@ def run_phase5(ground_truth_store):
             # ── Execute: parallel if possible, sequential fallback ───────
             _m_rows: list = []
             _use_parallel = (
-                _has_joblib
-                and _n_workers > 1
-                and len(_work_items) > 1
-                # DL models are not easily picklable — run sequentially
-                and not _is_dl_cacheable
+                _has_joblib and _n_workers > 1 and len(_work_items) > 1
+                # PyTorch models are picklable after .cpu() — DL can now run in parallel
             )
 
             if _use_parallel:

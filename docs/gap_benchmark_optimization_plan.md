@@ -304,3 +304,137 @@ Already written in `notebooks/test_gap_benchmark.py`:
 | Ce (3) | rf_env, xgb_env, knn_env | ~2h (cached) | ~15min |
 | De (4) | lstm_env, ..., transformer_env | >24h (uncached) | ~45min |
 | **Total** | **21 methods × 2 scales** | **>50h** | **~2-3h** |
+
+---
+
+## v3: PyTorch Migration + GPU Acceleration + New Methods
+
+### Motivation
+
+v2 DL methods still run **sequentially on CPU** because TF/Keras models aren't picklable
+for joblib. Observed: 10/42 method-scale pairs done in 11h; DL methods dominate remaining
+wall time. Migration to PyTorch solves three problems:
+
+1. **Picklability** — PyTorch models serialize natively, enabling joblib parallelism
+2. **GPU acceleration** — LSTM training/inference 10-50× faster on GPU vs CPU
+3. **Lower overhead** — PyTorch eager mode avoids TF graph tracing latency
+
+### TF → PyTorch Mapping
+
+| TF/Keras | PyTorch | Notes |
+|----------|---------|-------|
+| `keras.Sequential([LSTM(64)...])` | `nn.Module` subclass | Explicit forward() |
+| `keras.layers.LSTM(64, return_sequences=True)` | `nn.LSTM(in, 64, batch_first=True)` | Use output, not (h_n, c_n) |
+| `keras.layers.LSTM(64)` (2nd layer) | Same nn.LSTM, take `output[:,-1,:]` | Last timestep only |
+| `keras.layers.Conv1D(32, 3, padding="same")` | `nn.Conv1d(in, 32, 3, padding=1)` | Note: Conv**1d** (lowercase d) |
+| `keras.layers.Dense(N)` | `nn.Linear(in, N)` | |
+| `keras.layers.GlobalAveragePooling1D()` | `x.mean(dim=1)` | Manual |
+| `keras.layers.MultiHeadAttention(n_heads, key_dim)` | `nn.MultiheadAttention(embed_dim, n_heads, batch_first=True)` | |
+| `keras.layers.LayerNormalization()` | `nn.LayerNorm(dim)` | |
+| `keras.layers.Embedding(seq_len, d_model)` | `nn.Embedding(seq_len, d_model)` | Same API |
+| `model.compile(Adam(1e-3), loss='mse')` | `optim.Adam(params, lr=1e-3)` + `nn.MSELoss()` | |
+| `model.fit(X, y, epochs, batch_size, val_split, callbacks=[EarlyStopping])` | Manual training loop with val split + best-state tracking | |
+| `model.predict(X, verbose=0)` | `model.eval(); with torch.no_grad(): model(X)` | |
+| `keras.backend.clear_session()` | `torch.cuda.empty_cache()` (optional) | |
+| `tf.random.set_seed(42)` | `torch.manual_seed(42); torch.cuda.manual_seed_all(42)` | + cudnn flags |
+
+### New Methods (29 total, up from 21)
+
+| Group | Methods | Type | New? |
+|-------|---------|------|------|
+| A (4) | linear, cubic, akima, nearest | Interpolation | — |
+| B (3) | mdv, rolling, stl | Statistical | — |
+| C (3) | rf, xgb, knn | ML (sap lags) | — |
+| Ce (3) | rf_env, xgb_env, knn_env | ML (sap+env) | — |
+| Cf (3) | rf_envonly, gpr_envonly, kr_envonly | ML (env only) | **NEW** |
+| D (6) | lstm, cnn, cnn_lstm, transformer, bilstm, gru | DL (sap only) | **+2 NEW** |
+| De (6) | lstm_env, cnn_env, cnn_lstm_env, transformer_env, bilstm_env, gru_env | DL (sap+env) | **+2 NEW** |
+| E (2) | arx, armax | Time-series | **NEW** |
+
+### PyTorch Model Architectures
+
+**LSTMModel** (replaces _build_lstm):
+- LSTM(n_features→64, batch_first=True) → take all timesteps
+- Dropout(0.1)
+- LSTM(64→64, batch_first=True) → take last timestep
+- Dropout(0.1)
+- Linear(64→1)
+
+**BiLSTMModel** (new):
+- LSTM(n_features→64, bidirectional=True, batch_first=True) → 128-dim output
+- Dropout(0.1)
+- Linear(128→1) on last timestep
+
+**GRUModel** (new):
+- GRU(n_features→64, num_layers=2, dropout=0.1, batch_first=True) → last timestep
+- Linear(64→1)
+
+**CNNModel** (replaces _build_cnn):
+- Conv1d(n_features→32, k=3, pad=1) + ReLU
+- Conv1d(32→64, k=3, pad=1) + ReLU
+- Conv1d(64→32, k=3, pad=1) + ReLU
+- GlobalAvgPool (mean over time dim)
+- Linear(32→32) + ReLU
+- Linear(32→1)
+
+**CNNLSTMModel** (replaces _build_cnn_lstm):
+- Conv1d(n_features→32, k=3, pad=1) + ReLU
+- Conv1d(32→64, k=3, pad=1) + ReLU
+- Permute back to (batch, seq, 64)
+- LSTM(64→64, batch_first=True) → last timestep
+- Dropout(0.1)
+- Linear(64→1)
+
+**TransformerModel** (replaces _build_transformer):
+- Linear(n_features→64)
+- PositionalEmbedding(48, 64)
+- 2× TransformerEncoderLayer(d_model=64, nhead=2, dim_feedforward=128, dropout=0.1)
+- GlobalAvgPool
+- Linear(64→1)
+
+### GPU Execution Strategy
+
+Primary partition: **gpu4090** (6× RTX 4090, 24 GB VRAM each, zen4 arch)
+Fallback: **gpua100** (4× A100, 40 GB each)
+
+**One-model-per-GPU** pattern:
+- 6 GPU workers, each owns one GPU via CUDA_VISIBLE_DEVICES
+- Round-robin segment distribution (~80 segments ÷ 6 GPUs ≈ 14 per GPU)
+- Train once on ground truth, predict across all gap sizes/replicates
+- Move model to CPU before returning results (picklability)
+- `torch.cuda.empty_cache()` between segments
+
+### Hybrid SLURM Job
+
+```
+Step 1 (CPU): zen4 --exclusive --cpus-per-task=192
+  → A/B/C/Ce/Cf/E methods (parallelized via joblib)
+
+Step 2 (GPU): gpu4090 --gres=gpu:6 --cpus-per-task=32
+  → D/De methods (6 GPU workers via joblib)
+  → Dependency: afterok:$STEP1_JOB_ID
+```
+
+### Parallelization Config Update
+
+| Group | Workers | Threads/Worker | Backend | Notes |
+|-------|---------|----------------|---------|-------|
+| A | 48 | 1 | CPU/loky | unchanged |
+| B | 32 | 2 | CPU/loky | unchanged |
+| C | 16 | 8 | CPU/loky | unchanged |
+| Ce | 16 | 8 | CPU/loky | unchanged |
+| Cf | 16 | 8 | CPU/loky | new group |
+| D | 6 | 5 | GPU/loky | **GPU-aware** |
+| De | 6 | 5 | GPU/loky | **GPU-aware** |
+| E | 32 | 2 | CPU/loky | new group |
+
+### Expected Runtime (v3)
+
+| Group | v2 (CPU sequential DL) | v3 (GPU parallel) |
+|-------|----------------------|-------------------|
+| A/B/C/Ce (14 methods) | ~45min | ~45min (unchanged) |
+| Cf (3 new ML methods) | — | ~15min |
+| E (2 new TS methods) | — | ~10min |
+| D (6 DL methods) | ~8h sequential | ~15min (6 GPUs) |
+| De (6 DL methods) | ~8h sequential | ~15min (6 GPUs) |
+| **Total (29 methods)** | **~17h** | **~1.5h** |

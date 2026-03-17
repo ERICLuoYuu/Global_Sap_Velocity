@@ -18,6 +18,10 @@
 #   gpua100  — 4× A100 (40 GB each), --gres=gpu:4
 #   gpu3090  — 8× RTX 3090 (24 GB each), --gres=gpu:8
 
+# Load CUDA toolkit (palma/2023b is a prerequisite for CUDA module)
+module load palma/2023b
+module load CUDA/12.4.0
+
 source /scratch/tmp/yluo2/gsv/.venv/bin/activate
 export PYTHONPATH=/scratch/tmp/yluo2/gsv-wt/fix-gap-benchmark
 cd /scratch/tmp/yluo2/gsv-wt/fix-gap-benchmark
@@ -26,6 +30,20 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
+
+# Exclude any broken GPUs (r12n08 GPU1 has hardware error).
+# Let SLURM's --gres=gpu:N handle device assignment — only override if needed.
+# Detect working GPUs and export CUDA_VISIBLE_DEVICES
+WORKING_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader,nounits 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+if [ -n "$WORKING_GPUS" ]; then
+    export CUDA_VISIBLE_DEVICES="$WORKING_GPUS"
+    echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+fi
+
+# Show CUDA driver version
+nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | xargs -I{} echo "NVIDIA Driver: {}"
+echo "CUDA module: $(module list 2>&1 | grep -i cuda || echo 'not loaded')"
+echo "LD_LIBRARY_PATH includes cuda: $(echo $LD_LIBRARY_PATH | tr ':' '\n' | grep -i cuda | head -1)"
 
 echo "============================================================"
 echo "  Gap Benchmark v3 — gpu4090 / 6h / 6 GPUs / PyTorch CUDA"

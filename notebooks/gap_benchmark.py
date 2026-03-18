@@ -1300,32 +1300,105 @@ GROUP_COLORS.update({"Ce": "#E65100", "De": "#6A1B9A"})
 # ── Metrics ──────────────────────────────────────────────────────────────────
 def compute_metrics(true_vals: np.ndarray, pred_vals: np.ndarray) -> dict:
     """
-    Compute RMSE, MAE, R², MAPE, NSE — robust to NaNs and edge cases.
+    Compute per-replicate metrics AND sufficient statistics for pooled aggregation.
 
-    NSE ≡ R² (using observed mean as baseline, standard hydrological form).
-    MAPE skips zero-valued actuals to avoid division by zero.
+    Per-replicate: RMSE, MAE, R², MAPE, NSE (computed on this gap only).
+    Sufficient statistics: n_points, ss_res, sum_abs_err, sum_true, sum_true_sq
+    — these enable exact pooled R²/RMSE/MAE across all replicates without
+    storing raw predictions (Moffat et al. 2007 pooled approach).
     """
     _m = ~(np.isnan(true_vals) | np.isnan(pred_vals))
     t, p = true_vals[_m], pred_vals[_m]
-    _nan5 = {k: np.nan for k in ["rmse", "mae", "r2", "mape", "nse"]}
+    _nans = {
+        k: np.nan
+        for k in [
+            "rmse",
+            "mae",
+            "r2",
+            "mape",
+            "nse",
+            "n_points",
+            "ss_res",
+            "sum_abs_err",
+            "sum_true",
+            "sum_true_sq",
+        ]
+    }
     if len(t) == 0:
-        return _nan5
-    rmse = float(np.sqrt(np.mean((t - p) ** 2)))
-    mae = float(np.mean(np.abs(t - p)))
-    ss_res = float(np.sum((t - p) ** 2))
+        return _nans
+    n = len(t)
+    residuals = t - p
+    ss_res = float(np.sum(residuals**2))
+    sum_abs_err = float(np.sum(np.abs(residuals)))
     ss_tot = float(np.sum((t - t.mean()) ** 2))
+
+    # Per-replicate metrics (backward compatible)
+    rmse = float(np.sqrt(ss_res / n))
+    mae = float(sum_abs_err / n)
     if ss_tot > 1e-12:
         r2 = float(1.0 - ss_res / ss_tot)
+        nse = r2
     else:
         r2 = 1.0 if ss_res < 1e-12 else 0.0
-    # NSE computed independently (same formula, but decoupled for future changes)
-    if ss_tot > 1e-12:
-        nse = float(1.0 - ss_res / ss_tot)
-    else:
-        nse = 1.0 if ss_res < 1e-12 else 0.0
+        nse = r2
     nz = np.abs(t) > 1e-10
-    mape = float(np.mean(np.abs((t[nz] - p[nz]) / t[nz])) * 100) if nz.sum() > 0 else np.nan
-    return {"rmse": rmse, "mae": mae, "r2": r2, "mape": mape, "nse": nse}
+    mape = float(np.mean(np.abs(residuals[nz] / t[nz])) * 100) if nz.sum() > 0 else np.nan
+
+    return {
+        "rmse": rmse,
+        "mae": mae,
+        "r2": r2,
+        "mape": mape,
+        "nse": nse,
+        # Sufficient statistics for pooled aggregation
+        "n_points": n,
+        "ss_res": ss_res,
+        "sum_abs_err": sum_abs_err,
+        "sum_true": float(np.sum(t)),
+        "sum_true_sq": float(np.sum(t**2)),
+    }
+
+
+def compute_pooled_metrics(group_df: "pd.DataFrame") -> dict:
+    """
+    Compute pooled R², RMSE, MAE, NSE from sufficient statistics.
+
+    Pools all gap positions across replicates and sites for one
+    (method, gap_size, scale) combination. This is the standard approach
+    in gap-filling literature (Moffat et al. 2007, Reichstein et al. 2005).
+
+    R² = 1 - Σss_res / ss_tot_pooled
+    where ss_tot_pooled = Σyᵢ² - N·ȳ² (algebraic identity).
+    """
+    valid = group_df.dropna(subset=["n_points"])
+    if valid.empty:
+        return {"r2_pooled": np.nan, "rmse_pooled": np.nan, "mae_pooled": np.nan, "nse_pooled": np.nan, "n_total": 0}
+    N = valid["n_points"].sum()
+    if N == 0:
+        return {"r2_pooled": np.nan, "rmse_pooled": np.nan, "mae_pooled": np.nan, "nse_pooled": np.nan, "n_total": 0}
+    total_ss_res = valid["ss_res"].sum()
+    total_abs_err = valid["sum_abs_err"].sum()
+    total_sum_true = valid["sum_true"].sum()
+    total_sum_true_sq = valid["sum_true_sq"].sum()
+
+    pooled_mean = total_sum_true / N
+    pooled_ss_tot = total_sum_true_sq - N * pooled_mean**2
+
+    rmse_pooled = float(np.sqrt(total_ss_res / N))
+    mae_pooled = float(total_abs_err / N)
+
+    if pooled_ss_tot > 1e-12:
+        r2_pooled = float(1.0 - total_ss_res / pooled_ss_tot)
+    else:
+        r2_pooled = 1.0 if total_ss_res < 1e-12 else 0.0
+
+    return {
+        "r2_pooled": r2_pooled,
+        "rmse_pooled": rmse_pooled,
+        "mae_pooled": mae_pooled,
+        "nse_pooled": r2_pooled,
+        "n_total": int(N),
+    }
 
 
 # ── Phase 5: Full benchmark loop ─────────────────────────────────────────────
@@ -1363,14 +1436,18 @@ def _method_ls(m: str) -> str:
 def find_reliability_threshold(
     df_agg: pd.DataFrame,
     scale: str,
-    metric: str = "r2_mean",
+    metric: str = "r2_pooled",
     thr: float = R2_THRESHOLD,
 ) -> "int | None":
     """
     Return the smallest gap_size where best-method metric drops below thr.
 
     Returns None when all gap sizes meet the threshold.
+    Uses pooled R² by default (standard gap-filling literature approach).
+    Falls back to r2_mean if r2_pooled column is missing.
     """
+    if metric == "r2_pooled" and metric not in df_agg.columns:
+        metric = "r2_mean"
     _sub = df_agg[df_agg.time_scale == scale]
     _best = _sub.groupby("gap_size")[metric].max().reset_index()
     _below = _best[_best[metric] < thr]
@@ -1921,7 +1998,21 @@ def _benchmark_one_segment(
                     # Env method with failed model cache (insufficient training rows).
                     # Emit NaN metrics rather than silently falling back to linear
                     # (which would misattribute linear results to the env method).
-                    met = {k: np.nan for k in ["rmse", "mae", "r2", "mape", "nse"]}
+                    met = {
+                        k: np.nan
+                        for k in [
+                            "rmse",
+                            "mae",
+                            "r2",
+                            "mape",
+                            "nse",
+                            "n_points",
+                            "ss_res",
+                            "sum_abs_err",
+                            "sum_true",
+                            "sum_true_sq",
+                        ]
+                    }
                     results.append(
                         {
                             "time_scale": scale,
@@ -2231,11 +2322,38 @@ def run_phase5(ground_truth_store):
     )
     df_agg.to_csv(STATS_OUT / "benchmark_aggregated.csv", index=False)
 
-    print(f"Aggregated: {len(df_agg)} rows")
-    print("\nTop 5 methods @ hourly 24h gap (by mean R²):")
+    # ── Pooled aggregation (standard gap-filling literature approach) ─────────
+    # Compute pooled R², RMSE, MAE from sufficient statistics across all
+    # replicates and sites for each (method, gap_size, scale) combination.
+    # This avoids the per-replicate R² instability for small gaps.
+    _pooled_rows = []
+    for _gkey, _gdf in df_results.groupby(["time_scale", "method", "group", "gap_size"]):
+        _pm = compute_pooled_metrics(_gdf)
+        _pooled_rows.append(
+            {
+                "time_scale": _gkey[0],
+                "method": _gkey[1],
+                "group": _gkey[2],
+                "gap_size": _gkey[3],
+                **_pm,
+            }
+        )
+    df_agg_pooled = pd.DataFrame(_pooled_rows)
+    # Merge pooled metrics into the per-replicate aggregation
+    df_agg = df_agg.merge(
+        df_agg_pooled[
+            ["time_scale", "method", "gap_size", "r2_pooled", "rmse_pooled", "mae_pooled", "nse_pooled", "n_total"]
+        ],
+        on=["time_scale", "method", "gap_size"],
+        how="left",
+    )
+    df_agg.to_csv(STATS_OUT / "benchmark_aggregated.csv", index=False)
+
+    print(f"Aggregated: {len(df_agg)} rows (with pooled metrics)")
+    print("\nTop 5 methods @ hourly 24h gap (by pooled R²):")
     _sub24 = df_agg[(df_agg.time_scale == "hourly") & (df_agg.gap_size == 24)]
     if len(_sub24):
-        print(_sub24.nlargest(5, "r2_mean")[["method", "r2_mean", "r2_std", "rmse_mean"]].to_string(index=False))
+        print(_sub24.nlargest(5, "r2_pooled")[["method", "r2_pooled", "rmse_pooled", "r2_mean"]].to_string(index=False))
 
     return df_results, df_agg
 

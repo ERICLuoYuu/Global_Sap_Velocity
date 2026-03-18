@@ -2032,7 +2032,21 @@ def _benchmark_one_segment(
                 pv = filled.iloc[gidx].values
                 met = compute_metrics(tv, pv)
             except Exception:
-                met = {k: np.nan for k in ["rmse", "mae", "r2", "mape", "nse"]}
+                met = {
+                    k: np.nan
+                    for k in [
+                        "rmse",
+                        "mae",
+                        "r2",
+                        "mape",
+                        "nse",
+                        "n_points",
+                        "ss_res",
+                        "sum_abs_err",
+                        "sum_true",
+                        "sum_true_sq",
+                    ]
+                }
             results.append(
                 {
                     "time_scale": scale,

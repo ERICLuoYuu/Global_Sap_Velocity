@@ -35,6 +35,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rasterio
+import rasterio.features
+import rasterio.transform
 import xarray as xr
 
 # ---------------------------------------------------------------------------
@@ -180,20 +182,118 @@ def _download_with_retry(client, dataset: str, request: dict, target: Path) -> P
                 raise
 
 
+MAX_NC_SIZE_BYTES: int = 10 * 1024**3  # 10 GB upper bound for a single NC
+
+
 def _unzip_netcdf(zip_path: Path, extract_dir: Path) -> Path:
-    """Extract a single NetCDF from a CDS-delivered ZIP archive."""
+    """Extract a single NetCDF from a CDS-delivered ZIP archive.
+
+    Guards against path-traversal entries and oversized (zip-bomb) files.
+    """
     extract_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zf:
         nc_names = [n for n in zf.namelist() if n.endswith(".nc")]
         if not nc_names:
             raise FileNotFoundError(f"No .nc file found inside {zip_path}")
-        zf.extract(nc_names[0], extract_dir)
-        return extract_dir / nc_names[0]
+        member_name = nc_names[0]
+
+        # Zip-bomb guard: reject if claimed uncompressed size exceeds limit
+        info = zf.getinfo(member_name)
+        if info.file_size > MAX_NC_SIZE_BYTES:
+            raise ValueError(
+                f"ZIP entry {member_name!r} claims {info.file_size / 1e9:.1f} GB, "
+                f"exceeding {MAX_NC_SIZE_BYTES / 1e9:.0f} GB limit"
+            )
+
+        # Path-traversal guard: use only the basename
+        safe_name = Path(member_name).name
+        target = (extract_dir / safe_name).resolve()
+        if not str(target).startswith(str(extract_dir.resolve())):
+            raise ValueError(f"ZIP entry would escape extract dir: {member_name!r}")
+
+        with zf.open(member_name) as src, open(target, "wb") as dst:
+            dst.write(src.read())
+        return target
+
+
+def _validate_cache(nc_path: Path, expected_short_names: list[str]) -> bool:
+    """Check that a cached NetCDF contains all expected variables.
+
+    Returns True if the file exists and has all expected variables.
+    If the file is missing variables or corrupt, it is deleted and False
+    is returned so the caller re-downloads.
+    """
+    if not nc_path.exists():
+        return False
+    try:
+        with xr.open_dataset(nc_path) as ds:
+            present = set(ds.data_vars)
+        # File handle fully released after context manager exit
+        missing = set(expected_short_names) - present
+        if missing:
+            logger.warning(
+                "Cache %s missing vars %s — will re-download",
+                nc_path.name,
+                missing,
+            )
+            nc_path.unlink()
+            return False
+        return True
+    except Exception:
+        logger.warning("Cache %s is corrupt — will re-download", nc_path.name, exc_info=True)
+        nc_path.unlink(missing_ok=True)
+        return False
+
+
+# Expected short names inside NetCDF files (used for cache validation)
+_INST_SHORT_NAMES: list[str] = ["t2m", "d2m", "u10", "v10", "swvl1", "stl1"]
+_ACCUM_SHORT_NAMES: list[str] = ["tp", "ssrd", "pev"]
 
 
 # =========================================================================
 # Download functions
 # =========================================================================
+
+
+def _download_one_stat(
+    client,
+    stat: str,
+    year: int,
+    month: int,
+    day_list: list[str],
+    nc_dir: Path,
+) -> tuple[str, Path]:
+    """Download a single daily-statistic and return ``(tag, nc_path)``."""
+    tag = stat.replace("daily_", "")  # mean / minimum / maximum
+    zip_target = nc_dir / f"inst_{tag}_{year}_{month:02d}.zip"
+    nc_target = nc_dir / f"inst_{tag}_{year}_{month:02d}.nc"
+
+    if _validate_cache(nc_target, _INST_SHORT_NAMES):
+        logger.info("Valid cache — skipping download: %s", nc_target)
+        return tag, nc_target
+
+    request = {
+        "variable": CDS_INSTANTANEOUS_VARS,
+        "year": str(year),
+        "month": f"{month:02d}",
+        "day": day_list,
+        "daily_statistic": stat,
+        "time_zone": "utc+00:00",
+        "frequency": "1_hourly",
+        "area": CDS_AREA,
+        "data_format": "netcdf_zip",
+    }
+
+    _download_with_retry(client, "derived-era5-land-daily-statistics", request, zip_target)
+
+    # Extract NetCDF from ZIP, clean up intermediate on success or failure
+    try:
+        extracted = _unzip_netcdf(zip_target, nc_dir)
+        extracted.rename(nc_target)
+    finally:
+        zip_target.unlink(missing_ok=True)
+    logger.info("Extracted %s", nc_target)
+    return tag, nc_target
 
 
 def download_instantaneous_vars(
@@ -207,46 +307,58 @@ def download_instantaneous_vars(
     Uses the ``derived-era5-land-daily-statistics`` dataset which provides
     pre-computed daily statistics so we do not need to aggregate ourselves.
 
-    Returns a dict mapping statistic tag (``mean``, ``min``, ``max``) to the
-    downloaded NetCDF path.
+    All three statistics are downloaded **in parallel** via a thread pool.
+    Each thread uses its own CDS client for thread safety.
+
+    Returns a dict mapping statistic tag (``mean``, ``minimum``, ``maximum``)
+    to the downloaded NetCDF path.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     days_in_month = calendar.monthrange(year, month)[1]
     day_list = [f"{d:02d}" for d in range(1, days_in_month + 1)]
+    nc_dir = output_dir / "instantaneous"
+    nc_dir.mkdir(parents=True, exist_ok=True)
 
-    downloaded: dict[str, Path] = {}
+    stats = ("daily_mean", "daily_minimum", "daily_maximum")
 
-    for stat in ("daily_mean", "daily_minimum", "daily_maximum"):
-        tag = stat.replace("daily_", "")  # mean / minimum / maximum
-        nc_dir = output_dir / "instantaneous"
-        nc_dir.mkdir(parents=True, exist_ok=True)
-        zip_target = nc_dir / f"inst_{tag}_{year}_{month:02d}.zip"
+    # Check if all 3 are already cached and valid
+    all_cached = True
+    for stat in stats:
+        tag = stat.replace("daily_", "")
         nc_target = nc_dir / f"inst_{tag}_{year}_{month:02d}.nc"
+        if not _validate_cache(nc_target, _INST_SHORT_NAMES):
+            all_cached = False
+            break
 
-        if nc_target.exists():
-            logger.info("Skipping download — already exists: %s", nc_target)
-            downloaded[tag] = nc_target
-            continue
-
-        request = {
-            "variable": CDS_INSTANTANEOUS_VARS,
-            "year": str(year),
-            "month": f"{month:02d}",
-            "day": day_list,
-            "daily_statistic": stat,
-            "time_zone": "utc+00:00",
-            "frequency": "1_hourly",
-            "area": CDS_AREA,
-            "data_format": "netcdf_zip",
+    if all_cached:
+        logger.info("All 3 instantaneous stats cached and valid — skipping download")
+        return {
+            stat.replace("daily_", ""): nc_dir / f"inst_{stat.replace('daily_', '')}_{year}_{month:02d}.nc"
+            for stat in stats
         }
 
-        _download_with_retry(client, "derived-era5-land-daily-statistics", request, zip_target)
+    # Download all 3 stats in parallel — each thread gets its own CDS client
+    from concurrent.futures import as_completed
 
-        # Extract NetCDF from ZIP
-        extracted = _unzip_netcdf(zip_target, nc_dir)
-        extracted.rename(nc_target)
-        zip_target.unlink(missing_ok=True)
-        downloaded[tag] = nc_target
-        logger.info("Extracted %s", nc_target)
+    logger.info("Submitting 3 instantaneous stat downloads in parallel")
+    downloaded: dict[str, Path] = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {
+            pool.submit(
+                _download_one_stat,
+                _cds_client(),
+                stat,
+                year,
+                month,
+                day_list,
+                nc_dir,
+            ): stat
+            for stat in stats
+        }
+        for fut in as_completed(futures):
+            tag, path = fut.result()
+            downloaded[tag] = path
 
     return downloaded
 
@@ -260,10 +372,10 @@ def download_accumulated_vars(
 ) -> Path:
     """Download accumulated variables from ``reanalysis-era5-land``.
 
-    For **daily** mode we only request ``time=00:00`` (which holds the
-    previous day's 24-h accumulation).  We also request day 1 of the
-    *next* month at 00:00 so that the last day of the target month is
-    covered after the -1 day shift.
+    For **daily** mode we request ``time=00:00`` for days 1..last of the
+    target month **plus** day 1 of the next month, all in a **single** CDS
+    request.  The 00:00 value contains the *previous* day's 24-h
+    accumulation, so timestamps are shifted by -1 day after download.
 
     For **hourly** mode we request all 24 time steps.
 
@@ -273,83 +385,72 @@ def download_accumulated_vars(
     nc_dir.mkdir(parents=True, exist_ok=True)
     nc_target = nc_dir / f"accum_{time_scale}_{year}_{month:02d}.nc"
 
-    if nc_target.exists():
-        logger.info("Skipping download — already exists: %s", nc_target)
+    if _validate_cache(nc_target, _ACCUM_SHORT_NAMES):
+        logger.info("Valid accumulated cache — skipping download: %s", nc_target)
         return nc_target
 
     days_in_month = calendar.monthrange(year, month)[1]
 
     if time_scale == "daily":
         # Accumulated variables: 00:00 on day D contains the 24h total for day D-1.
-        # To get all days of month M, we need timestamps from day 2 of month M
-        # through day 1 of month M+1 (inclusive).
-        # We download days 1..last of month M (day 1 yields D-1 = prev month's last day,
-        # which is filtered out after the -1 day shift) plus day 1 of next month
-        # (which yields the last day of month M after the shift).
-        day_list = [f"{d:02d}" for d in range(1, days_in_month + 1)]
-
-        # Determine next month
+        # Single request covering target month + day 1 of next month.
         if month == 12:
             next_year, next_month = year + 1, 1
         else:
             next_year, next_month = year, month + 1
 
-        # Download current month
-        zip_target = nc_dir / f"accum_{time_scale}_{year}_{month:02d}.zip"
-        request_main = {
+        # Build a single request spanning both months
+        day_list = [f"{d:02d}" for d in range(1, days_in_month + 1)]
+        request_years = [str(year)]
+        request_months = [f"{month:02d}"]
+        request_days = list(day_list)  # copy
+
+        # Add day 1 of next month
+        if next_year != year:
+            request_years.append(str(next_year))
+        if f"{next_month:02d}" not in request_months:
+            request_months.append(f"{next_month:02d}")
+        if "01" not in request_days:
+            request_days.append("01")
+
+        import uuid
+
+        raw_target = nc_dir / f"accum_raw_{year}_{month:02d}_{uuid.uuid4().hex[:8]}.nc"
+        request = {
             "variable": CDS_ACCUMULATED_VARS,
-            "year": str(year),
-            "month": f"{month:02d}",
-            "day": day_list,
+            "year": request_years,
+            "month": request_months,
+            "day": request_days,
             "time": "00:00",
             "area": CDS_AREA,
             "data_format": "netcdf",
         }
-        _download_with_retry(client, "reanalysis-era5-land", request_main, zip_target)
-        # reanalysis-era5-land may return plain NC (not zipped)
-        if zipfile.is_zipfile(zip_target):
-            extracted = _unzip_netcdf(zip_target, nc_dir)
-            main_nc = nc_dir / f"accum_main_{year}_{month:02d}.nc"
-            extracted.rename(main_nc)
-            zip_target.unlink(missing_ok=True)
-        else:
-            main_nc = zip_target  # already a plain .nc
+        _download_with_retry(client, "reanalysis-era5-land", request, raw_target)
 
-        # Download day 1 of next month (single day)
-        extra_target = nc_dir / f"accum_extra_{next_year}_{next_month:02d}.nc"
-        request_extra = {
-            "variable": CDS_ACCUMULATED_VARS,
-            "year": str(next_year),
-            "month": f"{next_month:02d}",
-            "day": "01",
-            "time": "00:00",
-            "area": CDS_AREA,
-            "data_format": "netcdf",
-        }
-        _download_with_retry(client, "reanalysis-era5-land", request_extra, extra_target)
-
-        # Merge the two files and shift time by -1 day
         try:
-            ds_main = xr.open_dataset(main_nc)
-            ds_extra = xr.open_dataset(extra_target)
-            ds_combined = xr.concat([ds_main, ds_extra], dim="time")
-            ds_main.close()
-            ds_extra.close()
+            # CDS may return ZIP even for plain netcdf format
+            if zipfile.is_zipfile(raw_target):
+                extracted = _unzip_netcdf(raw_target, nc_dir)
+                raw_target.unlink(missing_ok=True)
+                raw_target = extracted
+
+            # Normalise and shift time by -1 day.
+            # Load into memory so the file handle is released before cleanup.
+            with xr.open_dataset(raw_target) as ds_opened:
+                ds_raw = _normalise_ds(ds_opened.load())
 
             # CRITICAL: shift timestamps by -1 day
             # 00:00 on day D contains the accumulation for day D-1
-            ds_combined = ds_combined.assign_coords(time=ds_combined["time"] - pd.Timedelta(days=1))
+            shifted_times = pd.DatetimeIndex(ds_raw["time"].values) - pd.Timedelta(days=1)
+            ds_raw = ds_raw.assign_coords(time=shifted_times)
 
             # Keep only the target month after shift
-            time_mask = (ds_combined["time"].dt.year == year) & (ds_combined["time"].dt.month == month)
-            ds_month = ds_combined.sel(time=time_mask)
+            time_mask = (shifted_times.year == year) & (shifted_times.month == month)
+            ds_month = ds_raw.sel(time=time_mask)
             ds_month.to_netcdf(nc_target)
-            ds_month.close()
-            ds_combined.close()
         finally:
-            # Clean up intermediates even on error
-            main_nc.unlink(missing_ok=True)
-            extra_target.unlink(missing_ok=True)
+            # Clean up raw download even on error
+            raw_target.unlink(missing_ok=True)
 
     else:
         # Hourly mode: download all 24 timesteps
@@ -713,39 +814,118 @@ def _normalise_ds(ds: xr.Dataset) -> xr.Dataset:
     Also normalise coordinate names to ``latitude`` / ``longitude``.
     """
     rename_coords: dict[str, str] = {}
+    existing = set(ds.coords) | set(ds.dims)
     for c in ds.coords:
         cl = c.lower()
-        if cl == "lat":
+        if cl == "lat" and "latitude" not in existing:
             rename_coords[c] = "latitude"
-        elif cl == "lon":
+        elif cl == "lon" and "longitude" not in existing:
             rename_coords[c] = "longitude"
-        elif cl == "valid_time":
+        elif cl == "valid_time" and "time" not in existing:
             rename_coords[c] = "time"
     if rename_coords:
         ds = ds.rename(rename_coords)
 
-    # Handle expver dimension (CDS includes experiment version for multi-version data)
-    if "expver" in ds.dims or "expver" in ds.coords:
-        ds = ds.sel(expver=ds["expver"].values[-1], drop=True)
-        logger.debug("Dropped expver dimension, selected version %s", ds.attrs.get("expver", "last"))
-
-    # Handle number dimension (ensemble member — deterministic downloads sometimes include it)
-    if "number" in ds.dims:
-        ds = ds.isel(number=0, drop=True)
-        logger.debug("Dropped number dimension (ensemble member)")
-
-    # Handle step dimension (forecast step — can appear in hourly requests)
-    if "step" in ds.dims:
-        ds = ds.isel(step=0, drop=True)
-        logger.debug("Dropped step dimension")
+    # Drop nuisance coordinates/dimensions that CDS sometimes includes
+    for nuisance in ("expver", "number", "step"):
+        if nuisance in ds.dims:
+            # It's a proper dimension — select the first (or last for expver)
+            idx = -1 if nuisance == "expver" else 0
+            ds = ds.isel({nuisance: idx}, drop=True)
+            logger.debug("Dropped %s dimension", nuisance)
+        elif nuisance in ds.coords:
+            # It's a scalar or non-indexed coordinate — just drop it
+            ds = ds.drop_vars(nuisance)
+            logger.debug("Dropped %s coordinate", nuisance)
 
     rename_vars: dict[str, str] = {}
+    existing_vars = set(ds.data_vars)
     for v in ds.data_vars:
-        if v in _CDS_SHORT_TO_INTERNAL:
-            rename_vars[v] = _CDS_SHORT_TO_INTERNAL[v]
+        target = _CDS_SHORT_TO_INTERNAL.get(v)
+        if target and target not in existing_vars:
+            rename_vars[v] = target
     if rename_vars:
         ds = ds.rename(rename_vars)
 
+    return ds
+
+
+def _build_forest_mask(
+    shapefile_path: str | Path,
+    lats: np.ndarray,
+    lons: np.ndarray,
+) -> np.ndarray:
+    """Rasterise a shapefile onto the ERA5 lat/lon grid.
+
+    Returns a boolean array of shape ``(len(lats), len(lons))`` that is
+    ``True`` for pixels whose centre falls inside (or is touched by) the
+    shapefile geometry and ``False`` elsewhere.
+
+    If the shapefile cannot be read, a warning is emitted and an all-True
+    mask is returned (i.e. no masking).
+    """
+    import geopandas as gpd
+
+    shp_path = Path(shapefile_path)
+    if not shp_path.exists():
+        logger.warning("Shapefile %s not found — skipping forest mask", shp_path)
+        return np.ones((len(lats), len(lons)), dtype=bool)
+
+    try:
+        gdf = gpd.read_file(shp_path)
+        if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs("EPSG:4326")
+
+        nlat, nlon = len(lats), len(lons)
+
+        # Build an affine transform for the grid.
+        # CDS grids list latitudes descending (N→S) and longitudes ascending.
+        lat_res = abs(lats[1] - lats[0]) if nlat > 1 else 0.1
+        lon_res = abs(lons[1] - lons[0]) if nlon > 1 else 0.1
+
+        # Upper-left corner (pixel edge, not centre)
+        west = float(lons.min()) - lon_res / 2
+        north = float(lats.max()) + lat_res / 2
+
+        transform = rasterio.transform.from_origin(west, north, lon_res, lat_res)
+
+        # Rasterise: 1 inside geometry, 0 outside
+        shapes = [(geom, 1) for geom in gdf.geometry if geom is not None]
+        mask = rasterio.features.rasterize(
+            shapes,
+            out_shape=(nlat, nlon),
+            transform=transform,
+            fill=0,
+            dtype=np.uint8,
+            all_touched=True,
+        )
+        n_inside = int(mask.sum())
+        logger.info(
+            "Forest mask: %d / %d pixels (%.1f%%) inside shapefile",
+            n_inside,
+            nlat * nlon,
+            100.0 * n_inside / max(nlat * nlon, 1),
+        )
+        return mask.astype(bool)
+
+    except Exception:
+        logger.warning("Failed to build forest mask — skipping", exc_info=True)
+        return np.ones((len(lats), len(lons)), dtype=bool)
+
+
+def _apply_mask_to_ds(ds: xr.Dataset, mask_2d: np.ndarray) -> xr.Dataset:
+    """Set all data variables to NaN where *mask_2d* is False.
+
+    *mask_2d* has shape ``(nlat, nlon)``.  For datasets with a time dim
+    the mask is broadcast automatically.
+    """
+    nan_mask = xr.DataArray(
+        ~mask_2d,  # True where we want NaN
+        dims=["latitude", "longitude"],
+        coords={"latitude": ds["latitude"], "longitude": ds["longitude"]},
+    )
+    for var in ds.data_vars:
+        ds[var] = ds[var].where(~nan_mask)
     return ds
 
 
@@ -755,6 +935,7 @@ def build_prediction_dataset(
     output_dir: Path,
     time_scale: str = "daily",
     validate: bool = False,
+    shapefile: str | Path | None = None,
 ) -> list[Path]:
     """Orchestrate the full pipeline for one month.
 
@@ -776,17 +957,31 @@ def build_prediction_dataset(
     csv_dir = output_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
 
-    client = _cds_client()
-
     # ------------------------------------------------------------------
-    # Step 1: Download
+    # Step 1: Download (instantaneous + accumulated in parallel)
     # ------------------------------------------------------------------
     if time_scale == "daily":
-        logger.info("=== Downloading instantaneous daily-stat variables ===")
-        inst_paths = download_instantaneous_vars(client, year, month, dl_dir)
+        from concurrent.futures import ThreadPoolExecutor
 
-        logger.info("=== Downloading accumulated variables ===")
-        accum_path = download_accumulated_vars(client, year, month, dl_dir, time_scale="daily")
+        logger.info("=== Downloading inst + accum in parallel ===")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_inst = pool.submit(
+                download_instantaneous_vars,
+                _cds_client(),
+                year,
+                month,
+                dl_dir,
+            )
+            fut_accum = pool.submit(
+                download_accumulated_vars,
+                _cds_client(),
+                year,
+                month,
+                dl_dir,
+                "daily",
+            )
+            inst_paths = fut_inst.result()
+            accum_path = fut_accum.result()
 
         # Load datasets
         ds_mean = _normalise_ds(xr.open_dataset(inst_paths["mean"]))
@@ -797,13 +992,26 @@ def build_prediction_dataset(
         lats = ds_mean["latitude"].values
         lons = ds_mean["longitude"].values
         times = pd.DatetimeIndex(ds_mean["time"].values)
+
+        # Apply forest mask (NaN outside shapefile geometry)
+        if shapefile is not None:
+            forest_mask = _build_forest_mask(shapefile, lats, lons)
+            ds_mean = _apply_mask_to_ds(ds_mean, forest_mask)
+            ds_min = _apply_mask_to_ds(ds_min, forest_mask)
+            ds_max = _apply_mask_to_ds(ds_max, forest_mask)
+            ds_accum = _apply_mask_to_ds(ds_accum, forest_mask)
     else:
         logger.info("=== Downloading hourly variables ===")
-        accum_path = download_accumulated_vars(client, year, month, dl_dir, time_scale="hourly")
+        accum_path = download_accumulated_vars(_cds_client(), year, month, dl_dir, time_scale="hourly")
         ds_hourly = _normalise_ds(xr.open_dataset(accum_path))
         lats = ds_hourly["latitude"].values
         lons = ds_hourly["longitude"].values
         times = pd.DatetimeIndex(ds_hourly["time"].values)
+
+        # Apply forest mask (NaN outside shapefile geometry)
+        if shapefile is not None:
+            forest_mask = _build_forest_mask(shapefile, lats, lons)
+            ds_hourly = _apply_mask_to_ds(ds_hourly, forest_mask)
 
     logger.info("Grid: %d lats × %d lons, %d timesteps", len(lats), len(lons), len(times))
 
@@ -1230,6 +1438,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--output-dir", type=str, default=None, help="Output directory (default: config.ERA5LAND_TEMP_DIR)")
     p.add_argument("--validate", action="store_true", help="Run validation checks on each output file")
     p.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    p.add_argument(
+        "--shapefile",
+        type=str,
+        default=None,
+        help="Path to shapefile for forest masking (e.g. tree_cover_shapefile_dissolved.shp). "
+        "Pixels outside the shapefile geometry are set to NaN and excluded from output.",
+    )
     return p.parse_args(argv)
 
 
@@ -1237,14 +1452,18 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     _setup_logging(verbose=args.verbose)
 
+    if not 1950 <= args.year <= 2100:
+        raise ValueError(f"Year must be 1950-2100, got {args.year}")
     if not 1 <= args.month <= 12:
         raise ValueError(f"Month must be 1-12, got {args.month}")
 
-    output_dir = Path(args.output_dir) if args.output_dir else ERA5LAND_TEMP_DIR
+    output_dir = Path(args.output_dir).resolve() if args.output_dir else ERA5LAND_TEMP_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Processing ERA5-Land via CDS: year=%d month=%d scale=%s", args.year, args.month, args.time_scale)
     logger.info("Output directory: %s", output_dir)
+    if args.shapefile:
+        logger.info("Forest mask shapefile: %s", args.shapefile)
 
     written = build_prediction_dataset(
         year=args.year,
@@ -1252,6 +1471,7 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=output_dir,
         time_scale=args.time_scale,
         validate=args.validate,
+        shapefile=args.shapefile,
     )
 
     logger.info("Done. %d CSV files written to %s/csv/", len(written), output_dir)

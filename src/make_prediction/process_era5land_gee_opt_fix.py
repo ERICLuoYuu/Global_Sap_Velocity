@@ -418,17 +418,47 @@ class ERA5LandGEEProcessor:
             self.client = None
 
     def initialize_gee(self):
-        """Initialize the Google Earth Engine API."""
+        """Initialize the Google Earth Engine API.
+
+        Strategy: read stored credentials from ~/.config/earthengine/credentials
+        and build an OAuth2 Credentials object directly. This avoids gcloud ADC
+        flow which requires interactive browser auth on HPC compute nodes.
+        """
+        import json
+        from pathlib import Path
+
+        # Try multiple credential sources: EE credentials, then gcloud ADC
+        cred_paths = [
+            Path.home() / ".config" / "earthengine" / "credentials",
+            Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
+        ]
+        gee_project = getattr(config, "GEE_PROJECT", "era5download-447713")
         try:
-            # Initialize the Earth Engine API
-            ee.Authenticate()
-            ee.Initialize(project="ee-yuluo-2")
-            # ee.Initialize()
-            self.ee_initialized = True
-            print("Google Earth Engine initialized successfully")
+            cred_data = None
+            for cred_path in cred_paths:
+                if cred_path.exists():
+                    cred_data = json.loads(cred_path.read_text())
+                    break
+            if cred_data and "refresh_token" in cred_data:
+                from google.oauth2.credentials import Credentials
+
+                credentials = Credentials(
+                    token=None,
+                    refresh_token=cred_data["refresh_token"],
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=cred_data["client_id"],
+                    client_secret=cred_data["client_secret"],
+                )
+                ee.Initialize(credentials=credentials, project=gee_project)
+                self.ee_initialized = True
+                print("GEE initialized with stored credentials from", cred_path)
+            else:
+                ee.Initialize(project="ee-yuluo-2")
+                self.ee_initialized = True
+                print("GEE initialized via default credentials")
         except Exception as e:
-            print(f"Failed to initialize Google Earth Engine: {str(e)}")
-            print("You may need to authenticate first using 'earthengine authenticate'")
+            print(f"Failed to initialize GEE: {e}")
+            print("Run 'earthengine authenticate' on the login node first")
             self.ee_initialized = False
 
     def mask_zero_values(self, variables_to_check=None, threshold=1e-10, require_all_zero=True, apply_to_all=True):
@@ -2795,15 +2825,83 @@ class ERA5LandGEEProcessor:
             print("Using complete dataset as fallback.")
             return ds
 
+    def _build_forest_mask(self, shapefile_path, lats, lons):
+        """Rasterise a shapefile onto the ERA5 lat/lon grid.
+
+        Returns a boolean ndarray (nlat, nlon) — True inside the
+        shapefile geometry, False outside.  If the shapefile cannot be
+        read, returns an all-True mask (no masking).
+        """
+        import geopandas as gpd
+        import rasterio.features
+        import rasterio.transform
+
+        try:
+            gdf = gpd.read_file(shapefile_path)
+            if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+                gdf = gdf.to_crs("EPSG:4326")
+
+            nlat, nlon = len(lats), len(lons)
+            lat_res = abs(lats[1] - lats[0]) if nlat > 1 else 0.1
+            lon_res = abs(lons[1] - lons[0]) if nlon > 1 else 0.1
+
+            west = float(lons.min()) - lon_res / 2
+            north = float(lats.max()) + lat_res / 2
+
+            transform = rasterio.transform.from_origin(west, north, lon_res, lat_res)
+
+            shapes = [(geom, 1) for geom in gdf.geometry if geom is not None]
+            mask = rasterio.features.rasterize(
+                shapes,
+                out_shape=(nlat, nlon),
+                transform=transform,
+                fill=0,
+                dtype=np.uint8,
+                all_touched=True,
+            )
+            n_inside = int(mask.sum())
+            print(
+                f"  Forest mask: {n_inside} / {nlat * nlon} pixels "
+                f"({100.0 * n_inside / max(nlat * nlon, 1):.1f}%) inside shapefile"
+            )
+            return mask.astype(bool)
+
+        except Exception as e:
+            print(f"  WARNING: Failed to build forest mask ({e}) — skipping mask")
+            import traceback
+
+            traceback.print_exc()
+            return np.ones((len(lats), len(lons)), dtype=bool)
+
+    def _apply_mask_to_ds(self, ds, mask_2d):
+        """Set all data variables to NaN where *mask_2d* is False."""
+        import xarray as xr
+
+        # Determine coordinate names used by this dataset
+        lat_dim = "latitude" if "latitude" in ds.dims else "lat"
+        lon_dim = "longitude" if "longitude" in ds.dims else "lon"
+
+        nan_mask = xr.DataArray(
+            ~mask_2d,
+            dims=[lat_dim, lon_dim],
+            coords={lat_dim: ds[lat_dim], lon_dim: ds[lon_dim]},
+        )
+        for var in ds.data_vars:
+            ds[var] = ds[var].where(~nan_mask)
+        return ds
+
     def load_variable_data(self, variables, year, month, day=None, hour=None, shapefile=None):
         """
         Load and preprocess multiple ERA5-Land variables, potentially clipping to a shapefile.
-        Modified to support hour-specific loading.
+
+        The shapefile is rasterised **once** into a boolean mask, then applied
+        via ``xr.where`` to every loaded dataset — much faster than the previous
+        per-variable ``rioxarray.clip`` approach.
 
         Parameters:
         -----------
         variables : list
-            List of variable names to load (e.g., ['temperature_2m', 'total_precipitation']).
+            List of variable names to load.
         year : int
             Year to load data for.
         month : int
@@ -2813,25 +2911,11 @@ class ERA5LandGEEProcessor:
         hour : int, optional
             Hour to load data for.
         shapefile : str, optional
-            Path to a shapefile for clipping the data. If None, uses default global extent.
-
-        Returns:
-        --------
-        dict
-            Dictionary where keys are variable names and values are the processed xarray.Dataset objects.
+            Path to a shapefile for forest masking. If None, uses default global extent.
         """
-        try:
-            import rioxarray
-        except ImportError:
-            raise ImportError("rioxarray library is required for shapefile masking. Please install it.")
-
-        try:
-            import geopandas as gpd
-        except ImportError:
-            raise ImportError("geopandas library is required for shapefile processing. Please install it.")
+        import gc
 
         if not shapefile:
-            shapefile = None
             raise ValueError("A shapefile path must be provided for region clipping.")
 
         # Clear existing datasets before loading new ones
@@ -2846,145 +2930,46 @@ class ERA5LandGEEProcessor:
             try:
                 if hasattr(ds, "close"):
                     ds.close()
-                del ds  # Attempt to free memory
             except Exception as e:
-                print(f"    Warning: Could not close/delete dataset for {var_name}: {e}")
+                print(f"    Warning: Could not close dataset for {var_name}: {e}")
         self.datasets = {}
-        import gc
+        gc.collect()
 
-        gc.collect()  # Suggest garbage collection
-
-        shapefile_gdf = None
-        shapefile_bounds = None
-
-        # Read shapefile ONCE using geopandas if provided
-        if shapefile is not None and gpd is not None:
-            print(f"Reading shapefile: {shapefile}")
-            try:
-                shapefile_gdf = gpd.read_file(shapefile)
-                # Get bounds (minx, miny, maxx, maxy)
-                bounds = shapefile_gdf.total_bounds
-                shapefile_bounds = {
-                    "lon_min": bounds[0],
-                    "lat_min": bounds[1],
-                    "lon_max": bounds[2],
-                    "lat_max": bounds[3],
-                }
-                print(
-                    f"    Shapefile bounds: lat={shapefile_bounds['lat_min']:.4f} to {shapefile_bounds['lat_max']:.4f}, "
-                    f"lon={shapefile_bounds['lon_min']:.4f} to {shapefile_bounds['lon_max']:.4f}"
-                )
-                print(f"    Shapefile CRS: {shapefile_gdf.crs}")
-            except Exception as e:
-                print(f"ERROR: Could not read or get bounds from shapefile: {e}")
-                print("Proceeding without shapefile clipping, using default region if defined, or global.")
-                shapefile_gdf = None  # Ensure it's None if reading failed
-                shapefile_bounds = None  # Ensure bounds are None
-
-        # Define the region for data loading/extraction
-        # Priority: Shapefile bounds > Default region (if shapefile not used)
-        region_to_extract = None
-        if shapefile_bounds is not None:
-            region_to_extract = shapefile_bounds
-        else:
-            # Use default global region if no shapefile
-            region_to_extract = {
-                "lat_min": config.DEFAULT_LAT_MIN,
-                "lat_max": config.DEFAULT_LAT_MAX,
-                "lon_min": config.DEFAULT_LON_MIN,
-                "lon_max": config.DEFAULT_LON_MAX,
-            }
-            print("Using default global region.")
-        # Load each ERA5 variable
+        # Load each ERA5 variable from GEE
         for var_name in variables:
             var_desc = f"{var_name} for {time_str}"
             print(f"\nProcessing variable: {var_desc}...")
 
-            # 1. Get data from GEE (or other source) - MODIFIED to include hour parameter
             try:
-                ds = self.get_era5land_variable_from_gee(
-                    var_name, year, month, day, hour
-                )  # Pass shapefile path for context if needed by GEE func
+                ds = self.get_era5land_variable_from_gee(var_name, year, month, day, hour)
             except Exception as gee_err:
-                print(f"  ERROR: Failed to load data for {var_name} from GEE source: {gee_err}")
+                print(f"  ERROR: Failed to load data for {var_name} from GEE: {gee_err}")
                 ds = None
 
-            if ds is not None:
-                print(f"  Initial data loaded for {var_name}. Size: {ds.nbytes / 1e6:.2f} MB")
-                print(f"  Initial dimensions: {ds.dims}")
-                print(f"  Coordinates: {list(ds.coords.keys())}")
+            if ds is not None and ds.nbytes > 0:
+                print(f"  Loaded {var_name}. Size: {ds.nbytes / 1e6:.2f} MB")
+                self.datasets[var_name] = ds
+            elif ds is not None:
+                print(f"  Loaded {var_name} but dataset is empty. Skipping.")
+            else:
+                print(f"  Failed to load {var_name}. Skipping.")
 
-                # 3. Apply Shapefile Mask (if shapefile was provided and libraries exist)
-                if shapefile_gdf is not None and rioxarray is not None and ds.nbytes > 0:
-                    print(f"  Applying precise shapefile mask using rioxarray for {var_name}...")
-                    try:
-                        # Ensure Dataset CRS is set (should be done in get_... or extract_region)
-                        if ds.rio.crs is None:
-                            print(f"    CRS is missing for dataset '{var_name}'. Setting to EPSG:4326 (WGS84).")
-                            # The correct way to set CRS inplace
-                            ds.rio.write_crs("EPSG:4326", inplace=True)
-                            # Verify CRS was set
-                            if ds.rio.crs is None:
-                                raise ValueError(f"Failed to set CRS for {var_name}")
-                            else:
-                                print(f"    CRS successfully set to {ds.rio.crs}")
+        # Build forest mask ONCE from shapefile and apply to ALL datasets
+        if shapefile is not None and self.datasets:
+            ref_ds = next(iter(self.datasets.values()))
+            lat_dim = "latitude" if "latitude" in ref_ds.dims else "lat"
+            lon_dim = "longitude" if "longitude" in ref_ds.dims else "lon"
+            lats = ref_ds[lat_dim].values
+            lons = ref_ds[lon_dim].values
 
-                        data_crs = ds.rio.crs
-                        shape_crs = shapefile_gdf.crs
+            # Cache mask so repeated calls in the same run reuse it
+            if not hasattr(self, "_forest_mask") or self._forest_mask is None:
+                print(f"\nBuilding forest mask from {shapefile}...")
+                self._forest_mask = self._build_forest_mask(shapefile, lats, lons)
 
-                        print(f"    Data CRS: {data_crs}, Shapefile CRS: {shape_crs}")
-
-                        # Reproject shapefile CRS if it doesn't match data CRS
-                        if shape_crs != data_crs:
-                            print(f"    Reprojecting shapefile from {shape_crs} to {data_crs}...")
-                            shapefile_gdf = shapefile_gdf.to_crs(data_crs)
-                            print("    Reprojection complete.")
-
-                        # Explicitly check for the data variable name before clipping
-                        data_vars = list(ds.data_vars)
-                        if len(data_vars) == 0:
-                            raise ValueError("Dataset has no data variables to clip")
-
-                        print(f"    Data variables found: {data_vars}")
-
-                        # Perform the clipping using rioxarray
-                        masked_ds = ds.rio.clip(shapefile_gdf.geometry, drop=False, invert=False, all_touched=True)
-
-                        # Check if clipping resulted in an empty dataset
-                        if masked_ds.nbytes == 0 or all(dim == 0 for dim in masked_ds.sizes.values()):
-                            print(
-                                f"    WARNING: Clipping {var_name} resulted in an empty dataset. Shapefile might not overlap the data region."
-                            )
-                            print(f"    Storing the bounding-box extracted data for {var_name} instead of empty mask.")
-                        else:
-                            ds = masked_ds  # Replace original dataset with the masked version
-                            print(f"    Shapefile mask applied successfully. Final size: {ds.nbytes / 1e6:.2f} MB")
-
-                    except Exception as mask_err:
-                        print(f"  ERROR applying shapefile mask with rioxarray for {var_name}: {mask_err}")
-                        print("    Using data only extracted to the shapefile's bounding box (if applicable).")
-                        import traceback
-
-                        traceback.print_exc()  # Print detailed error traceback
-
-                elif shapefile and (rioxarray is None or gpd is None):
-                    print(
-                        f"  Skipping precise shapefile masking for {var_name} because required libraries are missing."
-                    )
-
-                # 4. Store the final dataset
-                if ds is not None and ds.nbytes > 0:
-                    self.datasets[var_name] = ds
-                    print(f"  --> Successfully processed and stored dataset for {var_name}")
-                elif ds is not None and ds.nbytes == 0:
-                    print(
-                        f"  --> Processed {var_name}, but the resulting dataset is empty (likely due to clipping). Not stored."
-                    )
-                else:
-                    print(f"  --> Failed to process or load {var_name}. Not stored.")
-
-            else:  # If ds was None initially
-                print(f"  --> Failed to load initial data for {var_name}. Skipping further processing.")
+            print("Applying forest mask to all loaded datasets...")
+            for var_name in list(self.datasets):
+                self.datasets[var_name] = self._apply_mask_to_ds(self.datasets[var_name], self._forest_mask)
 
         # At the END of load_variable_data, AFTER all ERA5 variables are loaded:
         # ============================================================
@@ -7172,13 +7157,40 @@ Examples:
 
 
 if __name__ == "__main__":
+    import json
+    from pathlib import Path
+
     import ee
 
+    cred_paths = [
+        Path.home() / ".config" / "earthengine" / "credentials",
+        Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
+    ]
+    gee_project = "era5download-447713"
     try:
-        ee.Initialize(project="ee-yuluo-2")
+        cred_data = None
+        for cred_path in cred_paths:
+            if cred_path.exists():
+                cred_data = json.loads(cred_path.read_text())
+                break
+        if cred_data and "refresh_token" in cred_data:
+            from google.oauth2.credentials import Credentials
+
+            credentials = Credentials(
+                token=None,
+                refresh_token=cred_data["refresh_token"],
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=cred_data["client_id"],
+                client_secret=cred_data["client_secret"],
+            )
+            ee.Initialize(credentials=credentials, project=gee_project)
+        else:
+            ee.Initialize(project="ee-yuluo-2")
         print("GEE Initialized successfully.")
     except Exception as e:
-        print(f"GEE Initialization failed ({e}). Triggering Authentication...")
-        ee.Authenticate()
-        ee.Initialize(project="ee-yuluo-2")
+        print(f"GEE Initialization failed: {e}")
+        print("Run 'earthengine authenticate' on the login node first, then resubmit.")
+        import sys
+
+        sys.exit(1)
     main()

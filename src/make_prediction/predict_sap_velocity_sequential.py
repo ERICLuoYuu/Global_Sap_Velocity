@@ -29,11 +29,20 @@ import re
 from collections import Counter
 
 # Set up logging
+def _get_log_path() -> Path:
+    """Return log file path, preferring SAP_LOG_DIR env var over package directory."""
+    log_dir = os.environ.get("SAP_LOG_DIR", "")
+    if log_dir and Path(log_dir).is_dir():
+        return Path(log_dir) / "sap_velocity_prediction.log"
+    # Fallback: current working directory, then package directory
+    return Path("sap_velocity_prediction.log")
+
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(Path(__file__).parent / "sap_velocity_prediction.log"),
+        logging.FileHandler(_get_log_path()),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -974,19 +983,36 @@ def map_predictions_to_df_improved(df, predictions, window_metadata, model_name)
             window_positions.append(window_metadata[i]['window_position'])
     
     if len(target_indices) != len(set(target_indices)):
-        logger.warning(f"Found duplicate target indices. Some predictions may overwrite others.")
-        dup_counts = Counter(target_indices)
-        duplicates = {idx: count for idx, count in dup_counts.items() if count > 1}
-        logger.debug(f"Duplicate indices: {duplicates}")
-    
-    pred_series = pd.Series(pred_values, index=target_indices, dtype=float)
+        n_dups = len(target_indices) - len(set(target_indices))
+        logger.info(f"Found {n_dups} duplicate target indices. Averaging overlapping predictions.")
+        # Average predictions for duplicate indices instead of silently overwriting
+        agg_df = pd.DataFrame({
+            'pred': pred_values,
+            'location': location_ids,
+            'window_start': window_starts,
+            'window_end': window_ends,
+            'window_pos': window_positions,
+        }, index=target_indices)
+        agg_df = agg_df.groupby(level=0).agg({
+            'pred': 'mean',
+            'location': 'first',
+            'window_start': 'first',
+            'window_end': 'last',
+            'window_pos': 'last',
+        })
+        pred_series = agg_df['pred']
+        location_series = agg_df['location']
+        window_start_series = agg_df['window_start']
+        window_end_series = agg_df['window_end']
+        window_pos_series = agg_df['window_pos']
+    else:
+        pred_series = pd.Series(pred_values, index=target_indices, dtype=float)
+        location_series = pd.Series(location_ids, index=target_indices)
+        window_start_series = pd.Series(window_starts, index=target_indices)
+        window_end_series = pd.Series(window_ends, index=target_indices)
+        window_pos_series = pd.Series(window_positions, index=target_indices)
+
     mapped_count = len(pred_series)
-    
-    location_series = pd.Series(location_ids, index=target_indices)
-    window_start_series = pd.Series(window_starts, index=target_indices)
-    window_end_series = pd.Series(window_ends, index=target_indices)
-    window_pos_series = pd.Series(window_positions, index=target_indices)
-    
     logger.info(f"Successfully mapped {mapped_count} {model_name} predictions")
     
     pred_df = pd.DataFrame(index=df.index)
@@ -1234,7 +1260,6 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, c
             feature_columns = available_features
             logger.info(f"Using {len(feature_columns)} default features: {feature_columns}")
         
-        # Apply scaling if scaler is provided
         # Apply scaling if scaler is provided
         if feature_scaler is not None:
             try:
@@ -1729,6 +1754,7 @@ def main():
         logger.error(f"No CSV files found in {input_dir}")
         sys.exit(1)
     for input_file in input_files:
+        file_start_time = time.time()
         logger.info(f"Processing input file: {input_file}")
 
         if args.output:

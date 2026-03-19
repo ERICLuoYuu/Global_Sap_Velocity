@@ -229,8 +229,7 @@ def discover_timestamps(
         import pyarrow.parquet as pq
         schema_cols = pq.read_schema(csv_path).names
     else:
-        with open(csv_path, "r") as fh:
-            schema_cols = fh.readline().strip().split(",")
+        schema_cols = pd.read_csv(csv_path, nrows=0).columns.tolist()
     resolved_col = _resolve_timestamp_column(schema_cols, preferred=timestamp_col)
     if resolved_col != timestamp_col:
         logger.info("Timestamp column resolved: %r -> %r", timestamp_col, resolved_col)
@@ -258,7 +257,8 @@ def rasterize_all_timestamps(
     lat_range: Optional[Tuple[float, float]] = None,
     lon_range: Optional[Tuple[float, float]] = None,
     chunk_size: int = 500_000,
-    **kwargs: Any,
+    hourly_mode: bool = False,
+    hourly_agg: str = "mean",
 ) -> List[Tuple[str, str]]:
     """Read a CSV once and produce one GeoTIFF per unique timestamp.
 
@@ -299,8 +299,7 @@ def rasterize_all_timestamps(
         import pyarrow.parquet as pq
         schema_cols = pq.read_schema(csv_path).names
     else:
-        with open(csv_path, "r") as fh:
-            schema_cols = fh.readline().strip().split(",")
+        schema_cols = pd.read_csv(csv_path, nrows=0).columns.tolist()
     timestamp_col = _resolve_timestamp_column(schema_cols, preferred=timestamp_col)
 
     cols_needed = ["latitude", "longitude", timestamp_col, value_column]
@@ -310,8 +309,8 @@ def rasterize_all_timestamps(
 
     # Accumulate per-timestamp aggregated data: {ts: DataFrame}
     ts_accum: Dict[str, List[pd.DataFrame]] = {}
-    _hourly_mode = kwargs.get("hourly_mode", False)
-    _hourly_agg = kwargs.get("hourly_agg", "mean")
+    _hourly_mode = hourly_mode
+    _hourly_agg = hourly_agg
 
     for chunk in tqdm(
         read_prediction_file(csv_path, usecols=cols_needed,
@@ -343,9 +342,16 @@ def rasterize_all_timestamps(
         # Partition by timestamp (or date) and accumulate
         for ts_val, group in chunk.groupby(group_col):
             ts_str = str(ts_val)
+            _chunk_agg = _hourly_agg if _hourly_mode else "mean"
             agg = group.groupby(
                 ["latitude", "longitude"], as_index=False,
-            )[value_column].mean()
+            )[value_column].agg(_chunk_agg)
+            # agg() may rename column to method name; normalise
+            if value_column not in agg.columns:
+                _rc = [c for c in agg.columns
+                       if c not in ("latitude", "longitude")]
+                if _rc:
+                    agg = agg.rename(columns={_rc[0]: value_column})
             ts_accum.setdefault(ts_str, []).append(agg)
 
     # Rasterize each timestamp
@@ -359,23 +365,30 @@ def rasterize_all_timestamps(
 
         # Skip if already exists (resume support)
         if os.path.exists(tif_path):
-            logger.info("Already exists: %s – skipping.", tif_name)
-            results.append((ts_str, tif_path))
-            continue
+            # Validate existing TIF is readable (not corrupted/truncated)
+            try:
+                with rasterio.open(tif_path) as _src:
+                    _src.read(1, window=rasterio.windows.Window(0, 0, 1, 1))
+                logger.info("Already exists: %s – skipping.", tif_name)
+                results.append((ts_str, tif_path))
+                continue
+            except Exception:
+                logger.warning(
+                    "Corrupt TIF detected: %s – regenerating.", tif_name,
+                )
 
         # Merge accumulated partials and re-aggregate
         combined = pd.concat(ts_accum[ts_str], ignore_index=True)
         agg_method = _hourly_agg if _hourly_mode else "mean"
         df = combined.groupby(
             ["latitude", "longitude"], as_index=False,
-        )[value_column].agg(agg_method).rename(
-            columns={value_column: value_column}
-            if agg_method == "mean"
-            else {}
-        )
-        # Ensure column name is consistent after agg
+        )[value_column].agg(agg_method)
+        # agg() may rename the column to the method name; normalise
         if value_column not in df.columns:
-            df = df.rename(columns={agg_method: value_column})
+            result_cols = [c for c in df.columns
+                          if c not in ("latitude", "longitude")]
+            if result_cols:
+                df = df.rename(columns={result_cols[0]: value_column})
 
         if len(df) == 0:
             logger.warning("No valid data for %s – skipping.", ts_str)
@@ -391,7 +404,7 @@ def rasterize_all_timestamps(
                 "Rasterized %s → %s (%d pixels)",
                 ts_str, tif_name, len(df),
             )
-        except Exception as exc:
+        except (ValueError, rasterio.errors.RasterioError) as exc:
             logger.error("Failed to rasterize %s: %s", ts_str, exc)
 
     elapsed = time.time() - start
@@ -417,9 +430,13 @@ def _sanitize_filename(ts_str: str) -> str:
     str
         Safe filename component.
     """
+    # Length-cap input to prevent NAME_MAX overflow
+    ts_str = ts_str[:200]
     safe = ts_str.replace(" ", "_").replace(":", "-").split("+")[0]
     safe = re.sub(r"[^A-Za-z0-9_\-.]", "", safe)
-    return safe or "unknown"
+    # Reject leading dots (hidden files, ".." path components)
+    safe = safe.lstrip(".-")
+    return safe[:200] or "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +496,15 @@ def rasterize_timestamp(
         )
 
     start = time.time()
+    # Resolve actual timestamp column name from file header
+    ext = Path(csv_path).suffix.lower()
+    if ext == ".parquet":
+        import pyarrow.parquet as pq
+        header_cols = pq.read_schema(csv_path).names
+    else:
+        header_cols = pd.read_csv(csv_path, nrows=0).columns.tolist()
+    timestamp_col = _resolve_timestamp_column(header_cols, preferred=timestamp_col)
+
     cols_needed = ["latitude", "longitude", timestamp_col, value_column]
     if sw_in_threshold > 0:
         cols_needed.append("sw_in")
@@ -492,17 +518,21 @@ def rasterize_timestamp(
     if "sw_in" in cols_needed:
         dtypes["sw_in"] = float
 
-    # Read with Dask
-    ddf = dd.read_csv(
-        csv_path,
-        blocksize=dask_blocksize,
-        usecols=cols_needed,
-        dtype=dtypes,
-        assume_missing=True,
-    )
+    # Read with Dask — branch by file format
+    if ext == ".parquet":
+        ddf = dd.read_parquet(csv_path, columns=cols_needed, engine="pyarrow")
+    else:
+        ddf = dd.read_csv(
+            csv_path,
+            blocksize=dask_blocksize,
+            usecols=cols_needed,
+            dtype=dtypes,
+            assume_missing=True,
+        )
 
-    # Filter to requested timestamp
-    ddf = ddf[ddf[timestamp_col] == timestamp_value]
+    # Filter to requested timestamp (coerce to string for safe comparison)
+    ddf[timestamp_col] = ddf[timestamp_col].astype(str)
+    ddf = ddf[ddf[timestamp_col] == str(timestamp_value)]
 
     # Daytime filter
     if sw_in_threshold > 0 and "sw_in" in ddf.columns:
@@ -559,7 +589,7 @@ def _rasterize_timestamp_pandas(
     for chunk in pd.read_csv(
         csv_path, usecols=cols_needed, chunksize=chunk_size, low_memory=False,
     ):
-        chunk = chunk[chunk[timestamp_col] == timestamp_value]
+        chunk = chunk[chunk[timestamp_col].astype(str) == str(timestamp_value)]
         if sw_in_threshold > 0 and "sw_in" in chunk.columns:
             chunk = chunk[chunk["sw_in"] > sw_in_threshold]
         chunk = chunk.dropna(subset=[value_column])
@@ -620,33 +650,64 @@ def _write_geotiff(
     if len(lats) == 0:
         raise ValueError("No valid data to rasterize.")
 
+    if resolution <= 0:
+        raise ValueError(f"resolution must be positive, got {resolution}")
+    if resolution < 0.001:
+        raise ValueError(
+            f"resolution {resolution} is below minimum 0.001 (~100 m)"
+        )
+
     min_lat = lat_range[0] if lat_range else float(lats.min())
     max_lat = lat_range[1] if lat_range else float(lats.max())
     min_lon = lon_range[0] if lon_range else float(lons.min())
     max_lon = lon_range[1] if lon_range else float(lons.max())
 
+    if lat_range and min_lat >= max_lat:
+        raise ValueError(
+            f"lat_range inverted or zero-width: min_lat={min_lat} >= max_lat={max_lat}"
+        )
+    if lon_range and min_lon >= max_lon:
+        raise ValueError(
+            f"lon_range inverted or zero-width: min_lon={min_lon} >= max_lon={max_lon}"
+        )
+    if lat_range and (min_lat < -90 or max_lat > 90):
+        raise ValueError(
+            f"lat_range {lat_range} outside Earth bounds [-90, 90]"
+        )
+    if lon_range and (min_lon < -180 or max_lon > 180):
+        raise ValueError(
+            f"lon_range {lon_range} outside Earth bounds [-180, 180]"
+        )
+
     eps = 1e-9
     height = max(1, int(np.ceil((max_lat - min_lat + eps) / resolution)))
     width = max(1, int(np.ceil((max_lon - min_lon + eps) / resolution)))
+
+    MAX_RASTER_DIM = 50_000
+    if height > MAX_RASTER_DIM or width > MAX_RASTER_DIM:
+        raise ValueError(
+            f"Raster dimensions ({height} x {width}) exceed limit "
+            f"{MAX_RASTER_DIM}. Check resolution ({resolution}) and "
+            f"lat/lon ranges."
+        )
 
     row_idx = np.floor((max_lat - lats.values + eps) / resolution).astype(int)
     col_idx = np.floor((lons.values - min_lon + eps) / resolution).astype(int)
     in_bounds = (row_idx >= 0) & (row_idx < height) & (col_idx >= 0) & (col_idx < width)
 
-    # Warn if duplicate pixel coordinates exist (last-value-wins)
     bounded_rows = row_idx[in_bounds]
     bounded_cols = col_idx[in_bounds]
-    linear_idx = bounded_rows * width + bounded_cols
-    n_unique = len(np.unique(linear_idx))
-    if n_unique < len(linear_idx):
-        logger.warning(
-            "Duplicate pixel coords detected (%d points → %d unique pixels). "
-            "Pre-aggregate data to avoid silent overwrites.",
-            len(linear_idx), n_unique,
-        )
+    bounded_vals = vals.values[in_bounds]
+
+    # Accumulate sum and count per pixel to compute mean (handles duplicates)
+    sum_grid = np.zeros((height, width), dtype=np.float64)
+    cnt_grid = np.zeros((height, width), dtype=np.float64)
+    np.add.at(sum_grid, (bounded_rows, bounded_cols), bounded_vals)
+    np.add.at(cnt_grid, (bounded_rows, bounded_cols), 1)
 
     grid = np.full((height, width), np.nan, dtype=np.float32)
-    grid[bounded_rows, bounded_cols] = vals.values[in_bounds]
+    has_data = cnt_grid > 0
+    grid[has_data] = (sum_grid[has_data] / cnt_grid[has_data]).astype(np.float32)
 
     transform = from_origin(min_lon, max_lat, resolution, resolution)
     profile = {
@@ -726,6 +787,8 @@ def plot_map(
             data[~np.isnan(data)],
             list(percentile_range),
         )
+        if vmin >= vmax:
+            vmax = vmin + 1e-6
 
         if title is None:
             title = Path(tif_path).stem.replace("_", " ").title()
@@ -769,23 +832,13 @@ def plot_map(
         return output_png
 
     except Exception as exc:
-        logger.error("Failed to plot %s: %s", tif_path, exc)
+        logger.error("Failed to plot %s: %s", tif_path, exc, exc_info=True)
         return None
 
 
 # ---------------------------------------------------------------------------
 # Composite generation
 # ---------------------------------------------------------------------------
-
-_STAT_FUNCS = {
-    "mean": lambda stack: np.nanmean(stack, axis=0),
-    "median": lambda stack: np.nanmedian(stack, axis=0),
-    "max": lambda stack: np.nanmax(stack, axis=0),
-    "min": lambda stack: np.nanmin(stack, axis=0),
-    "std": lambda stack: np.nanstd(stack, axis=0),
-    "count": lambda stack: np.sum(~np.isnan(stack), axis=0).astype(np.float32),
-}
-
 
 def compute_composites(
     tif_paths: Sequence[str],
@@ -832,6 +885,7 @@ def compute_composites(
         ref_height = ref.height
         ref_width = ref.width
         ref_transform = ref.transform
+        ref_crs = ref.crs
 
     # ----- Streaming pass: running mean, variance, min, max, count -----
     needs_streaming = set(stats) & {"mean", "std", "min", "max", "count"}
@@ -850,6 +904,13 @@ def compute_composites(
                         "Transform mismatch in %s — skipping. "
                         "Expected %s, got %s.",
                         path, ref_transform, src.transform,
+                    )
+                    continue
+                if ref_crs and src.crs and src.crs != ref_crs:
+                    logger.warning(
+                        "CRS mismatch in %s — skipping. "
+                        "Expected %s, got %s.",
+                        path, ref_crs, src.crs,
                     )
                     continue
                 band = src.read(1).astype(np.float64)
@@ -881,7 +942,8 @@ def compute_composites(
 
     # Finalise derived arrays — mask pixels with zero observations
     no_data = count_arr == 0
-    var_arr = np.where(count_arr > 1, m2_arr / (count_arr - 1), 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        var_arr = np.where(count_arr > 1, m2_arr / (count_arr - 1), np.nan)
 
     streaming_results: Dict[str, np.ndarray] = {
         "mean": np.where(no_data, np.nan, mean_arr).astype(np.float32),
@@ -899,22 +961,41 @@ def compute_composites(
         if stat in streaming_results:
             composite = streaming_results[stat]
         elif stat == "median":
-            # Median requires a full stack — load one band at a time into array
-            logger.info("Computing median (requires full stack)…")
-            stack = np.full(
-                (len(tif_paths), ref_height, ref_width), np.nan, dtype=np.float32,
-            )
-            for i, path in enumerate(tif_paths):
-                try:
-                    with rasterio.open(path) as src:
-                        band = src.read(1)
-                        h = min(band.shape[0], ref_height)
-                        w = min(band.shape[1], ref_width)
-                        stack[i, :h, :w] = band[:h, :w]
-                except Exception:
-                    pass
-            composite = np.nanmedian(stack, axis=0).astype(np.float32)
-            del stack
+            n_tifs = len(tif_paths)
+            # Memory guard: full stack costs n_tifs * H * W * 4 bytes
+            stack_bytes = n_tifs * ref_height * ref_width * 4
+            max_stack_bytes = 16 * 1024**3  # 16 GB cap
+            if stack_bytes > max_stack_bytes:
+                logger.warning(
+                    "Median stack would need %.1f GB (cap %.1f GB) – "
+                    "falling back to mean as approximate median.",
+                    stack_bytes / 1024**3, max_stack_bytes / 1024**3,
+                )
+                composite = streaming_results.get(
+                    "mean",
+                    np.where(no_data, np.nan, mean_arr).astype(np.float32),
+                )
+            else:
+                logger.info(
+                    "Computing median (%.1f GB stack)…",
+                    stack_bytes / 1024**3,
+                )
+                stack = np.full(
+                    (n_tifs, ref_height, ref_width), np.nan, dtype=np.float32,
+                )
+                for i, path in enumerate(tif_paths):
+                    try:
+                        with rasterio.open(path) as src:
+                            band = src.read(1)
+                            h = min(band.shape[0], ref_height)
+                            w = min(band.shape[1], ref_width)
+                            stack[i, :h, :w] = band[:h, :w]
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not read %s for median: %s", path, exc,
+                        )
+                composite = np.nanmedian(stack, axis=0).astype(np.float32)
+                del stack
         else:
             logger.warning("Unknown stat '%s' – skipping.", stat)
             continue
@@ -1004,13 +1085,14 @@ def run_batch(
         If *run_id* resolves to a path outside *output_dir*.
     """
     # -- Validate run_id (path traversal protection) -----------------------
-    run_dir = os.path.realpath(os.path.join(output_dir, run_id))
-    base_dir = os.path.realpath(output_dir)
-    if not run_dir.startswith(base_dir + os.sep) and run_dir != base_dir:
+    run_dir_path = Path(os.path.join(output_dir, run_id)).resolve()
+    base_dir_path = Path(output_dir).resolve()
+    if not run_dir_path.is_relative_to(base_dir_path):
         raise ValueError(
-            f"Invalid run_id '{run_id}': resolved path '{run_dir}' "
-            f"escapes base output directory '{base_dir}'."
+            f"Invalid run_id '{run_id}': resolved path '{run_dir_path}' "
+            f"escapes base output directory '{base_dir_path}'."
         )
+    run_dir = str(run_dir_path)
 
     wall_start = time.time()
     os.makedirs(run_dir, exist_ok=True)
@@ -1023,6 +1105,11 @@ def run_batch(
     logger.info("SW_in thr: %.1f", sw_in_threshold)
 
     # Discover CSV files
+    # Validate file_glob doesn't escape input_dir
+    if ".." in file_glob or file_glob.startswith(("/", "\\")):
+        raise ValueError(
+            f"file_glob '{file_glob}' contains unsafe path components."
+        )
     pattern = os.path.join(input_dir, file_glob)
     pred_files = sorted(globmod.glob(pattern))
     # Filter to only CSV and Parquet files

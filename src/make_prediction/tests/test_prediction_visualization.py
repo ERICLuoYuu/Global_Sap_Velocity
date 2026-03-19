@@ -918,7 +918,7 @@ class TestCompositeCorrectness:
         with rasterio.open(results["std"]) as src:
             std_data = src.read(1)
         # Single observation -> std = 0
-        assert std_data[1, 1] == pytest.approx(0.0, abs=1e-5)
+        assert np.isnan(std_data[1, 1]), "Single observation should yield NaN std"
 
     def test_composite_ignores_nodata(
         self, tmp_path: Path,
@@ -1038,3 +1038,569 @@ class TestFormatAndIO:
             assert np.isnan(nodata) or nodata == -9999, (
                 f"Unexpected nodata value: {nodata}"
             )
+# ---------------------------------------------------------------------------
+# Round 1: Edge cases & boundary values
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeCasesRound1:
+    """Round 1 tests: empty inputs, boundary coordinates, extreme values."""
+
+    def test_all_nan_values_produces_no_tif(self, tmp_path: Path) -> None:
+        """CSV where all prediction values are NaN should produce no GeoTIFF."""
+        df = pd.DataFrame(
+            {
+                "timestamp.1": ["2015-07-01"] * 5,
+                "latitude": [0.0, 1.0, 2.0, 3.0, 4.0],
+                "longitude": [0.0, 1.0, 2.0, 3.0, 4.0],
+                "sap_velocity_cnn_lstm": [np.nan] * 5,
+            }
+        )
+        csv_path = str(tmp_path / "all_nan.csv")
+        df.to_csv(csv_path, index=False)
+
+        out_dir = str(tmp_path / "nan_out")
+        results = rasterize_all_timestamps(
+            csv_path=csv_path,
+            output_dir=out_dir,
+            sw_in_threshold=0,
+            resolution=1.0,
+        )
+        assert len(results) == 0, "All-NaN data should produce no GeoTIFFs"
+
+    def test_single_pixel_geotiff(self, tmp_path: Path) -> None:
+        """A single data point should produce a valid 1x1-ish GeoTIFF."""
+        df = pd.DataFrame(
+            {
+                "latitude": [45.0],
+                "longitude": [10.0],
+                "value": [2.5],
+            }
+        )
+        tif_path = str(tmp_path / "single_pixel.tif")
+        _write_geotiff(df, tif_path, "value", resolution=0.1)
+
+        assert os.path.exists(tif_path)
+        with rasterio.open(tif_path) as src:
+            data = src.read(1)
+            valid = data[~np.isnan(data)]
+            assert len(valid) == 1
+            assert valid[0] == pytest.approx(2.5, abs=1e-3)
+
+    def test_zero_sw_in_threshold_keeps_all_data(self, sample_csv: str, tmp_path: Path) -> None:
+        """sw_in_threshold=0 should disable filtering and keep all rows."""
+        out_dir = str(tmp_path / "no_filter")
+        results = rasterize_all_timestamps(
+            csv_path=sample_csv,
+            output_dir=out_dir,
+            sw_in_threshold=0,
+            resolution=1.0,
+        )
+        assert len(results) == 2
+
+    def test_negative_sap_velocity_preserved(self, tmp_path: Path) -> None:
+        """Negative predicted values should be preserved (not clipped)."""
+        df = pd.DataFrame(
+            {
+                "timestamp.1": ["2015-07-01"],
+                "latitude": [0.0],
+                "longitude": [0.0],
+                "sap_velocity_cnn_lstm": [-1.5],
+            }
+        )
+        csv_path = str(tmp_path / "negative.csv")
+        df.to_csv(csv_path, index=False)
+
+        out_dir = str(tmp_path / "neg_out")
+        results = rasterize_all_timestamps(
+            csv_path=csv_path,
+            output_dir=out_dir,
+            sw_in_threshold=0,
+            resolution=1.0,
+        )
+        assert len(results) == 1
+        _, tif_path = results[0]
+        with rasterio.open(tif_path) as src:
+            data = src.read(1)
+            valid = data[~np.isnan(data)]
+            assert valid[0] < 0, "Negative values should be preserved"
+
+    def test_extreme_lat_lon_boundaries(self, tmp_path: Path) -> None:
+        """Points at global extent boundaries should be rasterized."""
+        df = pd.DataFrame(
+            {
+                "latitude": [-60.0, 78.0],
+                "longitude": [-180.0, 180.0],
+                "value": [1.0, 2.0],
+            }
+        )
+        tif_path = str(tmp_path / "boundary.tif")
+        _write_geotiff(
+            df,
+            tif_path,
+            "value",
+            resolution=0.1,
+            lat_range=(-60.0, 78.0),
+            lon_range=(-180.0, 180.0),
+        )
+        with rasterio.open(tif_path) as src:
+            data = src.read(1)
+            valid_count = np.sum(~np.isnan(data))
+            assert valid_count >= 1, "Boundary points should be rasterized"
+
+    def test_duplicate_pixels_averaged_in_write_geotiff(self, tmp_path: Path) -> None:
+        """Duplicate (lat, lon) in _write_geotiff should be averaged (H5 fix)."""
+        df = pd.DataFrame(
+            {
+                "latitude": [0.0, 0.0, 0.0],
+                "longitude": [0.0, 0.0, 0.0],
+                "value": [1.0, 3.0, 5.0],
+            }
+        )
+        tif_path = str(tmp_path / "dup_mean.tif")
+        _write_geotiff(df, tif_path, "value", resolution=0.1)
+
+        with rasterio.open(tif_path) as src:
+            data = src.read(1)
+            valid = data[~np.isnan(data)]
+            assert valid[0] == pytest.approx(3.0, abs=0.01), f"Expected mean 3.0 but got {valid[0]}"
+
+    def test_very_coarse_resolution(self, tmp_path: Path) -> None:
+        """Resolution of 10 degrees should still produce valid output."""
+        df = pd.DataFrame(
+            {
+                "latitude": [0.0, 45.0],
+                "longitude": [0.0, 90.0],
+                "value": [1.0, 2.0],
+            }
+        )
+        tif_path = str(tmp_path / "coarse.tif")
+        _write_geotiff(df, tif_path, "value", resolution=10.0)
+
+        with rasterio.open(tif_path) as src:
+            assert src.height >= 1
+            assert src.width >= 1
+
+    def test_welford_std_two_observations(self, tmp_path: Path) -> None:
+        """Two observations should produce correct sample std."""
+        h, w = 3, 3
+        profile = {
+            "driver": "GTiff",
+            "height": h,
+            "width": w,
+            "count": 1,
+            "dtype": rasterio.float32,
+            "crs": "+proj=longlat +datum=WGS84",
+            "transform": rasterio.transform.from_origin(-180, 78, 0.1, 0.1),
+            "nodata": np.nan,
+        }
+        tifs = []
+        vals_at_11 = [2.0, 4.0]
+        for i, v in enumerate(vals_at_11):
+            data = np.full((h, w), np.nan, dtype=np.float32)
+            data[1, 1] = v
+            path = str(tmp_path / f"std2_{i}.tif")
+            with rasterio.open(path, "w", **profile) as dst:
+                dst.write(data, 1)
+            tifs.append(path)
+
+        out_dir = str(tmp_path / "std2_out")
+        results = compute_composites(
+            tif_paths=tifs,
+            output_dir=out_dir,
+            stats=("std",),
+            render_png=False,
+        )
+        with rasterio.open(results["std"]) as src:
+            std_data = src.read(1)
+        expected_std = np.std([2.0, 4.0], ddof=1)
+        assert std_data[1, 1] == pytest.approx(expected_std, abs=0.01), (
+            f"Expected std {expected_std:.4f} but got {std_data[1, 1]:.4f}"
+        )
+# ---------------------------------------------------------------------------
+# Round 2: Negative paths & error handling
+# ---------------------------------------------------------------------------
+
+
+class TestNegativePathsRound2:
+    """Round 2 tests: bad inputs, missing columns, error recovery."""
+
+    def test_missing_value_column_raises(self, tmp_path: Path) -> None:
+        """CSV missing the value column should produce empty results."""
+        df = pd.DataFrame(
+            {
+                "timestamp.1": ["2015-07-01"],
+                "latitude": [0.0],
+                "longitude": [0.0],
+                "some_other_column": [1.0],
+            }
+        )
+        csv_path = str(tmp_path / "missing_col.csv")
+        df.to_csv(csv_path, index=False)
+
+        out_dir = str(tmp_path / "missing_out")
+        # Should raise because usecols won't find the value column
+        with pytest.raises((ValueError, KeyError)):
+            rasterize_all_timestamps(
+                csv_path=csv_path,
+                output_dir=out_dir,
+                value_column="sap_velocity_cnn_lstm",
+                sw_in_threshold=0,
+                resolution=1.0,
+            )
+
+    def test_no_timestamp_column_raises_keyerror(self, tmp_path: Path) -> None:
+        """CSV with no recognizable timestamp column should raise KeyError."""
+        df = pd.DataFrame(
+            {
+                "lat": [0.0],
+                "lon": [0.0],
+                "value": [1.0],
+            }
+        )
+        csv_path = str(tmp_path / "no_ts.csv")
+        df.to_csv(csv_path, index=False)
+
+        out_dir = str(tmp_path / "no_ts_out")
+        with pytest.raises(KeyError, match="No timestamp column found"):
+            rasterize_all_timestamps(
+                csv_path=csv_path,
+                output_dir=out_dir,
+                sw_in_threshold=0,
+                resolution=1.0,
+            )
+
+    def test_empty_dataframe_to_write_geotiff_raises(self, tmp_path: Path) -> None:
+        """_write_geotiff with empty DataFrame should raise ValueError."""
+        df = pd.DataFrame(
+            {
+                "latitude": pd.Series(dtype=float),
+                "longitude": pd.Series(dtype=float),
+                "value": pd.Series(dtype=float),
+            }
+        )
+        tif_path = str(tmp_path / "empty.tif")
+        with pytest.raises(ValueError, match="No valid data"):
+            _write_geotiff(df, tif_path, "value", resolution=0.1)
+
+    def test_path_traversal_with_absolute_path_rejected(self, tmp_path: Path) -> None:
+        """Absolute path in run_id should be rejected."""
+        with pytest.raises(ValueError, match="escapes base"):
+            run_batch(
+                input_dir=str(tmp_path),
+                output_dir=str(tmp_path / "out"),
+                run_id="/tmp/evil",
+            )
+
+    def test_path_traversal_with_dotdot_rejected(self, tmp_path: Path) -> None:
+        """run_id containing '..' should be rejected."""
+        with pytest.raises(ValueError, match="escapes base"):
+            run_batch(
+                input_dir=str(tmp_path),
+                output_dir=str(tmp_path / "out"),
+                run_id="../../../escape",
+            )
+
+    def test_nonexistent_input_dir_raises(self, tmp_path: Path) -> None:
+        """Non-existent input directory should raise FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            run_batch(
+                input_dir=str(tmp_path / "nonexistent"),
+                output_dir=str(tmp_path / "out"),
+                run_id="test",
+            )
+
+    def test_sw_in_filters_low_radiation(self, sample_csv: str, tmp_path: Path) -> None:
+        """High sw_in threshold should filter most data points."""
+        out_dir_high = str(tmp_path / "high_thresh")
+        out_dir_low = str(tmp_path / "low_thresh")
+
+        results_high = rasterize_all_timestamps(
+            csv_path=sample_csv,
+            output_dir=out_dir_high,
+            sw_in_threshold=300.0,
+            resolution=1.0,
+        )
+        results_low = rasterize_all_timestamps(
+            csv_path=sample_csv,
+            output_dir=out_dir_low,
+            sw_in_threshold=0,
+            resolution=1.0,
+        )
+        # Higher threshold should produce fewer or equal pixels
+        total_high = sum(1 for _, p in results_high if os.path.exists(p))
+        total_low = sum(1 for _, p in results_low if os.path.exists(p))
+        assert total_high <= total_low
+
+    def test_dask_fallback_to_pandas(self, sample_csv: str, tmp_path: Path) -> None:
+        """rasterize_timestamp pandas fallback should produce valid output."""
+        from src.make_prediction.prediction_visualization_hpc import _rasterize_timestamp_pandas
+
+        tif_path = str(tmp_path / "pandas_fallback.tif")
+        result = _rasterize_timestamp_pandas(
+            csv_path=sample_csv,
+            timestamp_value="2015-07-01 12:00:00+00:00",
+            output_tif=tif_path,
+            value_column="sap_velocity_cnn_lstm",
+            timestamp_col="timestamp.1",
+            sw_in_threshold=0,
+            resolution=1.0,
+            lat_range=None,
+            lon_range=None,
+        )
+        assert result is not None
+        assert os.path.exists(result)
+
+    def test_unknown_stat_skipped_gracefully(
+        self,
+        sample_geotiffs: List[str],
+        tmp_path: Path,
+    ) -> None:
+        """Unknown composite statistic should be skipped without error."""
+        out_dir = str(tmp_path / "unknown_stat")
+        results = compute_composites(
+            tif_paths=sample_geotiffs,
+            output_dir=out_dir,
+            stats=("mean", "nonexistent_stat"),
+            render_png=False,
+        )
+        assert "mean" in results
+        assert "nonexistent_stat" not in results
+
+    def test_quoted_csv_header_parsed_correctly(self, tmp_path: Path) -> None:
+        """CSV with quoted headers should be parsed correctly (H3 fix)."""
+        csv_path = str(tmp_path / "quoted_header.csv")
+        # Write CSV with quoted headers manually
+        with open(csv_path, "w") as f:
+            f.write('"timestamp.1","latitude","longitude","sap_velocity_cnn_lstm"\n')
+            f.write('"2015-07-01",0.0,0.0,2.5\n')
+
+        ts_list = discover_timestamps(csv_path)
+        assert len(ts_list) == 1
+        assert "2015-07-01" in ts_list[0]
+# ---------------------------------------------------------------------------
+# Round 3: Integration & regression
+# ---------------------------------------------------------------------------
+
+
+class TestIntegrationRound3:
+    """Round 3 tests: end-to-end pipeline, multi-model, regressions for fixes."""
+
+    def test_full_run_batch_pipeline(self, sample_csv: str, tmp_path: Path) -> None:
+        """Full run_batch: CSV -> GeoTIFFs -> composites, all in one call."""
+        import shutil
+
+        in_dir = str(tmp_path / "batch_in")
+        os.makedirs(in_dir, exist_ok=True)
+        shutil.copy(sample_csv, os.path.join(in_dir, "test_predictions.csv"))
+
+        run_batch(
+            input_dir=in_dir,
+            output_dir=str(tmp_path / "batch_out"),
+            run_id="integration_test",
+            file_glob="*predictions*.csv",
+            sw_in_threshold=0,
+            resolution=1.0,
+            stats=("mean", "count"),
+            render_png=False,
+        )
+
+        run_dir = tmp_path / "batch_out" / "integration_test"
+        assert run_dir.exists()
+        # Should have per-timestamp TIFs
+        tifs = list(run_dir.glob("sap_velocity_*.tif"))
+        assert len(tifs) >= 1
+        # Should have composites
+        comp_dir = run_dir / "composites"
+        assert comp_dir.exists()
+        comp_tifs = list(comp_dir.glob("*.tif"))
+        assert len(comp_tifs) >= 1
+
+    def test_multi_model_columns(self, tmp_path: Path) -> None:
+        """Multiple value_columns should produce separate subdirectories."""
+
+        np.random.seed(123)
+        rows = []
+        for _ in range(30):
+            rows.append(
+                {
+                    "timestamp.1": "2015-07-01",
+                    "latitude": round(np.random.uniform(-10, 10), 1),
+                    "longitude": round(np.random.uniform(-10, 10), 1),
+                    "sw_in": 200.0,
+                    "sap_velocity_xgb": np.random.uniform(0, 5),
+                    "sap_velocity_rf": np.random.uniform(0, 5),
+                }
+            )
+        df = pd.DataFrame(rows)
+        in_dir = str(tmp_path / "multi_in")
+        os.makedirs(in_dir, exist_ok=True)
+        df.to_csv(os.path.join(in_dir, "multi_predictions.csv"), index=False)
+
+        run_batch(
+            input_dir=in_dir,
+            output_dir=str(tmp_path / "multi_out"),
+            run_id="multi_model",
+            value_columns=["sap_velocity_xgb", "sap_velocity_rf"],
+            file_glob="*predictions*.csv",
+            sw_in_threshold=0,
+            resolution=1.0,
+            stats=(),
+            render_png=False,
+        )
+
+        run_dir = tmp_path / "multi_out" / "multi_model"
+        # Each model should get its own subdirectory
+        assert (run_dir / "xgb").exists(), "xgb subdirectory not created"
+        assert (run_dir / "rf").exists(), "rf subdirectory not created"
+        xgb_tifs = list((run_dir / "xgb").glob("*.tif"))
+        rf_tifs = list((run_dir / "rf").glob("*.tif"))
+        assert len(xgb_tifs) >= 1
+        assert len(rf_tifs) >= 1
+
+    def test_composite_after_rasterize_chain(self, tmp_path: Path) -> None:
+        """Rasterize multiple timestamps then composite: mean should be in range."""
+        np.random.seed(42)
+        rows = []
+        for ts in ["2015-07-01", "2015-07-02", "2015-07-03"]:
+            for _ in range(20):
+                rows.append(
+                    {
+                        "timestamp.1": ts,
+                        "latitude": round(np.random.uniform(0, 5), 1),
+                        "longitude": round(np.random.uniform(0, 5), 1),
+                        "sap_velocity_cnn_lstm": np.random.uniform(1, 4),
+                    }
+                )
+        df = pd.DataFrame(rows)
+        csv_path = str(tmp_path / "chain_test.csv")
+        df.to_csv(csv_path, index=False)
+
+        tif_dir = str(tmp_path / "chain_tifs")
+        ts_results = rasterize_all_timestamps(
+            csv_path=csv_path,
+            output_dir=tif_dir,
+            sw_in_threshold=0,
+            resolution=0.5,
+        )
+        tif_paths = [p for _, p in ts_results]
+        assert len(tif_paths) == 3
+
+        comp_dir = str(tmp_path / "chain_composites")
+        comp_results = compute_composites(
+            tif_paths=tif_paths,
+            output_dir=comp_dir,
+            stats=("mean", "min", "max"),
+            render_png=False,
+        )
+        assert len(comp_results) == 3
+
+        # Mean composite values should be within [1, 4] (our data range)
+        with rasterio.open(comp_results["mean"]) as src:
+            data = src.read(1)
+            valid = data[~np.isnan(data)]
+            if len(valid) > 0:
+                assert np.all(valid >= 0.5), f"Mean below expected range: {valid.min()}"
+                assert np.all(valid <= 4.5), f"Mean above expected range: {valid.max()}"
+
+    def test_resume_does_not_corrupt_existing_tifs(
+        self,
+        sample_csv: str,
+        tmp_path: Path,
+    ) -> None:
+        """Running rasterize_all_timestamps twice should produce identical output."""
+        out_dir = str(tmp_path / "resume_test")
+
+        results1 = rasterize_all_timestamps(
+            csv_path=sample_csv,
+            output_dir=out_dir,
+            sw_in_threshold=0,
+            resolution=1.0,
+        )
+        # Read first-run data
+        first_run_data = {}
+        for ts, path in results1:
+            with rasterio.open(path) as src:
+                first_run_data[ts] = src.read(1).copy()
+
+        # Second run (should skip existing)
+        results2 = rasterize_all_timestamps(
+            csv_path=sample_csv,
+            output_dir=out_dir,
+            sw_in_threshold=0,
+            resolution=1.0,
+        )
+
+        # Same timestamps returned
+        assert len(results2) == len(results1)
+        for ts, path in results2:
+            with rasterio.open(path) as src:
+                data = src.read(1)
+            np.testing.assert_array_equal(
+                data,
+                first_run_data[ts],
+                err_msg=f"Data changed on resume for {ts}",
+            )
+
+    def test_hourly_agg_median(self, tmp_path: Path) -> None:
+        """Hourly mode with median aggregation should produce valid output."""
+        np.random.seed(99)
+        rows = []
+        for hour in range(24):
+            rows.append(
+                {
+                    "timestamp.1": f"2015-07-01 {hour:02d}:00:00+00:00",
+                    "latitude": 0.05,
+                    "longitude": 0.05,
+                    "sap_velocity_cnn_lstm": float(hour),
+                }
+            )
+        df = pd.DataFrame(rows)
+        csv_path = str(tmp_path / "hourly_median.csv")
+        df.to_csv(csv_path, index=False)
+
+        out_dir = str(tmp_path / "hourly_median_out")
+        results = rasterize_all_timestamps(
+            csv_path=csv_path,
+            output_dir=out_dir,
+            sw_in_threshold=0,
+            resolution=0.1,
+            hourly_mode=True,
+            hourly_agg="median",
+        )
+        assert len(results) == 1
+        _, tif_path = results[0]
+        with rasterio.open(tif_path) as src:
+            data = src.read(1)
+            valid = data[~np.isnan(data)]
+            # Median of 0..23 = 11.5
+            assert valid[0] == pytest.approx(11.5, abs=0.5)
+
+    def test_explicit_hourly_params_work(self, tmp_path: Path) -> None:
+        """H4 regression: hourly_mode/hourly_agg as explicit params (not **kwargs)."""
+        np.random.seed(77)
+        rows = []
+        for hour in [10, 11, 12]:
+            rows.append(
+                {
+                    "timestamp.1": f"2015-07-01 {hour:02d}:00:00",
+                    "latitude": 5.0,
+                    "longitude": 5.0,
+                    "sap_velocity_cnn_lstm": 2.0,
+                }
+            )
+        df = pd.DataFrame(rows)
+        csv_path = str(tmp_path / "explicit_hourly.csv")
+        df.to_csv(csv_path, index=False)
+
+        out_dir = str(tmp_path / "explicit_hourly_out")
+        # This should not raise TypeError (kwargs removed in H4)
+        results = rasterize_all_timestamps(
+            csv_path=csv_path,
+            output_dir=out_dir,
+            sw_in_threshold=0,
+            resolution=1.0,
+            hourly_mode=True,
+            hourly_agg="max",
+        )
+        assert len(results) == 1

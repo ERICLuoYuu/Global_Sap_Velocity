@@ -19,13 +19,14 @@ import joblib
 from datetime import datetime
 from pathlib import Path
 import logging
-import tensorflow as tf
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 import time
-import warnings
 import json
+import traceback
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
+import re
+from collections import Counter
 
 # Set up logging
 logging.basicConfig(
@@ -38,6 +39,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sap_prediction")
 
+
+def _get_tf():
+    """Lazy-import TensorFlow to avoid startup cost when using non-DL models."""
+    import tensorflow as tf
+    return tf
+
 # Default parameters if config is not available
 DEFAULT_PARAMS = {
     'MODEL_TYPES': ['xgb', 'rf', 'cnn_lstm'],
@@ -46,19 +53,20 @@ DEFAULT_PARAMS = {
     'SHIFT': 1
 }
 
+# Maximum expected sap velocity (cm3 cm-2 h-1). Literature values for
+# high-conducting tropical species can reach 200-300+.
+MAX_EXPECTED_SAP_VELOCITY = 500
+
 try:
-    # Import configuration - adapt this to your config structure
     from config import (
-        BASE_DIR, MODELS_DIR, OUTPUT_DIR, SCALER_DIR,
-        MODEL_TYPES
+        BASE_DIR, MODEL_DIR, OUTPUT_DIR,
     )
+    MODELS_DIR = MODEL_DIR  # Alias for backward compat within this script
 except ImportError:
     logger.warning("Config module not found. Using default parameters.")
     BASE_DIR = Path('.')
     MODELS_DIR = BASE_DIR / 'models'
     OUTPUT_DIR = BASE_DIR / 'outputs'
-    SCALER_DIR = BASE_DIR / 'scalers'
-    MODEL_TYPES = DEFAULT_PARAMS['MODEL_TYPES']
 
 
 # =============================================================================
@@ -378,7 +386,6 @@ def load_model_config(config_path: Path) -> Optional[ModelConfig]:
         return None
     except Exception as e:
         logger.error(f"Error loading config from {config_path}: {e}")
-        import traceback
         logger.error(traceback.format_exc())
         return None
 
@@ -459,7 +466,7 @@ def load_model(models_dir: Path, model_type: str, run_id: str) -> Optional[Any]:
             model = joblib.load(model_path)
         elif model_path.suffix == '.keras':
             logger.info(f"Loading {model_type} Keras model from {model_path}")
-            model = tf.keras.models.load_model(model_path)
+            model = _get_tf().keras.models.load_model(model_path)
         else:
             logger.error(f"Unknown model format: {model_path.suffix}")
             return None
@@ -468,7 +475,6 @@ def load_model(models_dir: Path, model_type: str, run_id: str) -> Optional[Any]:
         
     except Exception as e:
         logger.error(f"Error loading {model_type} model from {model_path}: {e}")
-        import traceback
         logger.error(traceback.format_exc())
         return None
 
@@ -704,23 +710,13 @@ def load_preprocessed_data(data_file):
             logger.error(f"Input data file not found: {data_file_path}")
             return None
         
-        # Read header to check for timestamp column
-        try:
-            with open(data_file_path, 'r') as f:
-                header = f.readline().strip().split(',')
-                time_cols = [col for col in header if 'time' in col.lower() or 'date' in col.lower()]
-                
-                first_row_line = f.readline()
-                if not first_row_line:
-                    logger.error(f"Data file {data_file_path} appears to be empty or only has a header.")
-                    return None
-        except Exception as e:
-            logger.error(f"Error reading file header: {e}")
-            return None
-
         # Load the data using pandas
-        df = pd.read_csv(data_file_path, low_memory=False).dropna()
-        df = df.iloc[:, 1:]
+        df = pd.read_csv(data_file_path, low_memory=False)
+        # Drop unnamed index column if present (e.g. from to_csv with index=True)
+        unnamed_cols = [c for c in df.columns if c.startswith("Unnamed")]
+        if unnamed_cols:
+            df = df.drop(columns=unnamed_cols)
+            logger.info(f"Dropped unnamed index columns: {unnamed_cols}")
         
         # Detect and normalise the timestamp column to 'timestamp'
         ts_col = _resolve_timestamp_column(df.columns)
@@ -747,7 +743,6 @@ def load_preprocessed_data(data_file):
 
     except Exception as e:
         logger.error(f"Error loading preprocessed data from {data_file}: {e}")
-        import traceback
         logger.error(traceback.format_exc())
         return None
 
@@ -852,7 +847,7 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
             logger.warning(f"Location {location_id} has insufficient data points: {len(feature_data)} < {input_width}")
             continue
             
-        for i in range(len(feature_data) - input_width + 1):
+        for i in range(len(feature_data) - input_width - shift + 1):
             window = feature_data[i:i+input_width]
             window_data.append(window)
             
@@ -884,9 +879,9 @@ def create_prediction_windows_improved(df, feature_columns, input_width=8, shift
         return None, [], {}, 0
     
     try:
-        windows_dataset = tf.data.Dataset.from_tensor_slices(windows_array)
+        windows_dataset = _get_tf().data.Dataset.from_tensor_slices(windows_array)
         windows_dataset = windows_dataset.batch(batch_size)
-        windows_dataset = windows_dataset.prefetch(tf.data.AUTOTUNE)
+        windows_dataset = windows_dataset.prefetch(_get_tf().data.AUTOTUNE)
         logger.info("Successfully created TensorFlow dataset for prediction.")
     except Exception as e:
         logger.error(f"Failed to create TensorFlow dataset: {e}")
@@ -980,7 +975,6 @@ def map_predictions_to_df_improved(df, predictions, window_metadata, model_name)
     
     if len(target_indices) != len(set(target_indices)):
         logger.warning(f"Found duplicate target indices. Some predictions may overwrite others.")
-        from collections import Counter
         dup_counts = Counter(target_indices)
         duplicates = {idx: count for idx, count in dup_counts.items() if count > 1}
         logger.debug(f"Duplicate indices: {duplicates}")
@@ -1168,7 +1162,7 @@ def get_feature_columns_from_config(df: pd.DataFrame, config: Optional[ModelConf
         return None  # Signal to use default detection
 
 
-def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, label_width=1, shift=1, config=None):
+def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, config=None):
     """
     Prepare features from preprocessed data with improved error handling.
     
@@ -1182,10 +1176,6 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
         Fitted scaler for features
     input_width : int
         Number of time steps for input window
-    label_width : int
-        Number of time steps for output window
-    shift : int
-        Number of steps to shift for prediction
     config : ModelConfig, optional
         Model configuration for feature selection
         
@@ -1203,20 +1193,11 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
         
         df_processed = df.copy()
         
-        # Convert temperature to Celsius if 'ta' exists
-        if 'ta' in df_processed.columns:
-            try:
-                if df_processed['ta'].median() > 100:
-                    logger.info("Converting temperature from Kelvin to Celsius")
-                    df_processed['ta'] = df_processed['ta'] - 273.15
-            except Exception as e:
-                logger.error(f"Error converting temperature: {e}")
+        # NOTE: Temperature conversion K->C is handled by GEE/CDS processors.
+        # No conversion here to avoid double-conversion.
         
-        # Handle column name standardization
-        if 'annual_mean_temperature' in df_processed.columns:
-            df_processed.rename(columns={'annual_mean_temperature': 'mean_annual_temp'}, inplace=True)
-        if 'annual_precipitation' in df_processed.columns:
-            df_processed.rename(columns={'annual_precipitation': 'mean_annual_precip'}, inplace=True)
+        # NOTE: Column names are kept as-is from GEE/CDS processors.
+        # Model config feature_names handles name mapping.
         
         
         # IMPROVED: Try to get features from config first
@@ -1230,7 +1211,7 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
             # Fallback to default ordered features (original behavior)
             ordered_features = [
                 'ext_rad', 'sw_in', 'ta', 'ws', 'vpd', 'ppfd_in',
-                'mean_annual_temp', 'mean_annual_precip',
+                'annual_mean_temperature', 'annual_precipitation',
                 'day sin', 'week sin', 'month sin', 'year sin'
             ]
             
@@ -1299,7 +1280,6 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
                     logger.warning("Feature scaler doesn't appear to be properly fitted. Skipping scaling.")
             except Exception as e:
                 logger.error(f"Error applying feature scaling: {e}")
-                import traceback
                 logger.error(traceback.format_exc())
         else:
             logger.info("No feature scaler provided. Using unscaled features.")
@@ -1308,7 +1288,6 @@ def prepare_features_from_preprocessed(df, feature_scaler=None, input_width=8, l
         
     except Exception as e:
         logger.error(f"Error in prepare_features_from_preprocessed: {e}")
-        import traceback
         logger.error(traceback.format_exc())
         return None, []
 
@@ -1406,7 +1385,7 @@ def make_predictions_improved(df, models, feature_columns, label_scaler, input_w
                     continue
                 
                 # Handle different model types
-                is_keras_model = isinstance(model, tf.keras.Model)
+                is_keras_model = isinstance(model, _get_tf().keras.Model)
                 
                 if is_keras_model:
                     preds_scaled = model.predict(windows_dataset, verbose=0)
@@ -1510,7 +1489,6 @@ def make_predictions_improved(df, models, feature_columns, label_scaler, input_w
             
         except Exception as e:
             logger.error(f"Error making predictions with {model_type}: {e}")
-            import traceback
             logger.error(traceback.format_exc())
     
     # Create ensemble prediction if multiple models succeeded
@@ -1577,10 +1555,17 @@ def validate_predictions(df_predictions, feature_columns):
             continue
             
         min_val, max_val = pred_data.min(), pred_data.max()
-        if min_val < 0 or max_val > 100:
-            logger.warning(f"Column {col} has potentially unreasonable values: [{min_val:.2f}, {max_val:.2f}]")
-            validation_results[f"{col}_range_issue"] = False
+        if min_val < 0:
+            logger.warning(
+                f"Column {col} has negative predictions: min={min_val:.2f}"
+            )
+            validation_results[f"{col}_negative"] = False
             validation_passed = False
+        if max_val > MAX_EXPECTED_SAP_VELOCITY:
+            logger.warning(
+                f"Column {col} has unusually high values: max={max_val:.2f} "
+                f"(threshold={MAX_EXPECTED_SAP_VELOCITY})"
+            )
     
     # 2. Check for temporal consistency if time column exists
     time_col = None
@@ -1633,8 +1618,8 @@ def validate_predictions(df_predictions, feature_columns):
                         logger.warning(f"Column {col} shows very low correlation with {feat}: {corr:.3f}")
                         validation_results[f"{col}_{feat}_correlation"] = False
                         validation_passed = False
-                except (ValueError, ZeroDivisionError, IndexError):
-                    pass
+                except (ValueError, ZeroDivisionError, IndexError) as exc:
+                    logger.debug(f"Correlation check skipped for {feat}/{col}: {exc}")
     
     if validation_passed:
         logger.info("All prediction validations passed.")
@@ -1708,7 +1693,6 @@ def _extract_year_from_filename(stem: str) -> str:
     str
         4-digit year string, or 'unknown' if not found.
     """
-    import re
     match = re.search(r'((?:19|20)\d{2})', stem)
     return match.group(1) if match else 'unknown'
 
@@ -1740,7 +1724,7 @@ def main():
         logger.error(f"Input directory not found: {input_dir}")
         sys.exit(1)
     input_files = list(input_dir.glob('*.csv'))
-    print(f"Found {len(input_files)} input files in {input_dir}")
+    logger.info(f"Found {len(input_files)} input files in {input_dir}")
     if not input_files:
         logger.error(f"No CSV files found in {input_dir}")
         sys.exit(1)
@@ -1920,11 +1904,16 @@ def main():
 
         # Finish
         end_time = time.time()
-        execution_time = end_time - start_time
+        execution_time = end_time - file_start_time
         logger.info("="*60)
         logger.info(" Prediction Script Completed ")
         logger.info(f" Execution time: {execution_time:.2f} seconds ({execution_time/60:.2f} minutes)")
         logger.info("="*60)
+
+
+    # Total execution time
+    total_time = time.time() - start_time
+    logger.info(f"All files processed in {total_time:.2f}s ({total_time/60:.2f} min)")
 
 
 if __name__ == "__main__":
@@ -1936,6 +1925,5 @@ if __name__ == "__main__":
         sys.exit(se.code)
     except Exception as e:
         logger.error(f"Unhandled error: {e}")
-        import traceback
         logger.error(traceback.format_exc())
         sys.exit(1)

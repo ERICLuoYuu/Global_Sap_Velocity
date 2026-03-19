@@ -2949,9 +2949,12 @@ def run_phase6(df_results, df_agg):
             continue
         _top5 = _sub24.nlargest(5, "r2_pooled")["method"].tolist()
         _df_ref = df_results[(df_results.time_scale == _scale) & (df_results.gap_size == _ref_gap)]
-        _site_r2 = (
-            _df_ref[_df_ref.method.isin(_top5)].groupby(["method", "site"]).apply(compute_pooled_metrics).reset_index()
-        )
+        _site_rows = []
+        for (_sm, _ss), _sg in _df_ref[_df_ref.method.isin(_top5)].groupby(["method", "site"]):
+            _pm = compute_pooled_metrics(_sg)
+            _pmd = _pm if isinstance(_pm, dict) else _pm.to_dict()
+            _site_rows.append({"method": _sm, "site": _ss, **_pmd})
+        _site_r2 = pd.DataFrame(_site_rows)
         _fig10, _ax10 = plt.subplots(figsize=(14, 7))
         _rng10 = np.random.default_rng(42)
         _pos10, _lab10 = [], []

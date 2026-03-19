@@ -1969,6 +1969,7 @@ def _benchmark_one_segment(
     gt = sdata.get(scale)
     if gt is None or len(gt) < 50:
         return []
+    seg_length = len(gt)
     site = sdata.get("site", key)
     group = method_name.split("_")[0]
     is_env = method_name.endswith("_env")
@@ -2017,6 +2018,7 @@ def _benchmark_one_segment(
                         {
                             "time_scale": scale,
                             "site": site,
+                            "seg_length": seg_length,
                             "method": method_name,
                             "group": group,
                             "gap_size": gsize,
@@ -2051,6 +2053,7 @@ def _benchmark_one_segment(
                 {
                     "time_scale": scale,
                     "site": site,
+                    "seg_length": seg_length,
                     "method": method_name,
                     "group": group,
                     "gap_size": gsize,
@@ -3041,109 +3044,129 @@ def run_phase6(df_results, df_agg):
         plt.close(_fig11)
         print(f"  ✓ fig11_rmse_vs_gapsize.png  [{_scale}]")
 
-    # ── Phase 6 Fig 12: R² × data volume × gap size × model (faceted heatmap) ─
-    # Shows how training data volume affects model performance across gap sizes.
-    # Each panel = one gap size bin; x-axis = model; y-axis = data volume bin;
-    # fill = pooled R².
+    # ── Phase 6 Fig 12: 3D R² cube — model group × gap size × data volume ────
+    # 3D bar chart where each cube = one (model_group, gap_size_bin, volume_bin).
+    # x = model group, y = gap size bin, z = data volume bin.
+    # Cube color = pooled R² (RdYlGn: green=high, red=low).
+    from matplotlib.colors import Normalize
+
     for _scale in ["hourly", "daily"]:
-        _df_s = df_results[df_results.time_scale == _scale]
-        if _df_s.empty or "n_points" not in _df_s.columns:
+        _df_s = df_results[df_results.time_scale == _scale].copy()
+        if _df_s.empty:
             continue
 
-        # Estimate segment length per site from max valid gap size
-        # (gap must be < 50% of segment → segment ≈ max_gap * 2)
-        _site_max_gap = _df_s.dropna(subset=["r2"]).groupby("site")["gap_size"].max()
-        _site_len = (_site_max_gap * 2).rename("seg_length")
+        # seg_length: use directly if available, else estimate
+        if "seg_length" not in _df_s.columns:
+            _site_max_gap = _df_s.dropna(subset=["r2"]).groupby("site")["gap_size"].max()
+            _df_s = _df_s.merge((_site_max_gap * 2).rename("seg_length"), on="site", how="left")
 
-        # Bin segments by estimated length
+        # Data volume bins
         if _scale == "hourly":
-            _vol_bins = [0, 500, 1000, 2000, 5000, 50000]
-            _vol_labels = ["<500h", "500-1kh", "1k-2kh", "2k-5kh", ">5kh"]
+            _vol_bins = [0, 1500, 3000, 6000, 12000, 200000]
+            _vol_labels = ["<2mo", "2-4mo", "4-8mo", "8-16mo", ">16mo"]
         else:
-            _vol_bins = [0, 60, 120, 365, 3000]
-            _vol_labels = ["<60d", "60-120d", "120-365d", ">365d"]
-
-        _df_s = _df_s.merge(_site_len, on="site", how="left")
-        _df_s["vol_bin"] = pd.cut(_df_s["seg_length"], bins=_vol_bins, labels=_vol_labels, right=False)
+            _vol_bins = [0, 60, 150, 365, 5000]
+            _vol_labels = ["<60d", "60-150d", "150-365d", ">365d"]
+        _df_s["vol_bin"] = pd.cut(
+            _df_s["seg_length"], bins=_vol_bins, labels=list(range(len(_vol_labels))), right=False
+        )
         _df_s = _df_s.dropna(subset=["vol_bin"])
+        _df_s["vol_bin"] = _df_s["vol_bin"].astype(int)
+        _populated_vols = sorted(_df_s["vol_bin"].unique())
+        if len(_populated_vols) < 2:
+            print(f"  ⚠ fig12 [{_scale}]: only {len(_populated_vols)} volume bin(s), skipping")
+            continue
 
-        # Select gap size bins for panels (representative subset)
+        # Gap size bins
         _all_gs = sorted(_df_s.gap_size.unique())
         if _scale == "hourly":
-            _panel_gs = [g for g in [1, 6, 24, 72, 168, 720] if g in _all_gs]
+            _gap_bins_vals = [g for g in [1, 3, 6, 12, 24, 72, 168, 720] if g in _all_gs]
         else:
-            _panel_gs = [g for g in [1, 3, 7, 14, 30] if g in _all_gs]
-        if not _panel_gs:
+            _gap_bins_vals = [g for g in [1, 3, 7, 14, 30] if g in _all_gs]
+        _gap_labels = [_human_size(g, _scale) for g in _gap_bins_vals]
+
+        # Method groups
+        _grp_order = ["A", "B", "C", "Ce", "D", "De"]
+        _grp_names = ["Interp", "Stat", "ML", "ML+env", "DL", "DL+env"]
+
+        # Compute pooled R² for each (group, gap_size, vol_bin)
+        _cube_data = {}
+        for (_grp, _gs, _vb), _gdf in _df_s.groupby(["group", "gap_size", "vol_bin"]):
+            if _gs not in _gap_bins_vals or _grp not in _grp_order:
+                continue
+            _valid = _gdf.dropna(subset=["n_points"])
+            if _valid.empty or _valid["n_points"].sum() == 0:
+                continue
+            _N = _valid["n_points"].sum()
+            _sr = _valid["ss_res"].sum()
+            _st = _valid["sum_true"].sum()
+            _stq = _valid["sum_true_sq"].sum()
+            _mn = _st / _N
+            _sstot = _stq - _N * _mn**2
+            # Best method in group: take the group-level pooled R²
+            _r2 = float(1 - _sr / _sstot) if _sstot > 1e-12 else np.nan
+            _cube_data[(_grp, _gs, int(_vb))] = max(_r2, 0.0)  # clamp negatives for viz
+
+        if not _cube_data:
             continue
 
-        # Select model groups (best method per group for clarity)
-        _method_order = [m for g in ["A", "B", "C", "Ce", "D", "De"] for m in METHOD_GROUPS.get(g, [])]
-        _methods_present = [m for m in _method_order if m in _df_s.method.unique()]
+        # Build 3D figure
+        _fig12 = plt.figure(figsize=(16, 10))
+        _ax12 = _fig12.add_subplot(111, projection="3d")
 
-        _ncols = min(3, len(_panel_gs))
-        _nrows = (len(_panel_gs) - 1) // _ncols + 1
-        _fig12, _axes12 = plt.subplots(_nrows, _ncols, figsize=(7 * _ncols, 5 * _nrows), squeeze=False)
-        _axes12_flat = _axes12.ravel()
+        _cmap12 = plt.cm.RdYlGn
+        _norm12 = Normalize(vmin=0, vmax=1)
+        _dx, _dy, _dz = 0.7, 0.7, 0.7  # cube size
 
-        for _gi, _gs in enumerate(_panel_gs):
-            _ax12 = _axes12_flat[_gi]
-            _gs_df = _df_s[_df_s.gap_size == _gs]
-            if _gs_df.empty:
-                _ax12.set_visible(False)
-                continue
-
-            # Compute pooled R² per (method, vol_bin)
-            _hm_rows = []
-            for (_m, _vb), _gdf in _gs_df.groupby(["method", "vol_bin"]):
-                _valid = _gdf.dropna(subset=["n_points"])
-                if _valid.empty:
-                    _hm_rows.append({"method": _m, "vol_bin": _vb, "r2": np.nan})
-                    continue
-                _N = _valid["n_points"].sum()
-                if _N == 0:
-                    _hm_rows.append({"method": _m, "vol_bin": _vb, "r2": np.nan})
-                    continue
-                _sr = _valid["ss_res"].sum()
-                _st = _valid["sum_true"].sum()
-                _stq = _valid["sum_true_sq"].sum()
-                _mn = _st / _N
-                _sstot = _stq - _N * _mn ** 2
-                _r2 = float(1 - _sr / _sstot) if _sstot > 1e-12 else np.nan
-                _hm_rows.append({"method": _m, "vol_bin": _vb, "r2": _r2})
-
-            _hm_df = pd.DataFrame(_hm_rows)
-            _pivot12 = _hm_df.pivot_table(index="vol_bin", columns="method", values="r2")
-            # Reorder
-            _pivot12 = _pivot12.reindex(index=_vol_labels, columns=_methods_present)
-            _pivot12 = _pivot12.dropna(how="all", axis=0).dropna(how="all", axis=1)
-
-            if _pivot12.empty:
-                _ax12.set_visible(False)
-                continue
-
-            sns.heatmap(
-                _pivot12, cmap="RdYlGn", vmin=0, vmax=1, annot=True, fmt=".2f",
-                linewidths=0.3, ax=_ax12, annot_kws={"size": 6},
-                cbar=(_gi == 0), cbar_kws={"label": "Pooled R²", "shrink": 0.8},
+        for (_grp, _gs, _vb), _r2 in _cube_data.items():
+            _xi = _grp_order.index(_grp)
+            _yi = _gap_bins_vals.index(_gs)
+            _zi = _populated_vols.index(_vb)
+            _color = _cmap12(_norm12(_r2))
+            _ax12.bar3d(
+                _xi - _dx / 2,
+                _yi - _dy / 2,
+                _zi - _dz / 2,
+                _dx,
+                _dy,
+                _dz,
+                color=_color,
+                alpha=0.85,
+                edgecolor="grey",
+                linewidth=0.3,
             )
-            _ax12.set_title(f"Gap = {_human_size(_gs, _scale)}", fontweight="bold", fontsize=11)
-            _ax12.set_xlabel("Method", fontsize=9)
-            _ax12.set_ylabel("Training Data Volume" if _gi % _ncols == 0 else "", fontsize=9)
-            _ax12.tick_params(axis="x", rotation=45, labelsize=7)
-            _ax12.tick_params(axis="y", labelsize=8)
 
-        for _ai in range(len(_panel_gs), len(_axes12_flat)):
-            _axes12_flat[_ai].set_visible(False)
+        # Axes labels
+        _ax12.set_xticks(range(len(_grp_order)))
+        _ax12.set_xticklabels(_grp_names, fontsize=9, rotation=15)
+        _ax12.set_xlabel("Method Group", fontsize=11, labelpad=10)
 
-        _fig12.suptitle(
-            f"R² vs Training Data Volume × Gap Size × Model ({_scale.capitalize()})",
-            fontweight="bold", fontsize=14,
+        _ax12.set_yticks(range(len(_gap_bins_vals)))
+        _ax12.set_yticklabels(_gap_labels, fontsize=8)
+        _ax12.set_ylabel("Gap Size", fontsize=11, labelpad=10)
+
+        _ax12.set_zticks(range(len(_populated_vols)))
+        _ax12.set_zticklabels([_vol_labels[v] for v in _populated_vols], fontsize=8)
+        _ax12.set_zlabel("Training Data Volume", fontsize=11, labelpad=10)
+
+        # Colorbar
+        _sm12 = plt.cm.ScalarMappable(cmap=_cmap12, norm=_norm12)
+        _sm12.set_array([])
+        _cb12 = _fig12.colorbar(_sm12, ax=_ax12, shrink=0.5, pad=0.1)
+        _cb12.set_label("Pooled R²", fontsize=11)
+
+        _ax12.set_title(
+            f"3D Performance Cube — R² by Model, Gap Size & Data Volume ({_scale.capitalize()})",
+            fontweight="bold",
+            fontsize=13,
+            pad=20,
         )
-        _fig12.tight_layout(rect=[0, 0, 1, 0.95])
+        _ax12.view_init(elev=25, azim=-60)
+
         (FIGS_OUT / _scale).mkdir(parents=True, exist_ok=True)
-        _fig12.savefig(str(FIGS_OUT / _scale / "fig12_r2_volume_gapsize_model.png"), dpi=300)
+        _fig12.savefig(str(FIGS_OUT / _scale / "fig12_r2_3d_cube.png"), dpi=300, bbox_inches="tight")
         plt.close(_fig12)
-        print(f"  ✓ fig12_r2_volume_gapsize_model.png  [{_scale}]")
+        print(f"  ✓ fig12_r2_3d_cube.png  [{_scale}]")
 
     print("\nOutputs saved to:")
     print(f"  Statistics: {STATS_OUT}")

@@ -2394,8 +2394,13 @@ def run_phase6(df_results, df_agg):
 
         for _ai, _metric in enumerate(_metrics4):
             _ax = _axes[_ai]
-            _mc = f"{_metric}_mean"
-            _sc = f"{_metric}_std"
+            # Use pooled metrics for r2/nse (per-replicate mean is broken for small gaps)
+            if _metric in ("r2", "nse") and f"{_metric}_pooled" in _sub.columns:
+                _mc = f"{_metric}_pooled"
+                _sc = None  # pooled metric has no std (single value per group)
+            else:
+                _mc = f"{_metric}_mean"
+                _sc = f"{_metric}_std"
             if _mc not in _sub.columns:
                 continue
             for _m in METHODS:
@@ -2404,7 +2409,7 @@ def run_phase6(df_results, df_agg):
                     continue
                 _x = _md.gap_size.values.astype(float)
                 _y = _md[_mc].values
-                _ys = _md[_sc].fillna(0).values
+                _ys = _md[_sc].fillna(0).values if _sc and _sc in _md.columns else np.zeros_like(_y)
                 _c = _method_color(_m)
                 _ls = _method_ls(_m)
                 _ax.plot(_x, _y, color=_c, linestyle=_ls, linewidth=1.5, label=_m, alpha=0.85)
@@ -2441,7 +2446,7 @@ def run_phase6(df_results, df_agg):
         _gsizes = sorted(_sub.gap_size.unique())
         _m_order = [m for g in ["A", "B", "C", "D", "Ce", "De"] for m in METHOD_GROUPS.get(g, [])]
         _pivot = (
-            _sub.pivot_table(index="method", columns="gap_size", values="r2_mean", aggfunc="mean")
+            _sub.pivot_table(index="method", columns="gap_size", values="r2_pooled", aggfunc="mean")
             .reindex(index=_m_order)
             .reindex(columns=_gsizes)
         )
@@ -2509,7 +2514,7 @@ def run_phase6(df_results, df_agg):
             _gd = _sub[_sub.method.isin(_methods)]
             if _gd.empty:
                 continue
-            _best_m = _gd.groupby("method")["r2_mean"].mean().idxmax()
+            _best_m = _gd.groupby("method")["r2_pooled"].mean().idxmax()
             _best_per_group[_grp] = _best_m
 
         _fig3, _ax3 = plt.subplots(figsize=(11, 6))
@@ -2517,7 +2522,7 @@ def run_phase6(df_results, df_agg):
         for _grp, _m in _best_per_group.items():
             _md = _sub[_sub.method == _m].sort_values("gap_size")
             _x = _md.gap_size.values.astype(float)
-            _y = _md["r2_mean"].values
+            _y = _md["r2_pooled"].values
             _ax3.plot(_x, _y, color=GROUP_COLORS[_grp], linewidth=2.5, label=f"Group {_grp}: {_m}")
             _group_lines[_grp] = (_x, _y)
 
@@ -2565,9 +2570,9 @@ def run_phase6(df_results, df_agg):
             _bsub = _sub[(_sub.gap_size >= _lo) & (_sub.gap_size <= min(_hi, _sub.gap_size.max()))]
             if _bsub.empty:
                 continue
-            _best = _bsub.loc[_bsub.r2_mean.idxmax()]
-            _r2_val = float(_best.r2_mean)
-            _rmse_val = float(_best.rmse_mean)
+            _best = _bsub.loc[_bsub.r2_pooled.idxmax()]
+            _r2_val = float(_best.r2_pooled)
+            _rmse_val = float(_best.rmse_pooled)
             _rel = "Reliable" if _r2_val >= 0.8 else "Marginal" if _r2_val >= R2_THRESHOLD else "⚠ Unreliable"
             _rows_dm.append(
                 {
@@ -2625,7 +2630,7 @@ def run_phase6(df_results, df_agg):
             continue
         _best = (
             _sub.groupby("gap_size")
-            .agg(r2_mean=("r2_mean", "max"), r2_std=("r2_std", "mean"), nse_mean=("nse_mean", "max"))
+            .agg(r2_mean=("r2_pooled", "max"), r2_std=("r2_std", "mean"), nse_mean=("nse_pooled", "max"))
             .reset_index()
             .sort_values("gap_size")
         )
@@ -2720,8 +2725,8 @@ def run_phase6(df_results, df_agg):
             print(f"  ✓ fig_boxplots_group_{_grp}.png  [{_scale}]")
 
     # ── Phase 6 Fig 7: Hourly vs daily comparison ────────────────────────────────
-    _h_best = df_agg[df_agg.time_scale == "hourly"].groupby("gap_size")["r2_mean"].max()
-    _d_best = df_agg[df_agg.time_scale == "daily"].groupby("gap_size")["r2_mean"].max()
+    _h_best = df_agg[df_agg.time_scale == "hourly"].groupby("gap_size")["r2_pooled"].max()
+    _d_best = df_agg[df_agg.time_scale == "daily"].groupby("gap_size")["r2_pooled"].max()
 
     if not _h_best.empty and not _d_best.empty:
         _fig7, _ax7 = plt.subplots(figsize=(11, 6))

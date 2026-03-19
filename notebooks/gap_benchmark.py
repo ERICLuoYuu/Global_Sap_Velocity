@@ -50,7 +50,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.patches import Patch
-from scipy import interpolate as scipy_interp
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -356,502 +355,79 @@ def inject_gaps_replicated(
     return results
 
 
-# ── Group A: Classical Interpolation ─────────────────────────────────────────
+# ── Gap-filling methods (imported from src/gap_filling/methods/) ──────────────
+# Method definitions extracted to src/gap_filling/methods/ for reuse by both
+# the benchmark and the production gap-filling pipeline.
 
+from src.gap_filling.methods.dl import (
+    _HAS_TORCH,
+    _N_GPUS,
+    _dl_fill,
+    _fit_dl_on_ground_truth,
+    _predict_dl_at_gaps_cached,
+    torch,
+)
+from src.gap_filling.methods.interpolation import (
+    fill_akima,
+    fill_cubic,
+    fill_linear,
+    fill_nearest,
+)
+from src.gap_filling.methods.ml import (
+    _RF_KWARGS,
+    _XGB_KWARGS,
+    _fit_and_predict_ml,
+    _fit_ml_on_ground_truth,
+    _predict_ml_at_gaps,
+    fill_knn,
+    fill_rf,
+    fill_xgb_model,
+)
+from src.gap_filling.methods.statistical import (
+    fill_mdv,
+    fill_rolling_mean,
+    fill_stl,
+)
 
-def fill_linear(s: pd.Series) -> pd.Series:
-    """Linear interpolation between known values."""
-    return s.interpolate(method="linear", limit_direction="both").clip(lower=0)
-
-
-def _find_gap_ranges(s: pd.Series) -> list:
-    """Return list of (start_iloc, end_iloc) for each contiguous NaN block."""
-    is_nan = s.isna().values.astype(np.int8)
-    padded = np.concatenate([[0], is_nan, [0]])
-    diff = np.diff(padded)
-    starts = np.where(diff == 1)[0]
-    ends = np.where(diff == -1)[0]
-    return list(zip(starts.tolist(), ends.tolist()))
-
-
-def fill_cubic(s: pd.Series) -> pd.Series:
-    """Cubic spline interpolation scoped to local window around each gap."""
-    gaps = _find_gap_ranges(s)
-    if not gaps:
-        return s.clip(lower=0)
-    filled = s.copy()
-    for g_start, g_end in gaps:
-        gap_len = g_end - g_start
-        margin = max(gap_len * 3, 72)
-        lo = max(0, g_start - margin)
-        hi = min(len(s), g_end + margin)
-        window = s.iloc[lo:hi]
-        try:
-            interped = window.interpolate(method="spline", order=3, limit_direction="both")
-            filled.iloc[g_start:g_end] = interped.iloc[g_start - lo : g_end - lo]
-        except Exception:
-            interped = window.interpolate(method="linear", limit_direction="both")
-            filled.iloc[g_start:g_end] = interped.iloc[g_start - lo : g_end - lo]
-    if filled.isna().any():
-        filled = fill_linear(filled)
-    return filled.clip(lower=0)
-
-
-def fill_akima(s: pd.Series) -> pd.Series:
-    """
-    Akima interpolation — monotonicity-preserving, avoids overshooting.
-
-    Extrapolation positions fall back to nearest-neighbour interpolation.
-    """
-    if s.notna().sum() < 4:
-        return fill_linear(s)
-    try:
-        valid_idx = np.where(s.notna())[0]
-        valid_vals = s.values[valid_idx]
-        akima = scipy_interp.Akima1DInterpolator(valid_idx, valid_vals)
-        filled = s.copy()
-        null_pos = np.where(s.isna())[0]
-        in_range = (null_pos >= valid_idx[0]) & (null_pos <= valid_idx[-1])
-        if in_range.any():
-            filled.iloc[null_pos[in_range]] = akima(null_pos[in_range])
-        if (~in_range).any():
-            filled = filled.interpolate(method="nearest", limit_direction="both")
-        return filled.clip(lower=0)
-    except Exception:
-        return fill_linear(s)
-
-
-def fill_nearest(s: pd.Series) -> pd.Series:
-    """Nearest-neighbour interpolation."""
-    return s.interpolate(method="nearest", limit_direction="both").clip(lower=0)
-
-
-# ── Group B: Statistical / Climatological ────────────────────────────────────
-
-
-def _is_hourly_series(s: pd.Series) -> bool:
-    """Return True when the median time step is ≤ 2 h."""
-    if len(s) < 2:
-        return True
-    median_dt = pd.Series(s.index).diff().dropna().median()
-    return bool(median_dt <= pd.Timedelta("2h"))
-
-
-def fill_mdv(s: pd.Series, window_days: int = 7) -> pd.Series:
-    """
-    Mean Diurnal Variation gap-filling (vectorized).
-
-    Each missing timestep is replaced by the mean of observed values at the
-    same hour-of-day (hourly) or day-of-week (daily) within ±window_days.
-    Residual NaNs fall back to linear interpolation.
-    """
-    filled = s.copy()
-    null_mask = s.isna()
-    if not null_mask.any():
-        return filled.clip(lower=0)
-    hourly = _is_hourly_series(s)
-    # Build a period key for grouping (hour-of-day for hourly, day-of-week for daily)
-    period_key = s.index.hour if hourly else s.index.dayofweek
-    # Vectorized: rolling mean per period-of-day within ±window_days
-    window_td = pd.Timedelta(days=window_days)
-    observed = s[s.notna()]
-    obs_period = observed.index.hour if hourly else observed.index.dayofweek
-    for period_val in pd.unique(period_key[null_mask]):
-        missing_at_period = null_mask & (period_key == period_val)
-        if not missing_at_period.any():
-            continue
-        obs_same_period = observed[obs_period == period_val]
-        if obs_same_period.empty:
-            continue
-        missing_times = s.index[missing_at_period]
-        # Vectorized lookup: for each missing time, find obs within ±window
-        # Use pandas Index for tz-aware comparison (numpy arrays lose tz info)
-        obs_idx = obs_same_period.index
-        obs_vals = obs_same_period.values
-        for ts in missing_times:
-            w_start = ts - window_td
-            w_end = ts + window_td
-            mask = (obs_idx >= w_start) & (obs_idx <= w_end)
-            if mask.any():
-                filled[ts] = max(0.0, float(np.mean(obs_vals[mask])))
-    if filled.isna().any():
-        filled = fill_linear(filled)
-    return filled.clip(lower=0)
-
-
-def fill_rolling_mean(s: pd.Series, window: int = None) -> pd.Series:
-    """
-    Rolling window mean gap-filling.
-
-    Default window: 48 timesteps (hourly) or 7 (daily).
-    """
-    if window is None:
-        window = 48 if _is_hourly_series(s) else 7
-    rolling = s.rolling(window=window, min_periods=max(1, window // 4), center=True).mean()
-    filled = s.fillna(rolling)
-    if filled.isna().any():
-        filled = fill_linear(filled)
-    return filled.clip(lower=0)
-
-
-def fill_stl(s: pd.Series) -> pd.Series:
-    """
-    STL decomposition + residual interpolation.
-
-    Falls back to fill_rolling_mean on error or insufficient data.
-    """
-    try:
-        from statsmodels.tsa.seasonal import STL
-
-        if not s.isna().any():
-            return s.clip(lower=0)
-        period = 24 if _is_hourly_series(s) else 7
-        if len(s) < period * 2:
-            return fill_rolling_mean(s)
-        # Pre-fill gaps with linear interpolation (less biased than ffill/bfill for large gaps)
-        s_pre = s.interpolate(method="linear", limit_direction="both")
-        if s_pre.isna().any():
-            s_pre = s_pre.ffill().bfill()
-        if s_pre.isna().any():
-            s_pre = s_pre.fillna(s_pre.mean() if not s_pre.isna().all() else 0.0)
-        res = STL(s_pre, period=period, robust=True).fit()
-        residual = pd.Series(res.resid, index=s.index)
-        residual[s.isna()] = np.nan
-        residual_filled = residual.interpolate(method="linear", limit_direction="both").fillna(0.0)
-        return pd.Series(res.trend + res.seasonal + residual_filled.values, index=s.index).clip(lower=0)
-    except Exception:
-        return fill_rolling_mean(s)
-
-
-# ── Group C: Machine Learning ─────────────────────────────────────────────────
-import xgboost as xgb
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.preprocessing import StandardScaler
-
-N_LAGS = 24
-
-
-def build_ml_features(s: pd.Series, n_lags: int = N_LAGS, env_df: "pd.DataFrame | None" = None) -> pd.DataFrame:
-    """
-    Build lag + temporal features for ML gap-filling.
-
-    Features: t-1…t-n_lags, hour_of_day, day_of_year, month,
-              rolling_mean_24, rolling_std_24, is_daytime.
-    If env_df is provided, adds lagged env features (t-1…t-n_lags) for each env column.
-    """
-    df = pd.DataFrame({"y": s.values}, index=s.index)
-    for lag in range(1, n_lags + 1):
-        df[f"lag_{lag}"] = df["y"].shift(lag)
-    df["hour_of_day"] = df.index.hour
-    df["day_of_year"] = df.index.dayofyear
-    df["month"] = df.index.month
-    df["rolling_mean_24"] = df["y"].rolling(24, min_periods=1).mean()
-    df["rolling_std_24"] = df["y"].rolling(24, min_periods=1).std().fillna(0)
-    df["is_daytime"] = ((df.index.hour >= 6) & (df.index.hour <= 20)).astype(int)
-    # Add env features if available (C3 fix)
-    if env_df is not None:
-        env_aligned = env_df.reindex(df.index)
-        for ecol in env_aligned.columns:
-            for lag in range(1, n_lags + 1):
-                df[f"env_{ecol}_lag_{lag}"] = env_aligned[ecol].shift(lag)
-    return df.drop(columns=["y"])
-
-
-def _fit_ml_on_ground_truth(gt_series: pd.Series, model_cls, model_kwargs: dict, env_df: "pd.DataFrame | None" = None):
-    """Pre-train an ML model on the full ground truth (no gaps).
-
-    Returns (model, scaler) or None if insufficient data.
-    """
-    features = build_ml_features(gt_series, env_df=env_df)
-    train_mask = gt_series.notna() & features.notna().all(axis=1)
-    if train_mask.sum() < 50:
-        return None
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(features[train_mask].values)
-    model = model_cls(**model_kwargs)
-    model.fit(X_train_s, gt_series[train_mask].values)
-    return model, scaler
-
-
-def _predict_ml_at_gaps(s: pd.Series, cached, env_df: "pd.DataFrame | None" = None) -> pd.Series:
-    """Predict at gap positions using a pre-trained ML model.
-
-    If cached is None, falls back to linear interpolation.
-    """
-    if cached is None:
-        return fill_linear(s)
-    model, scaler = cached
-    features = build_ml_features(s, env_df=env_df)
-    test_mask = s.isna() & features.notna().all(axis=1)
-    filled = s.copy()
-    if test_mask.sum() > 0:
-        X_test = scaler.transform(features[test_mask].values)
-        filled[test_mask] = np.clip(model.predict(X_test), 0, None)
-    if filled.isna().any():
-        filled = fill_linear(filled)
-    return filled.clip(lower=0)
-
-
-def _fit_and_predict_ml(s: pd.Series, model_cls, model_kwargs: dict, env_df: "pd.DataFrame | None" = None) -> pd.Series:
-    """Generic ML gap-fill: fit on observed data, predict at gap positions."""
-    features = build_ml_features(s, env_df=env_df)
-    train_mask = s.notna() & features.notna().all(axis=1)
-    test_mask = s.isna() & features.notna().all(axis=1)
-    if train_mask.sum() < 50:
-        return fill_linear(s)
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(features[train_mask].values)
-    model = model_cls(**model_kwargs)
-    model.fit(X_train_s, s[train_mask].values)
-    filled = s.copy()
-    if test_mask.sum() > 0:
-        X_test = scaler.transform(features[test_mask].values)
-        filled[test_mask] = np.clip(model.predict(X_test), 0, None)
-    if filled.isna().any():
-        filled = fill_linear(filled)
-    return filled.clip(lower=0)
-
-
-def fill_rf(s: pd.Series) -> pd.Series:
-    """Random Forest gap-filling with 24-lag feature set."""
-    return _fit_and_predict_ml(
-        s, RandomForestRegressor, {"n_estimators": 100, "n_jobs": 1, "random_state": RANDOM_SEED}
+# Re-export model classes at module level for _DL_BUILD_FNS compatibility
+if _HAS_TORCH:
+    from src.gap_filling.methods.dl import (
+        BiLSTMModel,
+        CNNLSTMModel,
+        CNNModel,
+        GRUModel,
+        LSTMModel,
+        TransformerModel,
     )
+else:
+    LSTMModel = BiLSTMModel = GRUModel = CNNModel = CNNLSTMModel = TransformerModel = None
 
-
-def fill_xgb_model(s: pd.Series) -> pd.Series:
-    """XGBoost gap-filling with 24-lag feature set."""
-    return _fit_and_predict_ml(
-        s,
-        xgb.XGBRegressor,
-        {
-            "n_estimators": 100,
-            "learning_rate": 0.1,
-            "max_depth": 5,
-            "random_state": RANDOM_SEED,
-            "verbosity": 0,
-            "tree_method": "hist",
-        },
-    )
-
-
-def fill_knn(s: pd.Series, k: int = 10) -> pd.Series:
-    """KNN gap-filling with 24-lag feature set."""
-    k_actual = min(k, max(1, int(s.notna().sum() * 0.1)))
-    if k_actual < k:
-        print(f"    [KNN] k reduced from {k} to {k_actual} (only {s.notna().sum()} observed values)")
-    return _fit_and_predict_ml(s, KNeighborsRegressor, {"n_neighbors": k_actual})
-
-
-# ── Group C-env: ML with environmental features (C3 fix) ─────────────────────
-# These variants accept env_df via closure set during Phase 5 benchmark loop.
-# The _current_env_df global is set per-segment during benchmarking.
-_current_env_df: "pd.DataFrame | None" = None
-
-
-def fill_rf_env(s: pd.Series) -> pd.Series:
-    """Random Forest with sap + env features."""
-    return _fit_and_predict_ml(
-        s,
-        RandomForestRegressor,
-        {"n_estimators": 100, "n_jobs": 1, "random_state": RANDOM_SEED},
-        env_df=_current_env_df,
-    )
-
-
-def fill_xgb_env(s: pd.Series) -> pd.Series:
-    """XGBoost with sap + env features."""
-    return _fit_and_predict_ml(
-        s,
-        xgb.XGBRegressor,
-        {
-            "n_estimators": 100,
-            "learning_rate": 0.1,
-            "max_depth": 5,
-            "random_state": RANDOM_SEED,
-            "verbosity": 0,
-            "tree_method": "hist",
-        },
-        env_df=_current_env_df,
-    )
-
-
-def fill_knn_env(s: pd.Series, k: int = 10) -> pd.Series:
-    """KNN with sap + env features."""
-    k_actual = min(k, max(1, int(s.notna().sum() * 0.1)))
-    return _fit_and_predict_ml(s, KNeighborsRegressor, {"n_neighbors": k_actual}, env_df=_current_env_df)
-
-
-# ── Group D: Deep Learning (PyTorch) ──────────────────────────────────────────
-_HAS_TORCH = False
-try:
-    import torch  # noqa: E402
-    import torch.nn as _nn
-    from torch.utils.data import DataLoader, TensorDataset
-
-    torch.manual_seed(RANDOM_SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(RANDOM_SEED)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    _HAS_TORCH = True
-    _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _N_GPUS = torch.cuda.device_count() if torch.cuda.is_available() else 0
-except ImportError:
-    torch = None
-    _nn = None
-    _DEVICE = None
-    _N_GPUS = 0
-DL_EPOCHS = 50
-DL_PATIENCE = 5
-DL_BATCH = 32
-DL_VAL_SPLIT = 0.1
-
-
-# ── PyTorch model classes ─────────────────────────────────────────────────────
+# ── Standalone fill functions for non-env methods (benchmark dispatch) ────────
+# Group A/B: fill_linear, fill_cubic, fill_akima, fill_nearest,
+#            fill_mdv, fill_rolling_mean, fill_stl — imported above.
+# Group C: fill_rf, fill_xgb_model, fill_knn — imported above.
+# Group D: DL fill functions need _dl_fill + model class.
 
 if _HAS_TORCH:
 
-    class LSTMModel(_nn.Module):
-        """2-layer LSTM (64 units each) — matches original Keras architecture."""
+    def fill_lstm(s):
+        return _dl_fill(s, LSTMModel)
 
-        def __init__(self, n_features: int = 1):
-            super().__init__()
-            self.lstm1 = _nn.LSTM(n_features, 64, batch_first=True)
-            self.drop1 = _nn.Dropout(0.1)
-            self.lstm2 = _nn.LSTM(64, 64, batch_first=True)
-            self.drop2 = _nn.Dropout(0.1)
-            self.fc = _nn.Linear(64, 1)
+    def fill_cnn(s):
+        return _dl_fill(s, CNNModel)
 
-        def forward(self, x):
-            out, _ = self.lstm1(x)
-            out = self.drop1(out)
-            out, _ = self.lstm2(out)
-            out = self.drop2(out[:, -1, :])
-            return self.fc(out)
+    def fill_cnn_lstm(s):
+        return _dl_fill(s, CNNLSTMModel)
 
-    class BiLSTMModel(_nn.Module):
-        """Bidirectional LSTM — uses both past and future context around gaps."""
+    def fill_transformer(s):
+        return _dl_fill(s, TransformerModel)
 
-        def __init__(self, n_features: int = 1):
-            super().__init__()
-            self.lstm = _nn.LSTM(n_features, 64, batch_first=True, bidirectional=True)
-            self.drop = _nn.Dropout(0.1)
-            self.fc = _nn.Linear(128, 1)
+    def fill_bilstm(s):
+        return _dl_fill(s, BiLSTMModel)
 
-        def forward(self, x):
-            out, _ = self.lstm(x)
-            out = self.drop(out[:, -1, :])
-            return self.fc(out)
-
-    class GRUModel(_nn.Module):
-        """2-layer GRU — simpler LSTM variant with fewer parameters."""
-
-        def __init__(self, n_features: int = 1):
-            super().__init__()
-            self.gru = _nn.GRU(n_features, 64, num_layers=2, dropout=0.1, batch_first=True)
-            self.fc = _nn.Linear(64, 1)
-
-        def forward(self, x):
-            out, _ = self.gru(x)
-            return self.fc(out[:, -1, :])
-
-    class CNNModel(_nn.Module):
-        """3-layer 1D-CNN (32→64→32, kernel=3) — matches original Keras architecture."""
-
-        def __init__(self, n_features: int = 1):
-            super().__init__()
-            self.conv1 = _nn.Conv1d(n_features, 32, 3, padding=1)
-            self.conv2 = _nn.Conv1d(32, 64, 3, padding=1)
-            self.conv3 = _nn.Conv1d(64, 32, 3, padding=1)
-            self.fc1 = _nn.Linear(32, 32)
-            self.fc2 = _nn.Linear(32, 1)
-
-        def forward(self, x):
-            # x: (batch, seq, features) → Conv1d needs (batch, features, seq)
-            x = x.permute(0, 2, 1)
-            x = torch.relu(self.conv1(x))
-            x = torch.relu(self.conv2(x))
-            x = torch.relu(self.conv3(x))
-            x = x.mean(dim=2)  # global average pooling
-            x = torch.relu(self.fc1(x))
-            return self.fc2(x)
-
-    class CNNLSTMModel(_nn.Module):
-        """CNN-LSTM hybrid: Conv1D(32→64) → LSTM(64) → Dense(1)."""
-
-        def __init__(self, n_features: int = 1):
-            super().__init__()
-            self.conv1 = _nn.Conv1d(n_features, 32, 3, padding=1)
-            self.conv2 = _nn.Conv1d(32, 64, 3, padding=1)
-            self.lstm = _nn.LSTM(64, 64, batch_first=True)
-            self.drop = _nn.Dropout(0.1)
-            self.fc = _nn.Linear(64, 1)
-
-        def forward(self, x):
-            x = x.permute(0, 2, 1)
-            x = torch.relu(self.conv1(x))
-            x = torch.relu(self.conv2(x))
-            x = x.permute(0, 2, 1)  # back to (batch, seq, 64)
-            out, _ = self.lstm(x)
-            out = self.drop(out[:, -1, :])
-            return self.fc(out)
-
-    class PositionalEmbedding(_nn.Module):
-        """Learned positional embedding for Transformer encoder."""
-
-        def __init__(self, seq_len: int, d_model: int):
-            super().__init__()
-            self.emb = _nn.Embedding(seq_len, d_model)
-            self.seq_len = seq_len
-
-        def forward(self, x):
-            pos = torch.arange(self.seq_len, device=x.device)
-            return x + self.emb(pos)
-
-    class TransformerModel(_nn.Module):
-        """Transformer encoder (2 blocks, 2 heads, d=64) — matches original Keras."""
-
-        def __init__(self, n_features: int = 1):
-            super().__init__()
-            self.input_proj = _nn.Linear(n_features, 64)
-            self.pos_emb = PositionalEmbedding(WINDOW, 64)
-            encoder_layer = _nn.TransformerEncoderLayer(
-                d_model=64,
-                nhead=2,
-                dim_feedforward=128,
-                dropout=0.1,
-                batch_first=True,
-            )
-            self.encoder = _nn.TransformerEncoder(encoder_layer, num_layers=2)
-            self.fc = _nn.Linear(64, 1)
-
-        def forward(self, x):
-            x = self.input_proj(x)
-            x = self.pos_emb(x)
-            x = self.encoder(x)
-            x = x.mean(dim=1)  # global average pooling
-            return self.fc(x)
-
-    # Registry mapping model name → class
-    _MODEL_CLASSES = {
-        "lstm": LSTMModel,
-        "bilstm": BiLSTMModel,
-        "gru": GRUModel,
-        "cnn": CNNModel,
-        "cnn_lstm": CNNLSTMModel,
-        "transformer": TransformerModel,
-    }
-
+    def fill_gru(s):
+        return _dl_fill(s, GRUModel)
 else:
-    LSTMModel = BiLSTMModel = GRUModel = CNNModel = CNNLSTMModel = TransformerModel = None
-    PositionalEmbedding = None
-    _MODEL_CLASSES = {}
-
-
-# ── Stubs when PyTorch unavailable ────────────────────────────────────────────
-if not _HAS_TORCH:
 
     def fill_lstm(s):
         return fill_linear(s)
@@ -871,336 +447,59 @@ if not _HAS_TORCH:
     def fill_gru(s):
         return fill_linear(s)
 
-    def fill_lstm_env(s):
-        return fill_linear(s)
-
-    def fill_cnn_env(s):
-        return fill_linear(s)
-
-    def fill_cnn_lstm_env(s):
-        return fill_linear(s)
-
-    def fill_transformer_env(s):
-        return fill_linear(s)
-
-    def fill_bilstm_env(s):
-        return fill_linear(s)
-
-    def fill_gru_env(s):
-        return fill_linear(s)
+# ── Env-aware fill functions (pass env_df explicitly — no global) ─────────────
+# These are thin wrappers for benchmark backward compatibility only.
+# The benchmark dispatch (_benchmark_one_segment) passes env_df explicitly
+# via the cached path, so these are only reached in edge cases.
 
 
-# Guard: all remaining DL functions check _HAS_TORCH internally
+def _make_env_ml_fill(model_cls, model_kwargs, env_holder):
+    """Create an env-aware ML fill function that reads env_df from a holder dict."""
+
+    def _fill(s):
+        return _fit_and_predict_ml(s, model_cls, model_kwargs, env_df=env_holder.get("df"))
+
+    return _fill
 
 
-def _build_dl_sequences(s: pd.Series, window: int = WINDOW, env_df: "pd.DataFrame | None" = None):
-    """
-    Build supervised (X, y) arrays from contiguous, fully-observed windows.
+# Mutable holder for env_df — set per-segment in benchmark loop.
+# Replaces the old _current_env_df global with an explicit container.
+_env_holder = {"df": None}
 
-    If env_df is None: returns X: (n, window, 1) and y: (n,)
-    If env_df provided: returns X: (n, window, 1+n_env_cols) and y: (n,)
-    Only clean windows (no NaNs in sap or env) are included.
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.neighbors import KNeighborsRegressor
 
-    Note (H4): Windows adjacent to gap boundaries are retained. While gap
-    positions themselves are excluded (NaN check), windows ending 1 step
-    before a gap may encode information about the gap's existence through
-    e.g. sensor drift patterns. This is a conservative design choice —
-    excluding all boundary-adjacent windows would significantly reduce
-    training data on short series.
-    """
-    vals = s.values.astype(np.float32)
-    # Build env feature array if provided
-    env_vals = None
-    n_features = 1
-    if env_df is not None:
-        env_aligned = env_df.reindex(s.index).ffill().bfill().fillna(0)
-        env_vals = env_aligned.values.astype(np.float32)
-        n_features = 1 + env_vals.shape[1]
-    X_list, y_list = [], []
-    for i in range(window, len(vals)):
-        ctx_sap = vals[i - window : i]
-        tgt = vals[i]
-        if np.isnan(tgt) or np.any(np.isnan(ctx_sap)):
-            continue
-        if env_vals is not None:
-            ctx_env = env_vals[i - window : i]
-            if np.any(np.isnan(ctx_env)):
-                continue
-            ctx = np.column_stack([ctx_sap, ctx_env])  # (window, n_features)
-        else:
-            ctx = ctx_sap[:, np.newaxis]  # (window, 1)
-        X_list.append(ctx)
-        y_list.append(tgt)
-    if not X_list:
-        return (np.empty((0, window, n_features), dtype=np.float32), np.empty(0, dtype=np.float32))
-    X = np.array(X_list, dtype=np.float32)
-    y = np.array(y_list, dtype=np.float32)
-    return X, y
+try:
+    import xgboost as xgb
+except ImportError:
+    xgb = None
 
-
-def _train_dl_model(
-    s: pd.Series,
-    model: "_nn.Module",
-    scaler_X: StandardScaler,
-    scaler_y: StandardScaler,
-    env_df: "pd.DataFrame | None" = None,
-    device: "torch.device | None" = None,
-) -> "_nn.Module | None":
-    """
-    Fit a PyTorch model on observed, non-gap data with early stopping.
-
-    Returns the fitted model (on device) or None when too few training samples.
-    Scaler is applied per-feature across the flattened feature dimension (M5 fix).
-    """
-    X, y = _build_dl_sequences(s, env_df=env_df)
-    if len(X) < 100:
-        return None
-    if device is None:
-        device = _DEVICE if _DEVICE is not None else torch.device("cpu")
-    # Scale per-feature: reshape (n, window, features) → (n*window, features)
-    n_samples, window, n_features = X.shape
-    X_flat = X.reshape(-1, n_features)
-    X_scaled = scaler_X.fit_transform(X_flat).reshape(X.shape)
-    ys = scaler_y.fit_transform(y.reshape(-1, 1)).ravel()
-
-    # Train/val split (last DL_VAL_SPLIT fraction for validation)
-    n_val = max(1, int(n_samples * DL_VAL_SPLIT))
-    n_train = n_samples - n_val
-    X_train_t = torch.tensor(X_scaled[:n_train], dtype=torch.float32)
-    y_train_t = torch.tensor(ys[:n_train], dtype=torch.float32).unsqueeze(1)
-    X_val_t = torch.tensor(X_scaled[n_train:], dtype=torch.float32).to(device)
-    y_val_t = torch.tensor(ys[n_train:], dtype=torch.float32).unsqueeze(1).to(device)
-
-    model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_fn = _nn.MSELoss()
-
-    train_ds = TensorDataset(X_train_t, y_train_t)
-    # pin_memory=False: safe in loky worker subprocesses where CUDA may not be initialized
-    train_loader = DataLoader(train_ds, batch_size=DL_BATCH, shuffle=True, pin_memory=False)
-
-    best_val_loss = float("inf")
-    best_state = None
-    patience_counter = 0
-
-    for _epoch in range(DL_EPOCHS):
-        model.train()
-        for xb, yb in train_loader:
-            xb = xb.to(device, non_blocking=True)
-            yb = yb.to(device, non_blocking=True)
-            optimizer.zero_grad()
-            loss = loss_fn(model(xb), yb)
-            loss.backward()
-            optimizer.step()
-
-        model.eval()
-        with torch.no_grad():
-            val_loss = loss_fn(model(X_val_t), y_val_t).item()
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= DL_PATIENCE:
-                break
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-        model = model.to(device)
-    return model
-
-
-def _predict_at_gaps(
-    s: pd.Series,
-    model: "_nn.Module",
-    scaler_X: StandardScaler,
-    scaler_y: StandardScaler,
-    window: int = WINDOW,
-    env_df: "pd.DataFrame | None" = None,
-    device: "torch.device | None" = None,
-) -> pd.Series:
-    """
-    Autoregressively predict values at gap positions using a trained PyTorch model.
-
-    Earlier predictions become context for later predictions within the same gap.
-    Supports multi-feature input when env_df is provided.
-
-    Note (H5): Autoregressive prediction compounds errors for long gaps.
-    """
-    if device is None:
-        device = next(model.parameters()).device if _HAS_TORCH else torch.device("cpu")
-    filled = s.copy()
-    vals = s.values.copy().astype(np.float32)
-    env_vals = None
-    n_features = 1
-    if env_df is not None:
-        env_aligned = env_df.reindex(s.index).ffill().bfill().fillna(0)
-        env_vals = env_aligned.values.astype(np.float32)
-        n_features = 1 + env_vals.shape[1]
-    # Fill gap positions before the lookback window with linear interpolation.
-    _prefix_end = min(window, len(vals))
-    _any_prefix_nan = any(np.isnan(vals[i]) for i in range(_prefix_end))
-    if _any_prefix_nan:
-        _full_interp = filled.interpolate(method="linear", limit_direction="both")
-        for i in range(_prefix_end):
-            if np.isnan(vals[i]):
-                _v = _full_interp.iloc[i]
-                _v = max(0.0, float(_v)) if not np.isnan(_v) else 0.0
-                vals[i] = _v
-                filled.iloc[i] = _v
-
-    model.eval()
-    with torch.no_grad():
-        for i in range(window, len(vals)):
-            if np.isnan(vals[i]):
-                ctx_sap = vals[i - window : i].copy()
-                ctx_sap = pd.Series(ctx_sap).ffill().bfill().fillna(0).values.astype(np.float32)
-                if env_vals is not None:
-                    ctx_env = env_vals[i - window : i]
-                    ctx = np.column_stack([ctx_sap, ctx_env])
-                else:
-                    ctx = ctx_sap[:, np.newaxis]
-                ctx_flat = ctx.reshape(-1, n_features)
-                ctx_sc = scaler_X.transform(ctx_flat).reshape(1, window, n_features)
-                ctx_t = torch.tensor(ctx_sc, dtype=torch.float32).to(device)
-                pred_sc = model(ctx_t).cpu().numpy()
-                pred = float(scaler_y.inverse_transform(pred_sc)[0, 0])
-                pred = max(0.0, pred)
-                vals[i] = pred
-                filled.iloc[i] = pred
-    return filled.clip(lower=0)
-
-
-def _dl_fill(s: pd.Series, model_cls, env_df: "pd.DataFrame | None" = None) -> pd.Series:
-    """
-    Generic DL gap-filling pipeline (PyTorch).
-
-    Builds the model, trains on observed data, predicts at gaps.
-    Falls back to fill_linear when training fails or PyTorch unavailable.
-    """
-    if not _HAS_TORCH:
-        return fill_linear(s)
-    n_features = 1
-    if env_df is not None:
-        env_cols = [c for c in env_df.columns if c in ENV_FEATURE_COLS]
-        if env_cols:
-            env_df = env_df[env_cols]  # filter to valid env columns only
-            n_features = 1 + len(env_cols)
-        else:
-            env_df = None
-    model = model_cls(n_features=n_features)
-    scaler_X = StandardScaler()
-    scaler_y = StandardScaler()
-    fitted = _train_dl_model(s, model, scaler_X, scaler_y, env_df=env_df)
-    if fitted is None:
-        return fill_linear(s)
-    return _predict_at_gaps(s, fitted, scaler_X, scaler_y, env_df=env_df)
-
-
-def _fit_dl_on_ground_truth(gt_series: pd.Series, model_cls, env_df: "pd.DataFrame | None" = None):
-    """Pre-train a PyTorch DL model on the full ground truth (no gaps).
-
-    Returns (model_cpu, scaler_X, scaler_y) or None if insufficient data.
-    Model is moved to CPU after training so it can be pickled by joblib.
-    """
-    if not _HAS_TORCH:
-        return None
-    n_features = 1
-    if env_df is not None:
-        env_cols = [c for c in env_df.columns if c in ENV_FEATURE_COLS]
-        if env_cols:
-            env_df = env_df[env_cols]  # filter to valid env columns only
-            n_features = 1 + len(env_cols)
-        else:
-            env_df = None
-    model = model_cls(n_features=n_features)
-    scaler_X = StandardScaler()
-    scaler_y = StandardScaler()
-    fitted = _train_dl_model(gt_series, model, scaler_X, scaler_y, env_df=env_df)
-    if fitted is None:
-        return None
-    fitted = fitted.cpu()
-    gc.collect()
-    return fitted, scaler_X, scaler_y
-
-
-def _predict_dl_at_gaps_cached(s: pd.Series, cached, env_df: "pd.DataFrame | None" = None) -> pd.Series:
-    """Predict at gap positions using a pre-trained DL model.
-
-    The cached model may be on CPU (from _fit_dl_on_ground_truth). In joblib
-    loky workers, each worker gets its own pickle copy, so the in-place
-    .to(device) only affects the worker's local copy — not the main cache.
-    In sequential mode, the model stays on GPU after the first call.
-    """
-    if cached is None:
-        return fill_linear(s)
-    model, scaler_X, scaler_y = cached
-    # Apply the same env column filter as _fit_dl_on_ground_truth to ensure
-    # n_features matches between training and inference.
-    if env_df is not None:
-        env_cols = [c for c in env_df.columns if c in ENV_FEATURE_COLS]
-        env_df = env_df[env_cols] if env_cols else None
-    if _HAS_TORCH:
-        device = _DEVICE if _DEVICE is not None else torch.device("cpu")
-        model = model.to(device)
-    return _predict_at_gaps(s, model, scaler_X, scaler_y, env_df=env_df)
-
-
-# ── DL fill functions (PyTorch) ──────────────────────────────────────────────
+fill_rf_env = _make_env_ml_fill(RandomForestRegressor, _RF_KWARGS, _env_holder)
+fill_xgb_env = _make_env_ml_fill(xgb.XGBRegressor if xgb else RandomForestRegressor, _XGB_KWARGS, _env_holder)
+fill_knn_env = _make_env_ml_fill(KNeighborsRegressor, {"n_neighbors": 10}, _env_holder)
 
 if _HAS_TORCH:
 
-    def fill_lstm(s: pd.Series) -> pd.Series:
-        """2-layer LSTM (64 units each) gap-filling."""
-        return _dl_fill(s, LSTMModel)
+    def fill_lstm_env(s):
+        return _dl_fill(s, LSTMModel, env_df=_env_holder.get("df"))
 
-    def fill_cnn(s: pd.Series) -> pd.Series:
-        """3-layer 1D-CNN (32→64→32, kernel=3) gap-filling."""
-        return _dl_fill(s, CNNModel)
+    def fill_cnn_env(s):
+        return _dl_fill(s, CNNModel, env_df=_env_holder.get("df"))
 
-    def fill_cnn_lstm(s: pd.Series) -> pd.Series:
-        """CNN-LSTM hybrid gap-filling."""
-        return _dl_fill(s, CNNLSTMModel)
+    def fill_cnn_lstm_env(s):
+        return _dl_fill(s, CNNLSTMModel, env_df=_env_holder.get("df"))
 
-    def fill_transformer(s: pd.Series) -> pd.Series:
-        """Transformer encoder (2 blocks, 2 heads, d=64) gap-filling."""
-        return _dl_fill(s, TransformerModel)
+    def fill_transformer_env(s):
+        return _dl_fill(s, TransformerModel, env_df=_env_holder.get("df"))
 
-    def fill_bilstm(s: pd.Series) -> pd.Series:
-        """Bidirectional LSTM gap-filling."""
-        return _dl_fill(s, BiLSTMModel)
+    def fill_bilstm_env(s):
+        return _dl_fill(s, BiLSTMModel, env_df=_env_holder.get("df"))
 
-    def fill_gru(s: pd.Series) -> pd.Series:
-        """2-layer GRU gap-filling."""
-        return _dl_fill(s, GRUModel)
-
-    # Env-aware DL fill functions
-    def fill_lstm_env(s: pd.Series) -> pd.Series:
-        """LSTM with sap + env features."""
-        return _dl_fill(s, LSTMModel, env_df=_current_env_df)
-
-    def fill_cnn_env(s: pd.Series) -> pd.Series:
-        """1D-CNN with sap + env features."""
-        return _dl_fill(s, CNNModel, env_df=_current_env_df)
-
-    def fill_cnn_lstm_env(s: pd.Series) -> pd.Series:
-        """CNN-LSTM with sap + env features."""
-        return _dl_fill(s, CNNLSTMModel, env_df=_current_env_df)
-
-    def fill_transformer_env(s: pd.Series) -> pd.Series:
-        """Transformer with sap + env features."""
-        return _dl_fill(s, TransformerModel, env_df=_current_env_df)
-
-    def fill_bilstm_env(s: pd.Series) -> pd.Series:
-        """Bidirectional LSTM with sap + env features."""
-        return _dl_fill(s, BiLSTMModel, env_df=_current_env_df)
-
-    def fill_gru_env(s: pd.Series) -> pd.Series:
-        """GRU with sap + env features."""
-        return _dl_fill(s, GRUModel, env_df=_current_env_df)
-
+    def fill_gru_env(s):
+        return _dl_fill(s, GRUModel, env_df=_env_holder.get("df"))
+else:
+    fill_lstm_env = fill_cnn_env = fill_cnn_lstm_env = fill_linear
+    fill_transformer_env = fill_bilstm_env = fill_gru_env = fill_linear
 
 # ── Method registry ───────────────────────────────────────────────────────────
 METHODS = {
@@ -1222,7 +521,6 @@ METHODS = {
     "D_gru": fill_gru,
 }
 
-# ── Env-aware methods ─────────────────────────────────────────────────────────
 METHODS_ENV = {
     "Ce_rf_env": fill_rf_env,
     "Ce_xgb_env": fill_xgb_env,
@@ -1246,8 +544,6 @@ METHOD_GROUPS = {
 }
 
 # ── DL build-class registry (for model caching) ─────────────────────────────
-# Maps method name → PyTorch nn.Module class. Models are picklable after .cpu().
-
 _DL_BUILD_FNS = {}
 if _HAS_TORCH:
     _DL_BUILD_FNS = {
@@ -1266,23 +562,19 @@ if _HAS_TORCH:
     }
 
 # ── Method-group parallelization config ──────────────────────────────────────
-# (n_workers, threads_per_worker)
-# D/De: now GPU-aware — 6 workers for 6 GPUs, 5 CPU threads each (32 cores ÷ 6)
-# Falls back to CPU config if no GPU detected.
-
 _GPU_WORKERS = max(1, _N_GPUS) if _N_GPUS > 0 else 8
 _GPU_THREADS = max(1, 32 // _GPU_WORKERS) if _N_GPUS > 0 else 4
 
+GROUP_COLORS.update({"Ce": "#E65100", "De": "#6A1B9A"})
+
 _GROUP_PARALLEL_CONFIG = {
-    "A": (48, 1),  # pure NumPy/pandas — no internal threading
-    "B": (32, 2),  # statsmodels STL has minimal threading
-    "C": (16, 8),  # sklearn/xgb use internal thread pools
-    "D": (_GPU_WORKERS, _GPU_THREADS),  # PyTorch — GPU or CPU parallel
+    "A": (48, 1),
+    "B": (32, 2),
+    "C": (16, 8),
+    "D": (_GPU_WORKERS, _GPU_THREADS),
     "Ce": (16, 8),
     "De": (_GPU_WORKERS, _GPU_THREADS),
 }
-
-GROUP_COLORS.update({"Ce": "#E65100", "De": "#6A1B9A"})
 
 
 #

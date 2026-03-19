@@ -2809,6 +2809,235 @@ def run_phase6(df_results, df_agg):
             )
     pd.DataFrame(_rec_rows).to_csv(STATS_OUT / "recommendations_summary.csv", index=False)
 
+    # ── Phase 6 Fig 8: Env feature impact (D_* vs De_*) ─────────────────────
+    _dl_pairs = [
+        ("D_lstm", "De_lstm_env"),
+        ("D_bilstm", "De_bilstm_env"),
+        ("D_gru", "De_gru_env"),
+        ("D_cnn", "De_cnn_env"),
+        ("D_cnn_lstm", "De_cnn_lstm_env"),
+        ("D_transformer", "De_transformer_env"),
+    ]
+    for _scale in ["hourly", "daily"]:
+        _sub = df_agg[df_agg.time_scale == _scale]
+        if _sub.empty or "r2_pooled" not in _sub.columns:
+            continue
+        _n_pairs = sum(1 for d, de in _dl_pairs if d in _sub.method.values and de in _sub.method.values)
+        if _n_pairs == 0:
+            continue
+        _ncols = min(3, _n_pairs)
+        _nrows = (_n_pairs - 1) // _ncols + 1
+        _fig8, _axes8 = plt.subplots(_nrows, _ncols, figsize=(6 * _ncols, 5 * _nrows), sharey=True, squeeze=False)
+        _axes8 = _axes8.ravel()
+        _pi = 0
+        _gsizes = sorted(_sub.gap_size.unique())
+        for _d_m, _de_m in _dl_pairs:
+            _sd = _sub[_sub.method == _d_m].sort_values("gap_size")
+            _sde = _sub[_sub.method == _de_m].sort_values("gap_size")
+            if _sd.empty or _sde.empty:
+                continue
+            _ax8 = _axes8[_pi]
+            _ax8.plot(
+                _sd.gap_size.values,
+                _sd["r2_pooled"].values,
+                color="#D32F2F",
+                linewidth=2,
+                marker="o",
+                markersize=4,
+                label="Sap only",
+            )
+            _ax8.plot(
+                _sde.gap_size.values,
+                _sde["r2_pooled"].values,
+                color="#6A1B9A",
+                linewidth=2,
+                marker="s",
+                markersize=4,
+                label="Sap + Env",
+            )
+            _cx = np.intersect1d(_sd.gap_size.values, _sde.gap_size.values).astype(float)
+            if len(_cx) > 1:
+                _yd = np.interp(_cx, _sd.gap_size.values, _sd["r2_pooled"].values)
+                _yde = np.interp(_cx, _sde.gap_size.values, _sde["r2_pooled"].values)
+                _ax8.fill_between(_cx, _yd, _yde, alpha=0.15, color="#6A1B9A", where=_yde > _yd)
+            _ax8.set_title(_d_m.replace("D_", "").upper(), fontweight="bold")
+            _ax8.set_xscale("log")
+            _ax8.set_xlabel("Gap size")
+            if _pi % _ncols == 0:
+                _ax8.set_ylabel("Pooled R²")
+            _ax8.set_ylim(-0.1, 1.05)
+            _ax8.axhline(R2_THRESHOLD, color="red", linestyle="--", linewidth=0.8, alpha=0.5)
+            _ax8.set_xticks(_gsizes)
+            _ax8.set_xticklabels([_human_size(g, _scale) for g in _gsizes], rotation=45, ha="right", fontsize=7)
+            if _pi == 0:
+                _ax8.legend(fontsize=8)
+            _pi += 1
+        for _ai in range(_pi, len(_axes8)):
+            _axes8[_ai].set_visible(False)
+        _fig8.suptitle(f"Env Feature Impact on DL Gap-Filling ({_scale.capitalize()})", fontweight="bold", fontsize=13)
+        _fig8.tight_layout(rect=[0, 0, 1, 0.95])
+        (_FIGS_OUT_S := FIGS_OUT / _scale).mkdir(parents=True, exist_ok=True)
+        _fig8.savefig(str(_FIGS_OUT_S / "fig8_env_impact.png"), dpi=300)
+        plt.close(_fig8)
+        print(f"  ✓ fig8_env_impact.png  [{_scale}]")
+
+    # ── Phase 6 Fig 9: DL vs ML vs Interpolation crossover ──────────────────
+    for _scale in ["hourly", "daily"]:
+        _sub = df_agg[df_agg.time_scale == _scale]
+        if _sub.empty or "r2_pooled" not in _sub.columns:
+            continue
+        _gsizes = sorted(_sub.gap_size.unique())
+        _cats = {
+            "Interpolation (A)": _sub[_sub.group == "A"],
+            "Statistical (B)": _sub[_sub.group == "B"],
+            "ML (C/Ce)": _sub[_sub.group.isin(["C", "Ce"])],
+            "DL sap-only (D)": _sub[_sub.group == "D"],
+            "DL sap+env (De)": _sub[_sub.group == "De"],
+        }
+        _cat_colors = {
+            "Interpolation (A)": "#1976D2",
+            "Statistical (B)": "#388E3C",
+            "ML (C/Ce)": "#F57C00",
+            "DL sap-only (D)": "#D32F2F",
+            "DL sap+env (De)": "#6A1B9A",
+        }
+        _fig9, _ax9 = plt.subplots(figsize=(12, 7))
+        for _cn, _cd in _cats.items():
+            if _cd.empty:
+                continue
+            _best = _cd.groupby("gap_size")["r2_pooled"].max().reindex(_gsizes)
+            _ax9.plot(_gsizes, _best.values, color=_cat_colors[_cn], linewidth=2.5, marker="o", markersize=5, label=_cn)
+        # Annotate crossover
+        _ml_r2 = _sub[_sub.group.isin(["C", "Ce"])].groupby("gap_size")["r2_pooled"].max()
+        _dl_r2 = _sub[_sub.group == "De"].groupby("gap_size")["r2_pooled"].max()
+        for _gs in _gsizes:
+            _mlv = _ml_r2.get(_gs, np.nan)
+            _dlv = _dl_r2.get(_gs, np.nan)
+            if not np.isnan(_mlv) and not np.isnan(_dlv) and _dlv > _mlv:
+                _ax9.axvline(_gs, color="grey", linestyle=":", linewidth=1.5, alpha=0.7)
+                _ax9.annotate(
+                    f"DL > ML\n{_human_size(_gs, _scale)}",
+                    xy=(_gs, _dlv),
+                    xytext=(_gs * 0.5, _dlv - 0.08),
+                    arrowprops={"arrowstyle": "->", "color": "grey"},
+                    fontsize=10,
+                    fontweight="bold",
+                    color="#6A1B9A",
+                )
+                break
+        _ax9.axhline(R2_THRESHOLD, color="red", linestyle="--", linewidth=1.2, alpha=0.6, label=f"R²={R2_THRESHOLD}")
+        _ax9.set_xscale("log")
+        _ax9.set_xlabel("Gap Size", fontsize=12)
+        _ax9.set_ylabel("Pooled R² (best method per category)", fontsize=12)
+        _ax9.set_title(f"Method Crossover — When Does DL Outperform ML? ({_scale.capitalize()})", fontweight="bold")
+        _ax9.set_xticks(_gsizes)
+        _ax9.set_xticklabels([_human_size(g, _scale) for g in _gsizes], rotation=45, ha="right", fontsize=9)
+        _ax9.set_ylim(-0.1, 1.05)
+        _ax9.legend(fontsize=10, loc="lower left")
+        _ax9.grid(True, alpha=0.2)
+        _fig9.tight_layout()
+        (FIGS_OUT / _scale).mkdir(parents=True, exist_ok=True)
+        _fig9.savefig(str(FIGS_OUT / _scale / "fig9_dl_vs_ml_crossover.png"), dpi=300)
+        plt.close(_fig9)
+        print(f"  ✓ fig9_dl_vs_ml_crossover.png  [{_scale}]")
+
+    # ── Phase 6 Fig 10: Per-site performance variation ───────────────────────
+    for _scale in ["hourly", "daily"]:
+        _ref_gap = 24 if _scale == "hourly" else 7
+        _sub24 = df_agg[(df_agg.time_scale == _scale) & (df_agg.gap_size == _ref_gap)]
+        if _sub24.empty or "r2_pooled" not in _sub24.columns:
+            continue
+        _top5 = _sub24.nlargest(5, "r2_pooled")["method"].tolist()
+        _df_ref = df_results[(df_results.time_scale == _scale) & (df_results.gap_size == _ref_gap)]
+        _site_r2 = (
+            _df_ref[_df_ref.method.isin(_top5)].groupby(["method", "site"]).apply(compute_pooled_metrics).reset_index()
+        )
+        _fig10, _ax10 = plt.subplots(figsize=(14, 7))
+        _rng10 = np.random.default_rng(42)
+        _pos10, _lab10 = [], []
+        for _i, _m in enumerate(_top5):
+            _md = _site_r2[_site_r2.method == _m]["r2_pooled"].dropna()
+            if _md.empty:
+                continue
+            _pos10.append(_i)
+            _lab10.append(_m)
+            _gc = GROUP_COLORS.get(_m.split("_")[0], "#607D8B")
+            _jit = _rng10.uniform(-0.15, 0.15, len(_md))
+            _ax10.scatter(
+                np.full(len(_md), _i) + _jit, _md.values, c=_gc, alpha=0.5, s=25, edgecolors="white", linewidth=0.3
+            )
+            _bp = _ax10.boxplot(
+                [_md.values],
+                positions=[_i],
+                widths=0.35,
+                patch_artist=True,
+                showfliers=False,
+                medianprops={"color": "black", "linewidth": 2},
+            )
+            _bp["boxes"][0].set_facecolor(_gc)
+            _bp["boxes"][0].set_alpha(0.3)
+            _ax10.text(_i, _md.median() + 0.02, f"{_md.median():.3f}", ha="center", fontsize=9, fontweight="bold")
+        _ax10.set_xticks(_pos10)
+        _ax10.set_xticklabels(_lab10, rotation=20, ha="right", fontsize=10)
+        _ax10.set_ylabel("Pooled R² (per site)", fontsize=12)
+        _ax10.set_title(
+            f"Per-Site Performance — {_human_size(_ref_gap, _scale)} Gap ({_scale.capitalize()})",
+            fontweight="bold",
+            fontsize=14,
+        )
+        _ax10.axhline(R2_THRESHOLD, color="red", linestyle="--", linewidth=1, alpha=0.5, label=f"R²={R2_THRESHOLD}")
+        _ax10.legend(fontsize=9)
+        _ax10.grid(True, alpha=0.15, axis="y")
+        _ax10.set_ylim(-0.2, 1.1)
+        _fig10.tight_layout()
+        (FIGS_OUT / _scale).mkdir(parents=True, exist_ok=True)
+        _fig10.savefig(str(FIGS_OUT / _scale / "fig10_per_site_variation.png"), dpi=300)
+        plt.close(_fig10)
+        print(f"  ✓ fig10_per_site_variation.png  [{_scale}]")
+
+    # ── Phase 6 Fig 11: RMSE vs gap size per method group ────────────────────
+    _grp_labels = {
+        "A": "Interpolation",
+        "B": "Statistical",
+        "C": "ML (sap lags)",
+        "Ce": "ML (sap+env)",
+        "D": "DL (sap only)",
+        "De": "DL (sap+env)",
+    }
+    for _scale in ["hourly", "daily"]:
+        _sub = df_agg[df_agg.time_scale == _scale]
+        if _sub.empty or "rmse_pooled" not in _sub.columns:
+            continue
+        _gsizes = sorted(_sub.gap_size.unique())
+        _fig11, _ax11 = plt.subplots(figsize=(12, 7))
+        for _grp in ["A", "B", "C", "Ce", "D", "De"]:
+            _gd = _sub[_sub.group == _grp]
+            if _gd.empty:
+                continue
+            _best_rmse = _gd.groupby("gap_size")["rmse_pooled"].min().reindex(_gsizes)
+            _ax11.plot(
+                _gsizes,
+                _best_rmse.values,
+                color=GROUP_COLORS.get(_grp, "#607D8B"),
+                linewidth=2.2,
+                marker="o",
+                markersize=4,
+                label=f"{_grp_labels.get(_grp, _grp)} ({_grp})",
+            )
+        _ax11.set_xscale("log")
+        _ax11.set_xlabel("Gap Size", fontsize=12)
+        _ax11.set_ylabel("Pooled RMSE (best method per group)", fontsize=12)
+        _ax11.set_title(f"RMSE vs Gap Size — {_scale.capitalize()} Scale", fontweight="bold", fontsize=14)
+        _ax11.set_xticks(_gsizes)
+        _ax11.set_xticklabels([_human_size(g, _scale) for g in _gsizes], rotation=45, ha="right", fontsize=9)
+        _ax11.legend(fontsize=9)
+        _ax11.grid(True, alpha=0.2)
+        _fig11.tight_layout()
+        (FIGS_OUT / _scale).mkdir(parents=True, exist_ok=True)
+        _fig11.savefig(str(FIGS_OUT / _scale / "fig11_rmse_vs_gapsize.png"), dpi=300)
+        plt.close(_fig11)
+        print(f"  ✓ fig11_rmse_vs_gapsize.png  [{_scale}]")
+
     print("\nOutputs saved to:")
     print(f"  Statistics: {STATS_OUT}")
     print(f"  Figures:    {FIGS_OUT}")

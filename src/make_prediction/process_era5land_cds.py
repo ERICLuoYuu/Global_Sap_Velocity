@@ -256,7 +256,6 @@ _ACCUM_SHORT_NAMES: list[str] = ["tp", "ssrd", "pev"]
 
 
 def _download_one_stat(
-    client,
     stat: str,
     year: int,
     month: int,
@@ -284,7 +283,7 @@ def _download_one_stat(
         "data_format": "netcdf_zip",
     }
 
-    _download_with_retry(client, "derived-era5-land-daily-statistics", request, zip_target)
+    _download_with_retry(_cds_client(), "derived-era5-land-daily-statistics", request, zip_target)
 
     # Extract NetCDF from ZIP, clean up intermediate on success or failure
     try:
@@ -297,7 +296,6 @@ def _download_one_stat(
 
 
 def download_instantaneous_vars(
-    client,
     year: int,
     month: int,
     output_dir: Path,
@@ -347,7 +345,6 @@ def download_instantaneous_vars(
         futures = {
             pool.submit(
                 _download_one_stat,
-                _cds_client(),
                 stat,
                 year,
                 month,
@@ -364,7 +361,6 @@ def download_instantaneous_vars(
 
 
 def download_accumulated_vars(
-    client,
     year: int,
     month: int,
     output_dir: Path,
@@ -425,7 +421,7 @@ def download_accumulated_vars(
             "area": CDS_AREA,
             "data_format": "netcdf",
         }
-        _download_with_retry(client, "reanalysis-era5-land", request, raw_target)
+        _download_with_retry(_cds_client(), "reanalysis-era5-land", request, raw_target)
 
         try:
             # CDS may return ZIP even for plain netcdf format
@@ -466,7 +462,7 @@ def download_accumulated_vars(
             "area": CDS_AREA,
             "data_format": "netcdf",
         }
-        _download_with_retry(client, "reanalysis-era5-land", request, nc_target)
+        _download_with_retry(_cds_client(), "reanalysis-era5-land", request, nc_target)
 
     logger.info("Accumulated data ready: %s", nc_target)
     return nc_target
@@ -1239,22 +1235,6 @@ def build_prediction_dataset(
     gc.collect()
     logger.info("=== Month %d-%02d complete: %d files written ===", year, month, len(written_paths))
 
-    # Merge daily files into one monthly file (matches GEE output format)
-    if written_paths:
-        monthly_file = csv_dir / f"prediction_{year}_{month:02d}_daily.csv"
-        if not monthly_file.exists():
-            logger.info("Merging %d daily files into %s ...", len(written_paths), monthly_file.name)
-            chunks = []
-            for p in sorted(written_paths):
-                chunks.append(pd.read_csv(p, low_memory=False))
-            merged = pd.concat(chunks, ignore_index=True)
-            merged.to_csv(monthly_file, index=False)
-            logger.info("Monthly file: %s (%d rows)", monthly_file.name, len(merged))
-            del merged, chunks
-            gc.collect()
-        else:
-            logger.info("Monthly file already exists: %s", monthly_file.name)
-
     # Mark month as fully processed for checkpoint/resume
     _mark_done(output_dir, year, month, "full")
     return written_paths
@@ -1275,19 +1255,13 @@ def _process_daily(
     validate: bool,
 ) -> list[Path]:
     """Process daily-scale data and write per-day CSVs."""
-    written: list[Path] = []
+    daily_frames: list[pd.DataFrame] = []
     nlat, nlon = len(lats), len(lons)
 
     for t_idx, ts in enumerate(times):
         day = ts.day
         doy = ts.dayofyear
         is_leap = calendar.isleap(ts.year)
-
-        csv_path = csv_dir / f"prediction_{year}_{month:02d}_{day:02d}.csv"
-        if csv_path.exists():
-            logger.info("Skipping existing %s", csv_path.name)
-            written.append(csv_path)
-            continue
 
         logger.info("Processing %s (DOY %d) ...", ts.strftime("%Y-%m-%d"), doy)
 
@@ -1421,6 +1395,13 @@ def _process_daily(
             if mask.any():
                 df.loc[mask, pft_name] = 1
 
+        # Drop non-forest rows (PFT sum != 1)
+        pft_sum = df[pft_names].sum(axis=1)
+        df = df[pft_sum == 1]
+        if len(df) == 0:
+            logger.warning("No forest pixels for %s — skipping.", ts.strftime("%Y-%m-%d"))
+            continue
+
         # Cyclical time features
         ts_index = pd.DatetimeIndex([ts] * n)
         day_sin, year_sin = compute_time_features(ts_index, df["longitude"].values)
@@ -1434,16 +1415,27 @@ def _process_daily(
         if validate:
             _validate_daily_row(df, ts)
 
-        # --- Save ---
-        df.to_csv(csv_path, index_label="timestamp")
-        written.append(csv_path)
-        logger.info("Wrote %s (%d rows)", csv_path.name, len(df))
+        # --- Accumulate for monthly output ---
+        daily_frames.append(df)
+        logger.info("Processed %s (%d forest rows)", ts.strftime("%Y-%m-%d"), len(df))
 
-        # Free memory
+        # Free per-day intermediates
         del df
-        gc.collect()
 
-    return written
+    # --- Write monthly combined CSV ---
+    if not daily_frames:
+        logger.warning("No data for any day in %d-%02d", year, month)
+        return []
+
+    monthly_file = csv_dir / f"prediction_{year}_{month:02d}_daily.csv"
+    logger.info("Writing monthly file %s (%d days) ...", monthly_file.name, len(daily_frames))
+    merged = pd.concat(daily_frames, ignore_index=True)
+    merged.to_csv(monthly_file, index=False)
+    logger.info("Monthly file: %s (%d rows)", monthly_file.name, len(merged))
+    del merged, daily_frames
+    gc.collect()
+
+    return [monthly_file]
 
 
 def _process_hourly(

@@ -671,6 +671,124 @@ def _read_raster_to_era5_grid(
     return out
 
 
+def _download_pft_from_gee(
+    era5_lats: np.ndarray,
+    era5_lons: np.ndarray,
+    year: int,
+) -> np.ndarray:
+    """Download MODIS LC_Type1 (IGBP PFT) from GEE at the ERA5 grid.
+
+    Falls back to a fill value of 0 (water/unclassified) if GEE is
+    unavailable, which will be dropped by the forest filter downstream.
+
+    Parameters
+    ----------
+    era5_lats, era5_lons : np.ndarray
+        1-D arrays of target grid coordinates.
+    year : int
+        Year for MODIS land cover (uses nearest available year).
+
+    Returns
+    -------
+    np.ndarray
+        2-D array of shape (len(era5_lats), len(era5_lons)) with IGBP class codes.
+    """
+    try:
+        import ee
+    except ImportError:
+        logger.error("earthengine-api not installed — cannot download PFT")
+        return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+
+    try:
+        ee.Initialize(project="ee-yuluo-2")
+    except Exception:
+        try:
+            ee.Initialize()
+        except Exception as exc:
+            logger.error("Failed to initialize Earth Engine: %s", exc)
+            return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+
+    logger.info("Downloading PFT from GEE (MODIS MCD12Q1, year=%d) ...", year)
+
+    # Get the MODIS land cover image closest to the requested year
+    modis_lc = (
+        ee.ImageCollection("MODIS/061/MCD12Q1")
+        .filterDate(f"{year}-01-01", f"{year}-12-31")
+        .first()
+        .select("LC_Type1")
+    )
+    if modis_lc is None:
+        # Fall back to most recent available year
+        modis_lc = (
+            ee.ImageCollection("MODIS/061/MCD12Q1")
+            .sort("system:time_start", False)
+            .first()
+            .select("LC_Type1")
+        )
+
+    # Build a grid of points at ERA5 resolution
+    min_lat, max_lat = float(era5_lats.min()), float(era5_lats.max())
+    min_lon, max_lon = float(era5_lons.min()), float(era5_lons.max())
+    region = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
+
+    # Sample at ~0.1 degree (~11 km) — match ERA5 grid
+    scale = 11132  # ~0.1 degree in meters at equator
+
+    try:
+        # Use reduceRegion for moderate grids, or getDownloadURL for large ones
+        # For global grids, tile the download
+        nlat, nlon = len(era5_lats), len(era5_lons)
+        pft_grid = np.zeros((nlat, nlon), dtype=np.float32)
+
+        # Process in latitude bands to avoid GEE memory limits
+        band_size = 200  # rows per band
+        for i_start in range(0, nlat, band_size):
+            i_end = min(i_start + band_size, nlat)
+            band_lats = era5_lats[i_start:i_end]
+            band_region = ee.Geometry.Rectangle([
+                min_lon, float(band_lats.min()),
+                max_lon, float(band_lats.max()),
+            ])
+
+            # Sample the image at ERA5 grid points in this band
+            band_img = modis_lc.clip(band_region)
+            arr = band_img.sampleRectangle(
+                region=band_region,
+                defaultValue=0,
+            ).get("LC_Type1").getInfo()
+
+            if arr is not None:
+                band_data = np.array(arr, dtype=np.float32)
+                # Resample to match ERA5 grid dimensions for this band
+                from scipy.ndimage import zoom
+                target_h = i_end - i_start
+                target_w = nlon
+                if band_data.shape != (target_h, target_w):
+                    zoom_h = target_h / max(band_data.shape[0], 1)
+                    zoom_w = target_w / max(band_data.shape[1], 1)
+                    band_data = zoom(band_data, (zoom_h, zoom_w), order=0)
+                    band_data = band_data[:target_h, :target_w]
+                pft_grid[i_start:i_end, :band_data.shape[1]] = band_data
+            else:
+                logger.warning("GEE returned None for lat band [%.1f, %.1f]",
+                               band_lats.min(), band_lats.max())
+
+            if (i_start // band_size) % 5 == 0:
+                logger.info("  PFT download progress: %d/%d rows", i_end, nlat)
+
+        valid = pft_grid[pft_grid > 0]
+        unique_classes = np.unique(valid).astype(int) if len(valid) > 0 else []
+        logger.info(
+            "PFT download complete: shape=%s, classes=%s",
+            pft_grid.shape, unique_classes.tolist(),
+        )
+        return pft_grid
+
+    except Exception as exc:
+        logger.error("GEE PFT download failed: %s", exc, exc_info=True)
+        return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+
+
 def load_static_datasets(
     era5_lats: np.ndarray,
     era5_lons: np.ndarray,
@@ -716,6 +834,7 @@ def load_static_datasets(
         static["canopy_height"] = np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
 
     # --- PFT (MODIS land cover) ---
+    # Try local raster first (cached from previous GEE download)
     pft_candidates = [
         base_dir / "data" / "raw" / "grided" / "spatial_features" / "pft" / "pft.tif",
         base_dir / "data" / "raw" / "grided" / "spatial_features" / "pft" / "MODIS_PFT.tif",
@@ -726,8 +845,8 @@ def load_static_datasets(
             static["pft"] = _read_raster_to_era5_grid(p, era5_lats, era5_lons)
             break
     if "pft" not in static:
-        logger.warning("PFT raster not found — filling with 11 (barren)")
-        static["pft"] = np.full((len(era5_lats), len(era5_lons)), 11, dtype=np.float32)
+        # Download from GEE: MODIS MCD12Q1 LC_Type1
+        static["pft"] = _download_pft_from_gee(era5_lats, era5_lons, year)
 
     # --- WorldClim climate normals ---
     temp_clim = Path(TEMP_CLIMATE_FILE)
@@ -1221,7 +1340,7 @@ def _process_daily(
             5: "MF",
             8: "WSA",
             9: "SAV",
-            11: "WET",
+            11: "WET",  # IGBP 11 = Permanent Wetlands
         }
         for igbp_code, pft_name in _IGBP_TO_PFT.items():
             mask = pft_flat == igbp_code
@@ -1364,7 +1483,7 @@ def _process_hourly(
                 5: "MF",
                 8: "WSA",
                 9: "SAV",
-                11: "WET",
+                11: "WET",  # IGBP 11 = Permanent Wetlands
             }
             for igbp_code, pft_name in _IGBP_TO_PFT.items():
                 mask = pft_flat == igbp_code

@@ -700,14 +700,34 @@ def _download_pft_from_gee(
         logger.error("earthengine-api not installed — cannot download PFT")
         return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
 
+    # Initialize EE with stored credentials (required on compute nodes)
+    import json
+    gee_project = "era5download-447713"
     try:
-        ee.Initialize(project="ee-yuluo-2")
-    except Exception:
-        try:
-            ee.Initialize()
-        except Exception as exc:
-            logger.error("Failed to initialize Earth Engine: %s", exc)
-            return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+        cred_paths = [
+            Path.home() / ".config" / "earthengine" / "credentials",
+            Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
+        ]
+        cred_data = None
+        for cred_path in cred_paths:
+            if cred_path.exists():
+                cred_data = json.loads(cred_path.read_text())
+                break
+        if cred_data and "refresh_token" in cred_data:
+            from google.oauth2.credentials import Credentials
+            credentials = Credentials(
+                token=None,
+                refresh_token=cred_data["refresh_token"],
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=cred_data["client_id"],
+                client_secret=cred_data["client_secret"],
+            )
+            ee.Initialize(credentials=credentials, project=gee_project)
+        else:
+            ee.Initialize(project=gee_project)
+    except Exception as exc:
+        logger.error("Failed to initialize Earth Engine: %s", exc)
+        return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
 
     logger.info("Downloading PFT from GEE (MODIS MCD12Q1, year=%d) ...", year)
 

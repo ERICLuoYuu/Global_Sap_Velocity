@@ -61,6 +61,10 @@ warnings.filterwarnings("ignore", module="torch")
 RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
 
+# ── Benchmark target: "sap" (default) or "env" (environmental columns) ───────
+# Set via environment variable: BENCHMARK_TARGET=env python gap_benchmark.py
+TARGET = os.environ.get("BENCHMARK_TARGET", "sap")
+
 # ── Paths (using project-wide PathConfig) ─────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent  # project root (one level above notebooks/)
 sys.path.insert(0, str(ROOT / ".venv"))  # path_config.py lives in .venv/
@@ -1238,6 +1242,95 @@ def run_phase3(df_site_summary):
     return ground_truth_store
 
 
+def run_phase3_env(df_site_summary):
+    """Phase 3 (env mode): Build ground truth from environmental columns.
+
+    For each site, each env column (ta, vpd, sw_in, ppfd_in) becomes a target.
+    Other env columns serve as cross-env features.
+    """
+    print("\n" + "=" * 60)
+    print("  PHASE 3 (ENV MODE): ENVIRONMENTAL GROUND TRUTH")
+    print("=" * 60)
+
+    # Reuse site selection from sap phase 3
+    if "biome" not in df_site_summary.columns:
+        df_site_summary["biome"] = df_site_summary["site"].apply(
+            lambda s: str(load_site_metadata(s).get("si_biome", "Unknown"))
+        )
+    for _thr in [85.0, 75.0, 65.0, 50.0]:
+        _df_filt = df_site_summary[df_site_summary["completeness_pct"] >= _thr]
+        if len(_df_filt) >= 15:
+            break
+    selected_sites = (
+        _df_filt.drop_duplicates(subset="site", keep="first")
+        .sort_values("completeness_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    ground_truth_store = {}
+    _total_segments = 0
+
+    for _, _row in selected_sites.iterrows():
+        _site = str(_row["site"])
+        _biome = str(_row.get("biome", "Unknown"))
+        _candidates = sorted(SAP_DIR.glob(f"{_site}_sapf_data_outliers_removed.csv"))
+        if not _candidates:
+            continue
+
+        _df_env_raw = _safe_read_env(_candidates[0])
+        if _df_env_raw is None or _df_env_raw.empty:
+            continue
+
+        _env_h = _df_env_raw.resample("h").mean()
+        _env_d = _df_env_raw.resample("D").mean()
+
+        for _target_col in ENV_FEATURE_COLS:
+            if _target_col not in _env_h.columns:
+                continue
+
+            _target_h = _env_h[_target_col].dropna()
+            # Find longest contiguous segment
+            _is_valid = _target_h.notna()
+            _groups = (~_is_valid).cumsum()
+            _segments = [(g, _target_h[_groups == g]) for g in _groups.unique() if _is_valid[_groups == g].all()]
+            _segments.sort(key=lambda x: len(x[1]), reverse=True)
+
+            if not _segments or len(_segments[0][1]) < MIN_SEGMENT_LEN:
+                continue
+
+            _seg_h = _segments[0][1]
+
+            # Cross-env features: all other env columns
+            _cross_cols = [c for c in ENV_FEATURE_COLS if c != _target_col and c in _env_h.columns]
+            _cross_env_h = _env_h[_cross_cols].reindex(_seg_h.index) if _cross_cols else None
+
+            # Daily
+            _target_d_full = _env_d[_target_col].dropna() if _target_col in _env_d.columns else pd.Series(dtype=float)
+            _seg_d = _target_d_full.iloc[:min(len(_target_d_full), 365)] if len(_target_d_full) > 30 else pd.Series(dtype=float)
+            _cross_env_d = _env_d[_cross_cols].reindex(_seg_d.index) if _cross_cols and len(_seg_d) > 0 else None
+
+            _key = f"{_site}__{_target_col}"
+            ground_truth_store[_key] = {
+                "hourly": _seg_h,
+                "daily": _seg_d,
+                "env_hourly": _cross_env_h,
+                "env_daily": _cross_env_d,
+                "site": _site,
+                "col": _target_col,
+                "biome": _biome,
+                "target_column": _target_col,
+            }
+            _total_segments += 1
+            _d_len = len(_seg_d) if len(_seg_d) > 0 else 0
+            print(f"  \u2713 {_site}/{_target_col}: hourly={len(_seg_h)}h  daily={_d_len}d  cross_env={len(_cross_cols)}")
+
+        gc.collect()
+
+    print(f"\nEnv ground truth: {_total_segments} segments from "
+          f"{len(set(v['site'] for v in ground_truth_store.values()))} sites")
+    return ground_truth_store
+
+
 def _benchmark_one_segment(
     key: str,
     sdata: dict,
@@ -1607,7 +1700,8 @@ def run_phase5(ground_truth_store):
             gc.collect()
 
     df_results = pd.DataFrame(all_results)
-    df_results.to_csv(STATS_OUT / "benchmark_results_full.csv", index=False)
+    _results_filename = "benchmark_results_full_env.csv" if TARGET == "env" else "benchmark_results_full.csv"
+    df_results.to_csv(STATS_OUT / _results_filename, index=False)
     print(f"\n✓ Benchmark complete — {len(df_results):,} records saved")
 
     # ── Aggregate across replicates ──────────────────────────────────────────
@@ -2438,6 +2532,7 @@ def main():
     print(f"Stats output: {STATS_OUT}")
     print(f"Figs output:  {FIGS_OUT}")
     print(f"Methods:      {len(METHODS)}")
+    print(f"Target:       {TARGET}")
 
     t_start = time.time()
 
@@ -2448,7 +2543,10 @@ def main():
     df_gaps_h, df_gaps_d = run_phase2(df_gaps_h, df_gaps_d)
 
     # Phase 3: Synthetic Experiment Setup
-    ground_truth_store = run_phase3(df_site_summary)
+    if TARGET == "env":
+        ground_truth_store = run_phase3_env(df_site_summary)
+    else:
+        ground_truth_store = run_phase3(df_site_summary)
 
     # Phase 4: Method definitions (already at module level)
     print(f"\nPhase 4: {len(METHODS)} gap-filling methods available")

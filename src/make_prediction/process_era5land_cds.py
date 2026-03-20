@@ -693,12 +693,27 @@ def _download_canopy_height_from_gee(
 
     Returns 2-D array of shape (len(era5_lats), len(era5_lons)) in metres.
     """
-    return _download_static_from_gee(
-        era5_lats, era5_lons,
-        image_id="META/GlobalCanopyHeight/v1",
-        band_name="canopy_height",
-        label="canopy_height",
-    )
+    import ee
+    # Try multiple dataset paths (same strategy as GEE script)
+    dataset_paths = [
+        ("ImageCollection", "projects/meta-forest-monitoring-okw37/assets/CanopyHeight"),
+        ("Image", "projects/sat-io/open-datasets/META/GLOBCANOPYHEIGHT"),
+    ]
+    for ds_type, ds_path in dataset_paths:
+        try:
+            result = _download_static_from_gee(
+                era5_lats, era5_lons,
+                image_id=ds_path,
+                band_name="canopy_height",
+                label="canopy_height",
+                image_type=ds_type,
+            )
+            if result.any():
+                return result
+        except Exception as exc:
+            logger.warning("canopy_height path %s failed: %s", ds_path, exc)
+    logger.error("All canopy_height dataset paths failed — returning zeros")
+    return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
 
 
 def _download_static_from_gee(
@@ -707,6 +722,7 @@ def _download_static_from_gee(
     image_id: str,
     band_name: str,
     label: str,
+    image_type: str = "Image",
 ) -> np.ndarray:
     """Generic GEE static dataset downloader using tiled geemap approach.
 
@@ -748,7 +764,17 @@ def _download_static_from_gee(
 
     logger.info("Downloading %s from GEE (%s) ...", label, image_id)
 
-    image = ee.Image(image_id).select(band_name)
+    if image_type == "ImageCollection":
+        image = ee.ImageCollection(image_id).mosaic()
+    else:
+        image = ee.Image(image_id)
+    # Select band — try requested name, fall back to first available
+    available_bands = image.bandNames().getInfo()
+    if band_name in available_bands:
+        image = image.select(band_name)
+    elif available_bands:
+        logger.info("%s: band '%s' not found, using '%s'", label, band_name, available_bands[0])
+        image = image.select(available_bands[0])
 
     min_lat, max_lat = float(era5_lats.min()), float(era5_lats.max())
     min_lon, max_lon = float(era5_lons.min()), float(era5_lons.max())
@@ -1163,7 +1189,7 @@ def _load_lai_for_month(
             try:
                 # Parse year and DOY from filename
                 stem = f.stem  # e.g. GlobMapLAIV3.A2020015.Global.LAI
-                a_idx = stem.index("A") + 1
+                a_idx = stem.index(".A") + 2  # find ".A" prefix before year code
                 file_year = int(stem[a_idx : a_idx + 4])
                 file_doy = int(stem[a_idx + 4 : a_idx + 7])
                 if file_year == year:
@@ -1559,8 +1585,8 @@ def _process_daily(
                 "day_length": day_len_2d.ravel(),
                 "elevation": static["elevation"].ravel(),
                 "canopy_height": static["canopy_height"].ravel(),
-                "annual_mean_temperature": static["mean_annual_temp"].ravel(),
-                "annual_precipitation": static["mean_annual_precip"].ravel(),
+                "mean_annual_temp": static["mean_annual_temp"].ravel(),
+                "mean_annual_precip": static["mean_annual_precip"].ravel(),
             }
         )
 
@@ -1723,8 +1749,8 @@ def _process_hourly(
                     "day_length": day_len_2d.ravel(),
                     "elevation": static["elevation"].ravel(),
                     "canopy_height": static["canopy_height"].ravel(),
-                    "annual_mean_temperature": static["mean_annual_temp"].ravel(),
-                    "annual_precipitation": static["mean_annual_precip"].ravel(),
+                    "mean_annual_temp": static["mean_annual_temp"].ravel(),
+                    "mean_annual_precip": static["mean_annual_precip"].ravel(),
                 }
             )
 

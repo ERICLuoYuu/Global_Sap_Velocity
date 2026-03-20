@@ -593,7 +593,8 @@ def compute_precip_pet_ratio(
     """
     abs_precip = np.abs(precip)
     abs_pet = np.maximum(np.abs(pet), 1e-10)
-    return np.clip(abs_precip / abs_pet, 0.0, 10.0)
+    ratio = np.where(abs_precip < 1e-6, 0.0, abs_precip / abs_pet)
+    return np.clip(ratio, 0.0, 10.0)
 
 
 def compute_time_features(

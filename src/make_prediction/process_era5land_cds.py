@@ -1403,7 +1403,7 @@ def _process_daily(
             continue
 
         # Cyclical time features
-        ts_index = pd.DatetimeIndex([ts] * n)
+        ts_index = pd.DatetimeIndex([ts] * len(df))
         day_sin, year_sin = compute_time_features(ts_index, df["longitude"].values)
         df["Day sin"] = day_sin
         df["Year sin"] = year_sin

@@ -86,46 +86,39 @@ FIGS_OUT = _paths.figures_root / "gap_experiment"
 for _d in [STATS_OUT, FIGS_OUT, FIGS_OUT / "hourly", FIGS_OUT / "daily"]:
     _d.mkdir(parents=True, exist_ok=True)
 
-# ── Import project utilities ──────────────────────────────────────────────────
-try:
-    from notebooks.test_interpolation import (
-        create_spaced_gaps,
-        evaluate_interpolation,
-        extend_gaps,
-    )
+# ── Inline utilities ──────────────────────────────────────────────────────────
 
-    print("✓ Loaded test_interpolation utilities")
-except ImportError as _e:
-    print(f"Warning: Could not load test_interpolation: {_e} — using inline fallbacks")
 
-    def create_spaced_gaps(n_gaps, min_spacing, max_idx):
-        gaps, attempts = [], 0
-        while len(gaps) < n_gaps and attempts < n_gaps * 10:
-            ng = np.random.randint(0, max(1, max_idx))
-            if all(abs(ng - g) >= min_spacing for g in gaps):
-                gaps.append(ng)
-            attempts += 1
-        return sorted(gaps)
+def create_spaced_gaps(n_gaps, min_spacing, max_idx):
+    gaps, attempts = [], 0
+    while len(gaps) < n_gaps and attempts < n_gaps * 10:
+        ng = np.random.randint(0, max(1, max_idx))
+        if all(abs(ng - g) >= min_spacing for g in gaps):
+            gaps.append(ng)
+        attempts += 1
+    return sorted(gaps)
 
-    def extend_gaps(gaps, size, max_idx):
-        return [g + i for g in gaps for i in range(size) if g + i < max_idx]
 
-    def evaluate_interpolation(original, interpolated, mask):
-        o, p = original[~mask], interpolated[~mask]
-        rmse = float(np.sqrt(np.mean((o - p) ** 2)))
-        ss_res = float(np.sum((o - p) ** 2))
-        ss_t = float(np.sum((o - o.mean()) ** 2))
-        if ss_t < 1e-12 and ss_res < 1e-12:
-            r2 = 1.0
-        elif ss_t < 1e-12:
-            r2 = 0.0
-        else:
-            r2 = float(1 - ss_res / ss_t)
-        nse = r2
-        mae = float(np.mean(np.abs(o - p)))
-        nz = o != 0
-        mape = float(np.mean(np.abs((o[nz] - p[nz]) / o[nz])) * 100) if nz.any() else float("nan")
-        return {"rmse": rmse, "r2": r2, "mae": mae, "mape": mape, "nse": nse}
+def extend_gaps(gaps, size, max_idx):
+    return [g + i for g in gaps for i in range(size) if g + i < max_idx]
+
+
+def evaluate_interpolation(original, interpolated, mask):
+    o, p = original[~mask], interpolated[~mask]
+    rmse = float(np.sqrt(np.mean((o - p) ** 2)))
+    ss_res = float(np.sum((o - p) ** 2))
+    ss_t = float(np.sum((o - o.mean()) ** 2))
+    if ss_t < 1e-12 and ss_res < 1e-12:
+        r2 = 1.0
+    elif ss_t < 1e-12:
+        r2 = 0.0
+    else:
+        r2 = float(1 - ss_res / ss_t)
+    nse = r2
+    mae = float(np.mean(np.abs(o - p)))
+    nz = o != 0
+    mape = float(np.mean(np.abs((o[nz] - p[nz]) / o[nz])) * 100) if nz.any() else float("nan")
+    return {"rmse": rmse, "r2": r2, "mae": mae, "mape": mape, "nse": nse}
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────

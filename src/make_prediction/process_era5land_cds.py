@@ -752,58 +752,111 @@ def _download_pft_from_gee(
     min_lon, max_lon = float(era5_lons.min()), float(era5_lons.max())
     region = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
 
-    # Sample at ~0.1 degree (~11 km) — match ERA5 grid
-    scale = 11132  # ~0.1 degree in meters at equator
+    # Download at ERA5 resolution (~0.1 deg = 11132 m at equator)
+    scale = 11132
+    max_tile_size = 1024  # matches GEE script's tiling strategy
 
     try:
-        # Use reduceRegion for moderate grids, or getDownloadURL for large ones
-        # For global grids, tile the download
-        nlat, nlon = len(era5_lats), len(era5_lons)
-        pft_grid = np.zeros((nlat, nlon), dtype=np.float32)
+        import math
+        import geemap
 
-        # Process in latitude bands to avoid GEE memory limits
-        band_size = 200  # rows per band
-        for i_start in range(0, nlat, band_size):
-            i_end = min(i_start + band_size, nlat)
-            band_lats = era5_lats[i_start:i_end]
-            band_region = ee.Geometry.Rectangle([
-                min_lon, float(band_lats.min()),
-                max_lon, float(band_lats.max()),
-            ])
+        METERS_PER_DEGREE = 111320.0
+        deg_per_pixel = scale / METERS_PER_DEGREE
 
-            # Sample the image at ERA5 grid points in this band
-            band_img = modis_lc.clip(band_region)
-            arr = band_img.sampleRectangle(
-                region=band_region,
-                defaultValue=0,
-            ).get("LC_Type1").getInfo()
-
-            if arr is not None:
-                band_data = np.array(arr, dtype=np.float32)
-                # Resample to match ERA5 grid dimensions for this band
-                from scipy.ndimage import zoom
-                target_h = i_end - i_start
-                target_w = nlon
-                if band_data.shape != (target_h, target_w):
-                    zoom_h = target_h / max(band_data.shape[0], 1)
-                    zoom_w = target_w / max(band_data.shape[1], 1)
-                    band_data = zoom(band_data, (zoom_h, zoom_w), order=0)
-                    band_data = band_data[:target_h, :target_w]
-                pft_grid[i_start:i_end, :band_data.shape[1]] = band_data
-            else:
-                logger.warning("GEE returned None for lat band [%.1f, %.1f]",
-                               band_lats.min(), band_lats.max())
-
-            if (i_start // band_size) % 5 == 0:
-                logger.info("  PFT download progress: %d/%d rows", i_end, nlat)
-
-        valid = pft_grid[pft_grid > 0]
-        unique_classes = np.unique(valid).astype(int) if len(valid) > 0 else []
+        total_width = int(math.ceil((max_lon - min_lon) / deg_per_pixel))
+        total_height = int(math.ceil((max_lat - min_lat) / deg_per_pixel))
         logger.info(
-            "PFT download complete: shape=%s, classes=%s",
-            pft_grid.shape, unique_classes.tolist(),
+            "PFT grid: %d x %d pixels (%.6f deg/pixel)",
+            total_height, total_width, deg_per_pixel,
         )
-        return pft_grid
+
+        output_array = np.full(
+            (total_height, total_width), np.nan, dtype=np.float32,
+        )
+
+        n_tiles_y = int(math.ceil(total_height / max_tile_size))
+        n_tiles_x = int(math.ceil(total_width / max_tile_size))
+        total_tiles = n_tiles_y * n_tiles_x
+        tile_count = 0
+        successful_tiles = 0
+
+        logger.info(
+            "Tiled download: %d x %d tiles (%d total)", n_tiles_y, n_tiles_x, total_tiles,
+        )
+
+        for row_start in range(0, total_height, max_tile_size):
+            for col_start in range(0, total_width, max_tile_size):
+                tile_count += 1
+                row_end = min(row_start + max_tile_size, total_height)
+                col_end = min(col_start + max_tile_size, total_width)
+
+                tile_lon_min = min_lon + col_start * deg_per_pixel
+                tile_lon_max = min_lon + col_end * deg_per_pixel
+                tile_lat_max = max_lat - row_start * deg_per_pixel
+                tile_lat_min = max_lat - row_end * deg_per_pixel
+
+                tile_region = ee.Geometry.Rectangle(
+                    [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
+                    None, False,
+                )
+
+                try:
+                    tile_data = geemap.ee_to_numpy(
+                        modis_lc, region=tile_region, scale=scale,
+                    )
+                    if tile_data is None:
+                        continue
+                    if tile_data.ndim > 2:
+                        tile_data = tile_data.squeeze()
+                    if tile_data.ndim == 0:
+                        tile_data = np.array([[tile_data]])
+                    elif tile_data.ndim == 1:
+                        expected_h = row_end - row_start
+                        if expected_h == 1:
+                            tile_data = tile_data.reshape(1, -1)
+                        else:
+                            tile_data = tile_data.reshape(-1, 1)
+
+                    ins_h = min(tile_data.shape[0], total_height - row_start)
+                    ins_w = min(tile_data.shape[1], total_width - col_start)
+                    output_array[
+                        row_start:row_start + ins_h,
+                        col_start:col_start + ins_w,
+                    ] = tile_data[:ins_h, :ins_w]
+                    successful_tiles += 1
+
+                except Exception as tile_err:
+                    logger.warning(
+                        "PFT tile [%d,%d] failed: %s", row_start, col_start, tile_err,
+                    )
+
+                if tile_count % 5 == 0 or tile_count == total_tiles:
+                    logger.info(
+                        "  PFT progress: %d/%d tiles (%d ok)",
+                        tile_count, total_tiles, successful_tiles,
+                    )
+
+        if successful_tiles == 0:
+            logger.error("All PFT tiles failed — returning zeros")
+            return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+
+        # Resample tiled output to exact ERA5 grid using nearest-neighbor
+        from scipy.ndimage import zoom
+        nlat, nlon = len(era5_lats), len(era5_lons)
+        if output_array.shape != (nlat, nlon):
+            zoom_h = nlat / max(output_array.shape[0], 1)
+            zoom_w = nlon / max(output_array.shape[1], 1)
+            output_array = zoom(output_array, (zoom_h, zoom_w), order=0)
+            output_array = output_array[:nlat, :nlon]
+
+        valid = output_array[~np.isnan(output_array) & (output_array > 0)]
+        unique_classes = np.unique(valid).astype(int) if len(valid) > 0 else []
+        coverage = np.sum(~np.isnan(output_array)) / output_array.size * 100
+        logger.info(
+            "PFT download complete: shape=%s, classes=%s, coverage=%.1f%%",
+            output_array.shape, unique_classes.tolist(), coverage,
+        )
+        return output_array.astype(np.float32)
 
     except Exception as exc:
         logger.error("GEE PFT download failed: %s", exc, exc_info=True)

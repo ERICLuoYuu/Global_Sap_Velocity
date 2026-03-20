@@ -1182,6 +1182,22 @@ def build_prediction_dataset(
     gc.collect()
     logger.info("=== Month %d-%02d complete: %d files written ===", year, month, len(written_paths))
 
+    # Merge daily files into one monthly file (matches GEE output format)
+    if written_paths:
+        monthly_file = csv_dir / f"prediction_{year}_{month:02d}_daily.csv"
+        if not monthly_file.exists():
+            logger.info("Merging %d daily files into %s ...", len(written_paths), monthly_file.name)
+            chunks = []
+            for p in sorted(written_paths):
+                chunks.append(pd.read_csv(p, low_memory=False))
+            merged = pd.concat(chunks, ignore_index=True)
+            merged.to_csv(monthly_file, index=False)
+            logger.info("Monthly file: %s (%d rows)", monthly_file.name, len(merged))
+            del merged, chunks
+            gc.collect()
+        else:
+            logger.info("Monthly file already exists: %s", monthly_file.name)
+
     # Mark month as fully processed for checkpoint/resume
     _mark_done(output_dir, year, month, "full")
     return written_paths

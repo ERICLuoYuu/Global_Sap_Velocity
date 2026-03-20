@@ -668,6 +668,199 @@ def _read_raster_to_era5_grid(
     return out
 
 
+
+def _download_elevation_from_gee(
+    era5_lats: np.ndarray,
+    era5_lons: np.ndarray,
+) -> np.ndarray:
+    """Download elevation from NASA ASTER DEM via GEE.
+
+    Returns 2-D array of shape (len(era5_lats), len(era5_lons)) in metres.
+    """
+    return _download_static_from_gee(
+        era5_lats, era5_lons,
+        image_id="NASA/NASADEM_HGT/001",
+        band_name="elevation",
+        label="elevation",
+    )
+
+
+def _download_canopy_height_from_gee(
+    era5_lats: np.ndarray,
+    era5_lons: np.ndarray,
+) -> np.ndarray:
+    """Download canopy height from Meta GlobalCanopyHeight via GEE.
+
+    Returns 2-D array of shape (len(era5_lats), len(era5_lons)) in metres.
+    """
+    return _download_static_from_gee(
+        era5_lats, era5_lons,
+        image_id="META/GlobalCanopyHeight/v1",
+        band_name="canopy_height",
+        label="canopy_height",
+    )
+
+
+def _download_static_from_gee(
+    era5_lats: np.ndarray,
+    era5_lons: np.ndarray,
+    image_id: str,
+    band_name: str,
+    label: str,
+) -> np.ndarray:
+    """Generic GEE static dataset downloader using tiled geemap approach.
+
+    Reuses the same GEE init and tiling strategy as _download_pft_from_gee.
+    """
+    try:
+        import ee
+    except ImportError:
+        logger.error("earthengine-api not installed — cannot download %s", label)
+        return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+
+    import json
+    gee_project = "era5download-447713"
+    try:
+        cred_paths = [
+            Path.home() / ".config" / "earthengine" / "credentials",
+            Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
+        ]
+        cred_data = None
+        for cred_path in cred_paths:
+            if cred_path.exists():
+                cred_data = json.loads(cred_path.read_text())
+                break
+        if cred_data and "refresh_token" in cred_data:
+            from google.oauth2.credentials import Credentials
+            credentials = Credentials(
+                token=None,
+                refresh_token=cred_data["refresh_token"],
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=cred_data["client_id"],
+                client_secret=cred_data["client_secret"],
+            )
+            ee.Initialize(credentials=credentials, project=gee_project)
+        else:
+            ee.Initialize(project=gee_project)
+    except Exception as exc:
+        logger.error("Failed to initialize Earth Engine for %s: %s", label, exc)
+        return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+
+    logger.info("Downloading %s from GEE (%s) ...", label, image_id)
+
+    image = ee.Image(image_id).select(band_name)
+
+    min_lat, max_lat = float(era5_lats.min()), float(era5_lats.max())
+    min_lon, max_lon = float(era5_lons.min()), float(era5_lons.max())
+
+    scale = 11132  # ~0.1 degree
+    max_tile_size = 1024
+
+    try:
+        import math
+        import geemap
+
+        METERS_PER_DEGREE = 111320.0
+        deg_per_pixel = scale / METERS_PER_DEGREE
+
+        total_width = int(math.ceil((max_lon - min_lon) / deg_per_pixel))
+        total_height = int(math.ceil((max_lat - min_lat) / deg_per_pixel))
+        logger.info(
+            "%s grid: %d x %d pixels (%.6f deg/pixel)",
+            label, total_height, total_width, deg_per_pixel,
+        )
+
+        output_array = np.full(
+            (total_height, total_width), np.nan, dtype=np.float32,
+        )
+
+        n_tiles_y = int(math.ceil(total_height / max_tile_size))
+        n_tiles_x = int(math.ceil(total_width / max_tile_size))
+        total_tiles = n_tiles_y * n_tiles_x
+        tile_count = 0
+        successful_tiles = 0
+
+        for row_start in range(0, total_height, max_tile_size):
+            for col_start in range(0, total_width, max_tile_size):
+                tile_count += 1
+                row_end = min(row_start + max_tile_size, total_height)
+                col_end = min(col_start + max_tile_size, total_width)
+
+                tile_lon_min = min_lon + col_start * deg_per_pixel
+                tile_lon_max = min_lon + col_end * deg_per_pixel
+                tile_lat_max = max_lat - row_start * deg_per_pixel
+                tile_lat_min = max_lat - row_end * deg_per_pixel
+
+                tile_region = ee.Geometry.Rectangle(
+                    [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
+                    None, False,
+                )
+
+                try:
+                    tile_data = geemap.ee_to_numpy(
+                        image, region=tile_region, scale=scale,
+                    )
+                    if tile_data is None:
+                        continue
+                    if tile_data.ndim > 2:
+                        tile_data = tile_data.squeeze()
+                    if tile_data.ndim == 0:
+                        tile_data = np.array([[tile_data]])
+                    elif tile_data.ndim == 1:
+                        expected_h = row_end - row_start
+                        if expected_h == 1:
+                            tile_data = tile_data.reshape(1, -1)
+                        else:
+                            tile_data = tile_data.reshape(-1, 1)
+
+                    ins_h = min(tile_data.shape[0], total_height - row_start)
+                    ins_w = min(tile_data.shape[1], total_width - col_start)
+                    output_array[
+                        row_start:row_start + ins_h,
+                        col_start:col_start + ins_w,
+                    ] = tile_data[:ins_h, :ins_w]
+                    successful_tiles += 1
+
+                except Exception as tile_err:
+                    logger.warning(
+                        "%s tile [%d,%d] failed: %s", label, row_start, col_start, tile_err,
+                    )
+
+                if tile_count % 5 == 0 or tile_count == total_tiles:
+                    logger.info(
+                        "  %s progress: %d/%d tiles (%d ok)",
+                        label, tile_count, total_tiles, successful_tiles,
+                    )
+
+        if successful_tiles == 0:
+            logger.error("All %s tiles failed — returning zeros", label)
+            return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+
+        # Resample to exact ERA5 grid
+        from scipy.ndimage import zoom
+        nlat, nlon = len(era5_lats), len(era5_lons)
+        if output_array.shape != (nlat, nlon):
+            zoom_h = nlat / max(output_array.shape[0], 1)
+            zoom_w = nlon / max(output_array.shape[1], 1)
+            output_array = zoom(output_array, (zoom_h, zoom_w), order=0)
+            output_array = output_array[:nlat, :nlon]
+
+        valid = output_array[~np.isnan(output_array)]
+        coverage = len(valid) / output_array.size * 100
+        logger.info(
+            "%s download complete: shape=%s, range=[%.1f, %.1f], coverage=%.1f%%",
+            label, output_array.shape,
+            valid.min() if len(valid) > 0 else 0,
+            valid.max() if len(valid) > 0 else 0,
+            coverage,
+        )
+        return output_array.astype(np.float32)
+
+    except Exception as exc:
+        logger.error("GEE %s download failed: %s", label, exc, exc_info=True)
+        return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+
+
 def _download_pft_from_gee(
     era5_lats: np.ndarray,
     era5_lons: np.ndarray,
@@ -887,8 +1080,8 @@ def load_static_datasets(
             static["elevation"] = _read_raster_to_era5_grid(p, era5_lats, era5_lons)
             break
     if "elevation" not in static:
-        logger.warning("Elevation raster not found — filling with 0")
-        static["elevation"] = np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+        logger.info("Elevation raster not found — downloading from GEE (ASTER DEM)")
+        static["elevation"] = _download_elevation_from_gee(era5_lats, era5_lons)
 
     # --- Canopy height ---
     ch_candidates = [
@@ -900,8 +1093,8 @@ def load_static_datasets(
             static["canopy_height"] = _read_raster_to_era5_grid(p, era5_lats, era5_lons)
             break
     if "canopy_height" not in static:
-        logger.warning("Canopy height raster not found — filling with 0")
-        static["canopy_height"] = np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
+        logger.info("Canopy height raster not found — downloading from GEE (Meta GlobalCanopyHeight)")
+        static["canopy_height"] = _download_canopy_height_from_gee(era5_lats, era5_lons)
 
     # --- PFT (MODIS land cover) ---
     # Try local raster first (cached from previous GEE download)

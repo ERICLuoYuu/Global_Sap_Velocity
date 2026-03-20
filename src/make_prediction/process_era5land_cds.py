@@ -1151,30 +1151,14 @@ def build_prediction_dataset(
     csv_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Step 1: Download (instantaneous + accumulated in parallel)
+    # Step 1: Download (instantaneous + accumulated)
     # ------------------------------------------------------------------
     if time_scale == "daily":
-        from concurrent.futures import ThreadPoolExecutor
-
-        logger.info("=== Downloading inst + accum in parallel ===")
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_inst = pool.submit(
-                download_instantaneous_vars,
-                _cds_client(),
-                year,
-                month,
-                dl_dir,
-            )
-            fut_accum = pool.submit(
-                download_accumulated_vars,
-                _cds_client(),
-                year,
-                month,
-                dl_dir,
-                "daily",
-            )
-            inst_paths = fut_inst.result()
-            accum_path = fut_accum.result()
+        # Download functions check their own caches internally and
+        # only create CDS clients when a cache miss requires downloading.
+        logger.info("=== Loading/downloading inst + accum ===")
+        inst_paths = download_instantaneous_vars(year, month, dl_dir)
+        accum_path = download_accumulated_vars(year, month, dl_dir, "daily")
 
         # Load datasets
         ds_mean = _normalise_ds(xr.open_dataset(inst_paths["mean"]))
@@ -1195,7 +1179,7 @@ def build_prediction_dataset(
             ds_accum = _apply_mask_to_ds(ds_accum, forest_mask)
     else:
         logger.info("=== Downloading hourly variables ===")
-        accum_path = download_accumulated_vars(_cds_client(), year, month, dl_dir, time_scale="hourly")
+        accum_path = download_accumulated_vars(year, month, dl_dir, time_scale="hourly")
         ds_hourly = _normalise_ds(xr.open_dataset(accum_path))
         lats = ds_hourly["latitude"].values
         lons = ds_hourly["longitude"].values

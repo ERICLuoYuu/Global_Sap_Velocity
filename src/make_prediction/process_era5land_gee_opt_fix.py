@@ -1263,6 +1263,19 @@ class ERA5LandGEEProcessor:
 
             print(f"  Region bounds: lon=[{lon_min:.4f}, {lon_max:.4f}], lat=[{lat_min:.4f}, {lat_max:.4f}]")
 
+            # Safeguard: reject bounds outside valid geographic range
+            if lon_min > 180 or lon_max > 180 or lon_min < -180 or lon_max < -180:
+                raise ValueError(
+                    f"Region bounds have invalid longitudes: [{lon_min}, {lon_max}]. "
+                    f"This usually means the input shapefile extends past -180/180. "
+                    f"Clamp your shapefile bounds to [-180, 180] before passing to GEE."
+                )
+            if lat_min > 90 or lat_max > 90 or lat_min < -90 or lat_max < -90:
+                raise ValueError(
+                    f"Region bounds have invalid latitudes: [{lat_min}, {lat_max}]. "
+                    f"Clamp your shapefile bounds to [-90, 90] before passing to GEE."
+                )
+
             # --- 2. Resolution Setup (Correct for EPSG:4326) ---
             deg_per_pixel = scale / METERS_PER_DEGREE
 
@@ -1421,6 +1434,12 @@ class ERA5LandGEEProcessor:
             if use_bounds or n_features > 1000:
                 print(f"Using bounding box due to complexity ({n_features} features)")
                 bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
+                if bounds[0] < -180 or bounds[2] > 180 or bounds[1] < -90 or bounds[3] > 90:
+                    raise ValueError(
+                        f"Shapefile bounds [{bounds[0]:.4f}, {bounds[1]:.4f}, "
+                        f"{bounds[2]:.4f}, {bounds[3]:.4f}] exceed [-180, -90, 180, 90]. "
+                        f"Clamp your shapefile to valid geographic bounds before use."
+                    )
                 ee_geometry = ee.Geometry.Rectangle([bounds[0], bounds[1], bounds[2], bounds[3]], None, False)
                 return ee_geometry
 

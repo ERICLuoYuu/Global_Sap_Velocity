@@ -16,13 +16,17 @@ PREDICTION_DIR = OUTPUT_DIR / "predictions"
 
 # ERA5-Land data settings — use env vars on HPC, Windows defaults for local dev
 import os
+
 ERA5LAND_DIR = Path(os.environ.get("GSV_ERA5LAND_DIR", "D:/Temp/era5land_vars"))
 ERA5LAND_TEMP_DIR = Path(os.environ.get("GSV_ERA5LAND_TEMP_DIR", "D:/Temp/era5land_extracted/"))
 BIOMES_FILE = RAW_DATA_DIR / "spatial_features" / "biomes" / "biomes.shp"
 
-# Create directories if they don't exist
-for directory in [ERA5LAND_TEMP_DIR, MODEL_DIR, PREDICTION_DIR]:
-    directory.mkdir(parents=True, exist_ok=True)
+
+def ensure_directories():
+    """Create required directories. Call explicitly — not at import time."""
+    for directory in [ERA5LAND_TEMP_DIR, MODEL_DIR, PREDICTION_DIR]:
+        directory.mkdir(parents=True, exist_ok=True)
+
 
 # Model settings
 DEFAULT_MODEL = "xgb/default_daily_without_coordinates/FINAL_xgb_default_daily_without_coordinates.joblib"
@@ -120,6 +124,3 @@ VARIABLE_RENAME = {
     "volumetric_soil_water_layer_1": "volumetric_soil_water_layer_1",
     "soil_temperature_level_1": "soil_temperature_level_1",
 }
-
-# Time features flag
-TIME_FEATURES = True  # Set to True if you want cyclical time features

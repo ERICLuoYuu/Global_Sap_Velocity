@@ -5,7 +5,11 @@ from Google Earth Engine with maintained functionality for derived variables.
 """
 
 import os
+import logging
 import sys
+
+logger = logging.getLogger(__name__)
+
 
 
 # Find and set PROJ_LIB path
@@ -58,7 +62,7 @@ def setup_proj():
         if os.path.exists(proj_db):
             os.environ["PROJ_LIB"] = path
             os.environ["PROJ_DATA"] = path  # For newer PROJ versions
-            print(f"PROJ_LIB set to: {path}")
+            logger.info("PROJ_LIB set to: %s", path)
             return True
 
     # If not found, try to find proj.db anywhere in site-packages
@@ -70,12 +74,12 @@ def setup_proj():
                 if "proj.db" in files:
                     os.environ["PROJ_LIB"] = root
                     os.environ["PROJ_DATA"] = root
-                    print(f"PROJ_LIB set to: {root}")
+                    logger.info("PROJ_LIB set to: %s", root)
                     return True
-    except:
+    except Exception:
         pass
 
-    print("WARNING: Could not find proj.db. CRS operations may fail.")
+    logger.warning("Could not find proj.db. CRS operations may fail.")
     return False
 
 
@@ -405,7 +409,7 @@ class ERA5LandGEEProcessor:
             try:
                 if hasattr(ds, "close"):
                     ds.close()
-            except:
+            except Exception:
                 pass
 
         # Close Dask client if it exists
@@ -413,7 +417,7 @@ class ERA5LandGEEProcessor:
             try:
                 self.client.close()
                 print("Closed Dask client")
-            except:
+            except Exception:
                 pass
             self.client = None
 
@@ -908,7 +912,7 @@ class ERA5LandGEEProcessor:
                         Path(f).unlink()
                 if temp_chunk_dir.exists():
                     temp_chunk_dir.rmdir()
-            except:
+            except Exception:
                 pass
 
             # Clean up memory
@@ -1466,7 +1470,7 @@ class ERA5LandGEEProcessor:
                 return len(geometry.exterior.coords) + sum(len(r.coords) for r in geometry.interiors)
             else:
                 return 0
-        except:
+        except Exception:
             return 0
 
     def debug_coordinate_alignment(self):
@@ -1526,7 +1530,7 @@ class ERA5LandGEEProcessor:
                                     if 0 <= adj_lat_idx < len(lats) and 0 <= adj_lon_idx < len(lons):
                                         adj_values = ds[var].isel(latitude=adj_lat_idx, longitude=adj_lon_idx).values
                                         print(f"  Adjacent ({di}, {dj}): {adj_values[:5]}...")
-                                except:
+                                except Exception:
                                     pass
 
                 except Exception as e:
@@ -2523,7 +2527,7 @@ class ERA5LandGEEProcessor:
                                 lon_min, lat_min, lon_max, lat_max = bounds_info["bbox"]
                             else:
                                 raise ValueError("Could not extract bounds from bounds_info")
-                        except:
+                        except Exception:
                             # Try direct attribute access
                             lon_min = bounds_info[0]
                             lat_min = bounds_info[1]
@@ -7152,7 +7156,7 @@ Examples:
     finally:
         try:
             processor.close()
-        except:
+        except Exception:
             pass
 
 

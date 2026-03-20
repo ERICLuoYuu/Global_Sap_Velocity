@@ -282,13 +282,18 @@ class TestModelConfigForwardCompat:
 
 class TestDataTransformerExtreme:
     def test_log1p_large_values(self):
-        """log1p should handle very large values without overflow."""
+        """log1p inverse clips extreme values to prevent overflow (H5 fix)."""
         config = ModelConfig(model_type="xgb", target_transform="log1p")
         dt = DataTransformer(config)
         large = np.array([1e15, 1e10, 1e5])
         transformed = dt.transform_target(large)
         recovered = dt.transform_target(transformed, inverse=True)
-        np.testing.assert_allclose(recovered, large, rtol=1e-6)
+        # H5 fix: expm1 input is clipped to [-20, 20], so very large values
+        # are capped at expm1(20) ~ 4.85e8. Only moderate values roundtrip.
+        assert np.isfinite(recovered).all(), "All values should be finite after H5 fix"
+        np.testing.assert_allclose(recovered[2], large[2], rtol=1e-6)
+        # Large values are capped, not inf
+        assert recovered[0] < 1e9, "Extreme value should be clipped by H5 overflow guard"
 
     def test_log1p_zero_values(self):
         """log1p(0) = 0, expm1(0) = 0."""

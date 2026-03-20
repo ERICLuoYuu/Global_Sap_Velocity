@@ -4666,7 +4666,7 @@ class ERA5LandGEEProcessor:
                 resampled_temp,
                 dims=["latitude", "longitude"],
                 coords={"latitude": target_lat, "longitude": target_lon},
-                name="annual_mean_temperature",
+                name="mean_annual_temp",
             )
 
             resampled_precip_da = xr.DataArray(
@@ -5713,13 +5713,13 @@ class ERA5LandGEEProcessor:
                         temp_grid,
                         dims=[final_lat_coord_name, final_lon_coord_name],
                         coords={final_lat_coord_name: ref_lats, final_lon_coord_name: ref_lons},
-                        name="annual_mean_temperature",
+                        name="mean_annual_temp",
                     )
                     precip_grid_da = xr.DataArray(
                         precip_grid,
                         dims=[final_lat_coord_name, final_lon_coord_name],
                         coords={final_lat_coord_name: ref_lats, final_lon_coord_name: ref_lons},
-                        name="annual_precipitation",
+                        name="mean_annual_precip",
                     )
                     print("Successfully created climate DataArrays aligned with reference grid.")
 
@@ -5878,8 +5878,8 @@ class ERA5LandGEEProcessor:
                 print("Adding climate data to merged dataset...")
                 try:
                     # Climate DAs were already created using reference coords, should align
-                    merged_ds["annual_mean_temperature"] = temp_grid_da
-                    merged_ds["annual_precipitation"] = precip_grid_da
+                    merged_ds["mean_annual_temp"] = temp_grid_da
+                    merged_ds["mean_annual_precip"] = precip_grid_da
                 except Exception as climate_add_err:
                     print(f"Warning: Error adding climate data after merge: {climate_add_err}")
                     traceback.print_exc()
@@ -6210,10 +6210,10 @@ class ERA5LandGEEProcessor:
             final_expected_vars = []
             checked_var = []
             # Add climate variables
-            if "annual_mean_temperature" in merged_ds.data_vars:
-                final_expected_vars.append("annual_mean_temperature")
-            if "annual_precipitation" in merged_ds.data_vars:
-                final_expected_vars.append("annual_precipitation")
+            if "mean_annual_temp" in merged_ds.data_vars:
+                final_expected_vars.append("mean_annual_temp")
+            if "mean_annual_precip" in merged_ds.data_vars:
+                final_expected_vars.append("mean_annual_precip")
 
             # Add static variables that were successfully added
             for static_var in static_vars_added:
@@ -6316,6 +6316,14 @@ class ERA5LandGEEProcessor:
                 # ... (fallback logic as in original code if needed, but should be less necessary) ...
                 return None
 
+
+            # --- 9b. Drop rows with any NaN (ocean / non-forest masked pixels) ---
+            rows_before = len(final_df)
+            feature_cols = [c for c in final_df.columns if c not in [final_time_coord_name, final_lat_coord_name, final_lon_coord_name]]
+            final_df = final_df.dropna(subset=feature_cols, how='any')
+            rows_after = len(final_df)
+            print(f'Dropped {rows_before - rows_after} NaN rows ({100*(rows_before - rows_after)/rows_before:.1f}%). Remaining: {rows_after} rows.')
+
             # --- 10. Add Time Features (if configured) ---
             time_feature_config = getattr(config, "TIME_FEATURES", True)
 
@@ -6400,6 +6408,16 @@ class ERA5LandGEEProcessor:
                 print(
                     f"PFT encoding complete. Created {len(target_pft_classes)} columns: {[f'{v}' for v in target_pft_classes.values()]}"
                 )
+            # --- 12b. Remove non-forest rows (PFT sum != 1) ---
+            pft_cols = ['ENF', 'EBF', 'DNF', 'DBF', 'MF', 'WSA', 'SAV', 'WET']
+            existing_pft = [c for c in pft_cols if c in final_df.columns]
+            if existing_pft:
+                pft_sum = final_df[existing_pft].sum(axis=1)
+                rows_before_pft = len(final_df)
+                final_df = final_df[pft_sum == 1]
+                rows_after_pft = len(final_df)
+                print(f'PFT filter: dropped {rows_before_pft - rows_after_pft} non-forest rows (PFT sum != 1). Remaining: {rows_after_pft} rows.')
+
             # --- 13. Final Checks and Return ---
             end_grid_proc_time = time.time()
             print(f"\nFinished creating grid dataset in {end_grid_proc_time - start_grid_proc_time:.2f} seconds.")

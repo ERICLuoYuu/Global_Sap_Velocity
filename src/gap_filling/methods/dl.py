@@ -23,7 +23,7 @@ DL_EPOCHS = 50
 DL_PATIENCE = 5
 DL_BATCH = 32
 DL_VAL_SPLIT = 0.1
-ENV_FEATURE_COLS = ["ta", "vpd", "sw_in", "ppfd_in"]
+ENV_FEATURE_COLS = ["ta", "vpd", "sw_in", "ppfd_in", "ws"]
 
 _HAS_TORCH = False
 try:

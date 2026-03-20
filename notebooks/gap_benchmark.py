@@ -224,7 +224,7 @@ def _infer_site_name(stem: str) -> str:
 
 
 # ── Environmental data helpers ────────────────────────────────────────────────
-ENV_FEATURE_COLS = ["ta", "vpd", "sw_in", "ppfd_in"]  # core env features for ML/DL
+ENV_FEATURE_COLS = ["ta", "vpd", "sw_in", "ppfd_in", "ws"]  # core env features for ML/DL
 
 
 def _safe_read_env(sap_fpath: Path) -> "pd.DataFrame | None":
@@ -1306,7 +1306,11 @@ def run_phase3_env(df_site_summary):
 
             # Daily
             _target_d_full = _env_d[_target_col].dropna() if _target_col in _env_d.columns else pd.Series(dtype=float)
-            _seg_d = _target_d_full.iloc[:min(len(_target_d_full), 365)] if len(_target_d_full) > 30 else pd.Series(dtype=float)
+            _seg_d = (
+                _target_d_full.iloc[: min(len(_target_d_full), 365)]
+                if len(_target_d_full) > 30
+                else pd.Series(dtype=float)
+            )
             _cross_env_d = _env_d[_cross_cols].reindex(_seg_d.index) if _cross_cols and len(_seg_d) > 0 else None
 
             _key = f"{_site}__{_target_col}"
@@ -1322,12 +1326,16 @@ def run_phase3_env(df_site_summary):
             }
             _total_segments += 1
             _d_len = len(_seg_d) if len(_seg_d) > 0 else 0
-            print(f"  \u2713 {_site}/{_target_col}: hourly={len(_seg_h)}h  daily={_d_len}d  cross_env={len(_cross_cols)}")
+            print(
+                f"  \u2713 {_site}/{_target_col}: hourly={len(_seg_h)}h  daily={_d_len}d  cross_env={len(_cross_cols)}"
+            )
 
         gc.collect()
 
-    print(f"\nEnv ground truth: {_total_segments} segments from "
-          f"{len(set(v['site'] for v in ground_truth_store.values()))} sites")
+    print(
+        f"\nEnv ground truth: {_total_segments} segments from "
+        f"{len(set(v['site'] for v in ground_truth_store.values()))} sites"
+    )
     return ground_truth_store
 
 

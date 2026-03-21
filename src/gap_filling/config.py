@@ -21,6 +21,7 @@ class GapFillingConfig:
     min_data_ml: int = 500
     min_data_dl: int = 2000
     prefer_non_env_below_h: int = 6
+    max_gap_hours: int = 72
     lookup_csv_sap: Path | str = _DEFAULT_SAP_LOOKUP
     lookup_csv_env: Path | str = _DEFAULT_ENV_LOOKUP
     time_scale: str = "hourly"

@@ -136,6 +136,12 @@ class MethodSelector:
                 env_method = best_env.idxmax()
                 max_env_gap = int(best_env.max())
 
+        # Enforce hard cap on maximum gap size
+        cap = self._config.max_gap_hours
+        if cap > 0:
+            max_non_env_gap = min(max_non_env_gap, cap)
+            max_env_gap = min(max_env_gap, cap)
+
         result = SelectionResult(
             non_env_method=non_env_method,
             max_non_env_gap_h=max_non_env_gap,

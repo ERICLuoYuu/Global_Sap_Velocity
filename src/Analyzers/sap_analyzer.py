@@ -889,8 +889,9 @@ class SapFlowAnalyzer:
                 data_cols_for_fill = [
                     col for col in df.columns if col not in ["solar_TIMESTAMP", "TIMESTAMP_LOCAL", "lat", "long"]
                 ]
-                pre_nans = df[data_cols_for_fill].isna().sum().sum()
-                df_filled = self._gap_filler.fill_dataframe(df[data_cols_for_fill])
+                pre_fill_df = df[data_cols_for_fill].copy()
+                pre_nans = pre_fill_df.isna().sum().sum()
+                df_filled = self._gap_filler.fill_dataframe(pre_fill_df)
                 # Preserve non-data columns
                 for col in df.columns:
                     if col not in data_cols_for_fill:
@@ -904,6 +905,24 @@ class SapFlowAnalyzer:
                 gap_filled_path = gap_filled_dir / f"{location}_{plant_type}_gap_filled.csv"
                 df.to_csv(gap_filled_path)
                 print(f"  Saved gap-filled data to {gap_filled_path}")
+                # Save per-column gap-fill masks (for visualization)
+                gap_masks_dir = outliers_removed_dir.parent / "gap_filled_masks"
+                gap_masks_dir.mkdir(parents=True, exist_ok=True)
+                solar_ts = df["solar_TIMESTAMP"] if "solar_TIMESTAMP" in df.columns else None
+                for col in data_cols_for_fill:
+                    was_nan = pre_fill_df[col].isna()
+                    now_filled = df[col].notna()
+                    is_gap_filled = was_nan & now_filled
+                    if not is_gap_filled.any():
+                        continue
+                    mask_df_out = {"solar_TIMESTAMP": solar_ts, "value": df[col], "is_gap_filled": is_gap_filled}
+                    if solar_ts is None:
+                        del mask_df_out["solar_TIMESTAMP"]
+                    import pandas as _pd
+                    _pd.DataFrame(mask_df_out, index=df.index).to_csv(
+                        gap_masks_dir / f"{col}_gap_filled.csv", index_label="timestamp"
+                    )
+                print(f"  Saved gap-fill masks to {gap_masks_dir}")
 
         except Exception as e:
             print(f"Error during processing: {str(e)}")

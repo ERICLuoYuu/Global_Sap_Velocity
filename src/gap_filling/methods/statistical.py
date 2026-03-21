@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
 from src.gap_filling.methods.interpolation import fill_linear
+
+logger = logging.getLogger(__name__)
 
 
 def _is_hourly_series(s: pd.Series) -> bool:
@@ -91,4 +95,5 @@ def fill_stl(s: pd.Series) -> pd.Series:
         residual_filled = residual.interpolate(method="linear", limit_direction="both").fillna(0.0)
         return pd.Series(res.trend + res.seasonal + residual_filled.values, index=s.index).clip(lower=0)
     except Exception:
+        logger.debug("STL decomposition failed, falling back to rolling mean", exc_info=True)
         return fill_rolling_mean(s)

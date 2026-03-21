@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 from scipy import interpolate as scipy_interp
+
+logger = logging.getLogger(__name__)
 
 
 def fill_linear(s: pd.Series) -> pd.Series:
@@ -38,6 +42,7 @@ def fill_cubic(s: pd.Series) -> pd.Series:
             interped = window.interpolate(method="spline", order=3, limit_direction="both")
             filled.iloc[g_start:g_end] = interped.iloc[g_start - lo : g_end - lo]
         except Exception:
+            logger.debug("Cubic spline failed for gap at %d-%d, falling back to linear", g_start, g_end)
             interped = window.interpolate(method="linear", limit_direction="both")
             filled.iloc[g_start:g_end] = interped.iloc[g_start - lo : g_end - lo]
     if filled.isna().any():
@@ -65,6 +70,7 @@ def fill_akima(s: pd.Series) -> pd.Series:
             filled = filled.interpolate(method="nearest", limit_direction="both")
         return filled.clip(lower=0)
     except Exception:
+        logger.debug("Akima interpolation failed, falling back to linear", exc_info=True)
         return fill_linear(s)
 
 

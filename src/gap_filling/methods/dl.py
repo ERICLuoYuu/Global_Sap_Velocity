@@ -327,6 +327,7 @@ def _predict_at_gaps(
                 filled.iloc[i] = _v
 
     model.eval()
+    _gap_count = 0
     with torch.no_grad():
         for i in range(window, len(vals)):
             if np.isnan(vals[i]):
@@ -345,6 +346,9 @@ def _predict_at_gaps(
                 pred = max(0.0, pred)
                 vals[i] = pred
                 filled.iloc[i] = pred
+                _gap_count += 1
+                if _gap_count % 1000 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
     return filled.clip(lower=0)
 
 

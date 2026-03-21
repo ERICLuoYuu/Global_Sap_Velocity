@@ -39,8 +39,15 @@ class GapDetector:
         ends = np.where(diff == -1)[0] - 1  # inclusive end
 
         # Infer frequency for size calculation
-        freq = pd.infer_freq(series.index)
-        freq_offset = pd.tseries.frequencies.to_offset(freq or "h")
+        freq = None
+        if len(series) >= 3:
+            freq = pd.infer_freq(series.index)
+        if freq is not None:
+            freq_offset = pd.tseries.frequencies.to_offset(freq)
+        elif len(series) >= 2:
+            freq_offset = pd.Series(series.index).diff().dropna().median()
+        else:
+            freq_offset = pd.tseries.frequencies.to_offset("h")
 
         gaps = []
         idx = series.index

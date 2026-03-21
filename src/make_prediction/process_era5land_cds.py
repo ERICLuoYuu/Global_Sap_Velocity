@@ -608,7 +608,7 @@ def compute_time_features(
 
     Returns
     -------
-    (day_sin, year_sin) arrays, each of shape ``(len(timestamps),)``
+    (day_sin, year_sin, solar_ts) — sin arrays + solar timestamps
     """
     times_utc = timestamps.tz_localize("UTC") if timestamps.tz is None else timestamps
     doy = times_utc.dayofyear.values.astype(float)
@@ -631,7 +631,7 @@ def compute_time_features(
     year_frac = solar_doy + solar_seconds / 86400.0
     year_sin = np.sin(2.0 * np.pi * year_frac / 365.25)
 
-    return day_sin, year_sin
+    return day_sin, year_sin, solar_ts
 
 
 # =========================================================================
@@ -1623,9 +1623,13 @@ def _process_daily(
 
         # Cyclical time features
         ts_index = pd.DatetimeIndex([ts] * len(df))
-        day_sin, year_sin = compute_time_features(ts_index, df["longitude"].values)
+        day_sin, year_sin, solar_ts = compute_time_features(ts_index, df["longitude"].values)
         df["Day sin"] = day_sin
         df["Year sin"] = year_sin
+        df["solar_timestamp"] = solar_ts
+
+        # Drop rows with negative elevation (SRTM no-data sentinel)
+        df = df[df["elevation"] >= 0]
 
         # Drop rows that are all-NaN (ocean / missing)
         df.dropna(subset=["ta", "sw_in", "volumetric_soil_water_layer_1"], inplace=True)
@@ -1777,10 +1781,12 @@ def _process_hourly(
 
             # Time features
             ts_idx = pd.DatetimeIndex([ts] * n)
-            day_sin, year_sin = compute_time_features(ts_idx, frame["longitude"].values)
+            day_sin, year_sin, solar_ts = compute_time_features(ts_idx, frame["longitude"].values)
             frame["Day sin"] = day_sin
             frame["Year sin"] = year_sin
+            frame["solar_timestamp"] = solar_ts
 
+            frame = frame[frame["elevation"] >= 0]
             frame.dropna(subset=["ta", "sw_in", "volumetric_soil_water_layer_1"], inplace=True)
             day_frames.append(frame)
 
@@ -1837,7 +1843,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--year", type=int, required=True, help="Year to process")
-    p.add_argument("--month", type=int, required=True, help="Month to process (1-12)")
+    p.add_argument("--month", type=int, default=None, help="Month to process (1-12). If omitted, processes all months.")
+    p.add_argument("--months", type=int, nargs="+", default=None, help="List of months (e.g. --months 1 2 3)")
     p.add_argument("--time-scale", choices=["daily", "hourly"], default="daily", help="Temporal resolution")
     p.add_argument("--output-dir", type=str, default=None, help="Output directory (default: config.ERA5LAND_TEMP_DIR)")
     p.add_argument("--validate", action="store_true", help="Run validation checks on each output file")
@@ -1858,27 +1865,41 @@ def main(argv: list[str] | None = None) -> None:
 
     if not 1950 <= args.year <= 2100:
         raise ValueError(f"Year must be 1950-2100, got {args.year}")
-    if not 1 <= args.month <= 12:
-        raise ValueError(f"Month must be 1-12, got {args.month}")
+
+    # Determine months to process
+    if args.months:
+        months = args.months
+    elif args.month is not None:
+        months = [args.month]
+    else:
+        months = list(range(1, 13))
+
+    for m in months:
+        if not 1 <= m <= 12:
+            raise ValueError(f"Month must be 1-12, got {m}")
 
     output_dir = Path(args.output_dir).resolve() if args.output_dir else ERA5LAND_TEMP_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Processing ERA5-Land via CDS: year=%d month=%d scale=%s", args.year, args.month, args.time_scale)
+    logger.info("Processing ERA5-Land via CDS: year=%d months=%s scale=%s", args.year, months, args.time_scale)
     logger.info("Output directory: %s", output_dir)
     if args.shapefile:
         logger.info("Forest mask shapefile: %s", args.shapefile)
 
-    written = build_prediction_dataset(
-        year=args.year,
-        month=args.month,
-        output_dir=output_dir,
-        time_scale=args.time_scale,
-        validate=args.validate,
-        shapefile=args.shapefile,
-    )
+    all_written = []
+    for m in months:
+        logger.info("=== Month %d/%d ===", m, len(months))
+        written = build_prediction_dataset(
+            year=args.year,
+            month=m,
+            output_dir=output_dir,
+            time_scale=args.time_scale,
+            validate=args.validate,
+            shapefile=args.shapefile,
+        )
+        all_written.extend(written)
 
-    logger.info("Done. %d CSV files written to %s/csv/", len(written), output_dir)
+    logger.info("Done. %d CSV files written to %s/csv/", len(all_written), output_dir)
 
 
 if __name__ == "__main__":

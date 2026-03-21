@@ -6322,6 +6322,9 @@ class ERA5LandGEEProcessor:
             feature_cols = [c for c in final_df.columns if c not in [final_time_coord_name, final_lat_coord_name, final_lon_coord_name]]
             final_df = final_df.dropna(subset=feature_cols, how='any')
             rows_after = len(final_df)
+            # Drop rows with negative elevation (SRTM no-data sentinel)
+            if "elevation" in final_df.columns:
+                final_df = final_df[final_df["elevation"] >= 0]
             print(f'Dropped {rows_before - rows_after} NaN rows ({100*(rows_before - rows_after)/rows_before:.1f}%). Remaining: {rows_after} rows.')
 
             # --- 10. Add Time Features (if configured) ---

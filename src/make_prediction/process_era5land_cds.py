@@ -283,15 +283,27 @@ def _download_one_stat(
         "data_format": "netcdf_zip",
     }
 
-    _download_with_retry(_cds_client(), "derived-era5-land-daily-statistics", request, zip_target)
+    # Download + extract + validate with retry (CDS sometimes returns partial data)
+    for dl_attempt in range(1, 4):
+        _download_with_retry(_cds_client(), "derived-era5-land-daily-statistics", request, zip_target)
 
-    # Extract NetCDF from ZIP, clean up intermediate on success or failure
-    try:
-        extracted = _unzip_netcdf(zip_target, nc_dir)
-        extracted.rename(nc_target)
-    finally:
-        zip_target.unlink(missing_ok=True)
-    logger.info("Extracted %s", nc_target)
+        try:
+            extracted = _unzip_netcdf(zip_target, nc_dir)
+            extracted.rename(nc_target)
+        finally:
+            zip_target.unlink(missing_ok=True)
+        logger.info("Extracted %s", nc_target)
+
+        if _validate_cache(nc_target, _INST_SHORT_NAMES):
+            break
+        logger.warning(
+            "CDS returned incomplete data for %s (attempt %d/3) — retrying",
+            nc_target.name, dl_attempt,
+        )
+    else:
+        raise RuntimeError(
+            f"CDS returned incomplete data for {nc_target.name} after 3 attempts"
+        )
     return tag, nc_target
 
 
@@ -1385,6 +1397,11 @@ def build_prediction_dataset(
         lons = ds_mean["longitude"].values
         times = pd.DatetimeIndex(ds_mean["time"].values)
 
+        # Align to GEE pixel-center grid (use exact linspace to avoid drift)
+        if abs(lats[0] - round(lats[0])) < 0.01:
+            lats = np.linspace(lats[0] - 0.05, lats[-1] + 0.05, len(lats))
+            lons = np.linspace(lons[0] + 0.05, lons[-1] - 0.05, len(lons))
+
         # Apply forest mask (NaN outside shapefile geometry)
         if shapefile is not None:
             forest_mask = _build_forest_mask(shapefile, lats, lons)
@@ -1399,6 +1416,11 @@ def build_prediction_dataset(
         lats = ds_hourly["latitude"].values
         lons = ds_hourly["longitude"].values
         times = pd.DatetimeIndex(ds_hourly["time"].values)
+
+        # Align to GEE pixel-center grid (use exact linspace to avoid drift)
+        if abs(lats[0] - round(lats[0])) < 0.01:
+            lats = np.linspace(lats[0] - 0.05, lats[-1] + 0.05, len(lats))
+            lons = np.linspace(lons[0] + 0.05, lons[-1] - 0.05, len(lons))
 
         # Apply forest mask (NaN outside shapefile geometry)
         if shapefile is not None:

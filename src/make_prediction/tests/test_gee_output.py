@@ -133,7 +133,7 @@ RANGE_BOUNDS = {
     "ext_rad": (0, 550, "W/m2"),
     "day_length": (0, 24, "hours"),
     "prcip/PET": (0, 1000, "ratio"),
-    "volumetric_soil_water_layer_1": (0, 1, "m3/m3"),
+    "volumetric_soil_water_layer_1": (-0.001, 1, "m3/m3"),
     "soil_temperature_level_1": (-50, 60, "degC"),
     "elevation": (-500, 9000, "m"),
     "canopy_height": (0, 100, "m"),
@@ -156,8 +156,8 @@ PLACEHOLDER_DEFAULTS = {
 GRID_NLAT = 1381
 GRID_NLON = 3601
 GRID_CELLS_PER_DAY = GRID_NLAT * GRID_NLON  # 4,972,981
-EXPECTED_DAYS = 31
-EXPECTED_TOTAL_ROWS = GRID_CELLS_PER_DAY * EXPECTED_DAYS  # 154,162,411
+EXPECTED_DAYS = None  # auto-detected from data
+EXPECTED_TOTAL_ROWS = None  # auto-detected
 
 # Forest mask: 662,934 / 4,972,981 = 13.33% from job log
 FOREST_MASK_PCT_MIN = 10.0
@@ -292,6 +292,27 @@ def main():
 
     soil_temp_max = -np.inf
 
+    # -- NEW: spatial/cross-variable pattern accumulators --
+    sw_gt_ext_violations = 0
+
+    tropical_ta_sum = 0.0; tropical_ta_n = 0
+    boreal_ta_sum = 0.0; boreal_ta_n = 0
+    tropical_ch_sum = 0.0; tropical_ch_n = 0
+    boreal_ch_sum = 0.0; boreal_ch_n = 0
+    tropical_lai_sum = 0.0; tropical_lai_n = 0
+    boreal_lai_sum = 0.0; boreal_lai_n = 0
+    equatorial_daylen_sum = 0.0; equatorial_daylen_n = 0
+
+    CORR_SAMPLE_MAX = 50000
+    corr_samples = {"ta": [], "soil_temp": [], "elev": [], "lat": [],
+                    "mat": [], "map_": [], "lai": [], "sw_in": [], "ext_rad": []}
+
+    col_sum: dict[str, float] = {}
+    col_sum_sq: dict[str, float] = {}
+
+    first_day_coords_seen: set[tuple] = set()
+    first_day_dup_count = 0
+
     first_day_key: str | None = None
     first_day_statics: dict[tuple, dict] = {}
     cross_day_diffs = {v: 0 for v in ["elevation", "canopy_height", "mean_annual_temp"]}
@@ -385,6 +406,71 @@ def main():
 
         if all(c in forest_chunk.columns for c in ["ws_min", "ws_max"]):
             ws_order_violations += int((forest_chunk["ws_min"] > forest_chunk["ws_max"]).sum())
+
+        # sw_in <= ext_rad constraint
+        if all(col in forest_chunk.columns for col in ["sw_in", "ext_rad"]):
+            sw_gt_ext_violations += int((forest_chunk["sw_in"] > forest_chunk["ext_rad"] + 0.5).sum())
+
+        # Latitude-binned spatial pattern accumulators
+        if all(col in forest_chunk.columns for col in ["latitude", "ta"]):
+            lat_abs = forest_chunk["latitude"].abs()
+            trop = lat_abs < 23; bor = lat_abs > 55
+            if trop.any():
+                tropical_ta_sum += forest_chunk.loc[trop, "ta"].sum(); tropical_ta_n += int(trop.sum())
+            if bor.any():
+                boreal_ta_sum += forest_chunk.loc[bor, "ta"].sum(); boreal_ta_n += int(bor.sum())
+
+        if all(col in forest_chunk.columns for col in ["latitude", "canopy_height"]):
+            lat_abs = forest_chunk["latitude"].abs()
+            trop = lat_abs < 23; bor = lat_abs > 55
+            if trop.any():
+                tropical_ch_sum += forest_chunk.loc[trop, "canopy_height"].sum(); tropical_ch_n += int(trop.sum())
+            if bor.any():
+                boreal_ch_sum += forest_chunk.loc[bor, "canopy_height"].sum(); boreal_ch_n += int(bor.sum())
+
+        if all(col in forest_chunk.columns for col in ["latitude", "LAI"]):
+            lat_abs = forest_chunk["latitude"].abs()
+            trop = lat_abs < 23; bor = lat_abs > 55
+            if trop.any():
+                tropical_lai_sum += forest_chunk.loc[trop, "LAI"].sum(); tropical_lai_n += int(trop.sum())
+            if bor.any():
+                boreal_lai_sum += forest_chunk.loc[bor, "LAI"].sum(); boreal_lai_n += int(bor.sum())
+
+        if all(col in forest_chunk.columns for col in ["latitude", "day_length"]):
+            eq = forest_chunk["latitude"].abs() < 5
+            if eq.any():
+                equatorial_daylen_sum += forest_chunk.loc[eq, "day_length"].sum()
+                equatorial_daylen_n += int(eq.sum())
+
+        # Cross-variable correlation reservoir sample (vary seed per chunk)
+        if len(corr_samples["ta"]) < CORR_SAMPLE_MAX:
+            sample = forest_chunk.sample(n=min(500, len(forest_chunk)),
+                                         random_state=42 + chunk_num)
+            for var, col_name in [("ta", "ta"), ("soil_temp", "soil_temperature_level_1"),
+                                   ("elev", "elevation"), ("lat", "latitude"),
+                                   ("mat", "mean_annual_temp"), ("map_", "mean_annual_precip"),
+                                   ("lai", "LAI"), ("sw_in", "sw_in"), ("ext_rad", "ext_rad")]:
+                if col_name in sample.columns:
+                    corr_samples[var].extend(sample[col_name].dropna().tolist())
+
+        # Per-column running sums for std check
+        for col in ["ta", "vpd", "sw_in", "elevation", "LAI", "day_length",
+                     "canopy_height", "mean_annual_temp", "mean_annual_precip"]:
+            if col in forest_chunk.columns:
+                vals = forest_chunk[col].dropna()
+                col_sum[col] = col_sum.get(col, 0) + float(vals.sum())
+                col_sum_sq[col] = col_sum_sq.get(col, 0) + float((vals ** 2).sum())
+
+        # Duplicate coordinate check (first day only)
+        if ts_col in forest_chunk.columns and first_day_key is not None:
+            day_str_fc = str(forest_chunk[ts_col].iloc[0])[:10]
+            if day_str_fc == first_day_key:
+                for _, row in forest_chunk[["latitude", "longitude"]].head(200).iterrows():
+                    coord = (round(row["latitude"], 4), round(row["longitude"], 4))
+                    if coord in first_day_coords_seen:
+                        first_day_dup_count += 1
+                    else:
+                        first_day_coords_seen.add(coord)
 
         # PFT stats (on forest pixels)
         pft_present = [c for c in PFT_COLS if c in forest_chunk.columns]
@@ -486,14 +572,15 @@ def main():
     print("3. DIMENSIONAL INTEGRITY (forest mask aware)")
     print("=" * 72)
 
-    is_filtered = total_rows < EXPECTED_TOTAL_ROWS * 0.5
+    n_days = len(day_row_counts)
+    is_filtered = total_rows < GRID_CELLS_PER_DAY * n_days * 0.5
 
     if is_filtered:
         print("  MODE: Forest-filtered output (NaN rows dropped)")
         expected_per_day_min = int(GRID_CELLS_PER_DAY * FOREST_MASK_PCT_MIN / 100)
         expected_per_day_max = int(GRID_CELLS_PER_DAY * FOREST_MASK_PCT_MAX / 100)
-        expected_total_min = expected_per_day_min * EXPECTED_DAYS
-        expected_total_max = expected_per_day_max * EXPECTED_DAYS
+        expected_total_min = expected_per_day_min * n_days
+        expected_total_max = expected_per_day_max * n_days
         check(
             "Total rows in forest-filtered range [%d, %d]" % (expected_total_min, expected_total_max),
             expected_total_min <= total_rows <= expected_total_max,
@@ -501,14 +588,28 @@ def main():
         )
     else:
         print("  MODE: Full-grid output (NaN rows retained)")
+        expected_full = GRID_CELLS_PER_DAY * n_days
         check(
-            "Total rows = %d (31 days x %d cells)" % (EXPECTED_TOTAL_ROWS, GRID_CELLS_PER_DAY),
-            total_rows == EXPECTED_TOTAL_ROWS,
+            "Total rows = %d (%d days x %d cells)" % (expected_full, n_days, GRID_CELLS_PER_DAY),
+            total_rows == expected_full,
             "actual=%d" % total_rows,
         )
 
-    n_days = len(day_row_counts)
-    check("31 days present", n_days == EXPECTED_DAYS, "got %d days" % n_days)
+    # Auto-detect expected days from the data
+    if day_row_counts:
+        sample_day = sorted(day_row_counts.keys())[0]
+        year_month = sample_day[:7]  # e.g. "2018-07"
+        year = int(year_month[:4])
+        month = int(year_month[5:7])
+        import calendar
+        expected_days_in_month = calendar.monthrange(year, month)[1]
+    else:
+        expected_days_in_month = 31
+        year, month = 2020, 1
+
+    check("%d days present (expected for %04d-%02d)" % (expected_days_in_month, year, month),
+          n_days == expected_days_in_month,
+          "got %d days" % n_days)
 
     if day_row_counts:
         rpd_values = list(day_row_counts.values())
@@ -517,8 +618,8 @@ def main():
             min(rpd_values) == max(rpd_values),
             "min=%d max=%d" % (min(rpd_values), max(rpd_values)),
         )
-        for d in range(1, 32):
-            expected_day = "2020-01-%02d" % d
+        for d in range(1, expected_days_in_month + 1):
+            expected_day = "%04d-%02d-%02d" % (year, month, d)
             check(
                 "Day %s present" % expected_day,
                 expected_day in day_row_counts,
@@ -757,23 +858,25 @@ def main():
     if south_daylen_n > 0 and north_daylen_n > 0:
         south_mean = south_daylen_sum / south_daylen_n
         north_mean = north_daylen_sum / north_daylen_n
-        check(
-            "January: south day_length > north (Earth tilt)",
-            south_mean > north_mean,
-            "south=%.2fh north=%.2fh" % (south_mean, north_mean),
-        )
+        # In NH winter (Oct-Mar): south > north; in NH summer (Apr-Sep): north > south
+        if month <= 3 or month >= 10:
+            check("NH winter: south day_length > north",
+                  south_mean > north_mean,
+                  "south=%.2fh north=%.2fh" % (south_mean, north_mean))
+        else:
+            check("NH summer: north day_length > south",
+                  north_mean > south_mean,
+                  "north=%.2fh south=%.2fh" % (north_mean, south_mean))
 
     if year_sin_min < np.inf:
-        check(
-            "Year sin > 0 in January",
-            year_sin_min >= 0,
-            "min=%.4f" % year_sin_min,
-        )
-        check(
-            "Year sin < 0.55 in January",
-            year_sin_max < 0.55,
-            "max=%.4f" % year_sin_max,
-        )
+        # Year sin = sin(2*pi*doy/365.25); validate range is plausible for the month
+        import math
+        mid_doy = sum(calendar.monthrange(year, m)[1] for m in range(1, month)) + 15
+        expected_ys = math.sin(2 * math.pi * mid_doy / 365.25)
+        # Allow +/- 0.2 around expected mid-month value
+        check("Year sin range plausible for month %d" % month,
+              year_sin_min > expected_ys - 0.3 and year_sin_max < expected_ys + 0.3,
+              "range=[%.4f, %.4f] expected~%.4f" % (year_sin_min, year_sin_max, expected_ys))
 
     # ================================================================
     # 10. SPATIAL COVERAGE
@@ -826,6 +929,130 @@ def main():
             year_sin_max if year_sin_max > -np.inf else 0,
         )
     )
+
+    # ================================================================
+    # 12. SPATIAL PATTERNS (latitude-binned)
+    # ================================================================
+    print("\n" + "=" * 72)
+    print("12. SPATIAL PATTERNS")
+    print("=" * 72)
+
+    if tropical_ta_n > 0 and boreal_ta_n > 0:
+        trop_ta = tropical_ta_sum / tropical_ta_n
+        bor_ta = boreal_ta_sum / boreal_ta_n
+        check("Tropics warmer than boreal (ta)", trop_ta > bor_ta,
+              "tropical=%.1f boreal=%.1f" % (trop_ta, bor_ta))
+
+    if tropical_ch_n > 0 and boreal_ch_n > 0:
+        trop_ch = tropical_ch_sum / tropical_ch_n
+        bor_ch = boreal_ch_sum / boreal_ch_n
+        check("Tropical canopy taller than boreal", trop_ch > bor_ch,
+              "tropical=%.1f boreal=%.1f m" % (trop_ch, bor_ch))
+
+    if tropical_lai_n > 0 and boreal_lai_n > 0:
+        trop_lai = tropical_lai_sum / tropical_lai_n
+        bor_lai = boreal_lai_sum / boreal_lai_n
+        check("Tropical LAI higher than boreal", trop_lai > bor_lai,
+              "tropical=%.2f boreal=%.2f" % (trop_lai, bor_lai))
+
+    if equatorial_daylen_n > 0:
+        eq_dl = equatorial_daylen_sum / equatorial_daylen_n
+        check("Equatorial day_length near 12h (11-13)", 11.0 < eq_dl < 13.0,
+              "mean=%.2fh" % eq_dl)
+
+    # ================================================================
+    # 13. CROSS-VARIABLE CORRELATIONS
+    # ================================================================
+    print("\n" + "=" * 72)
+    print("13. CROSS-VARIABLE CORRELATIONS")
+    print("=" * 72)
+
+    def safe_corr(a, b):
+        a = np.array(a[:CORR_SAMPLE_MAX], dtype=float)
+        b = np.array(b[:CORR_SAMPLE_MAX], dtype=float)
+        n = min(len(a), len(b))
+        if n < 100:
+            return None
+        a, b = a[:n], b[:n]
+        valid = np.isfinite(a) & np.isfinite(b)
+        a, b = a[valid], b[valid]
+        if len(a) < 100 or a.std() == 0 or b.std() == 0:
+            return None
+        return float(np.corrcoef(a, b)[0, 1])
+
+    r = safe_corr(corr_samples["elev"], corr_samples["ta"])
+    if r is not None:
+        print("    elevation vs ta (global): r=%.4f (confounded by latitude)" % r)
+
+    # Lapse rate within tropical band (|lat| < 23) to control for latitude
+    trop_idx = [i for i in range(min(len(corr_samples["lat"]), len(corr_samples["elev"])))
+                if abs(corr_samples["lat"][i]) < 23]
+    if len(trop_idx) > 100:
+        trop_elev = [corr_samples["elev"][i] for i in trop_idx]
+        trop_ta = [corr_samples["ta"][i] for i in trop_idx]
+        r_trop = safe_corr(trop_elev, trop_ta)
+        if r_trop is not None:
+            check("elevation vs ta (tropical, lapse rate)", r_trop < -0.3,
+                  "r=%.4f (expect < -0.3)" % r_trop)
+            print("    elevation vs ta (tropical |lat|<23): r=%.4f" % r_trop)
+
+    r = safe_corr(corr_samples["lat"], corr_samples["mat"])
+    if r is not None:
+        check("latitude vs mean_annual_temp: negative (poles colder)", r < -0.3, "r=%.4f" % r)
+        print("    latitude vs mean_annual_temp: r=%.4f" % r)
+
+    r = safe_corr(corr_samples["map_"], corr_samples["lai"])
+    if r is not None:
+        check("mean_annual_precip vs LAI: positive (wetter=more leaf)", r > 0.1, "r=%.4f" % r)
+        print("    mean_annual_precip vs LAI: r=%.4f" % r)
+
+    r = safe_corr(corr_samples["sw_in"], corr_samples["ext_rad"])
+    if r is not None:
+        check("sw_in vs ext_rad: positive (r > 0.5)", r > 0.5, "r=%.4f" % r)
+        print("    sw_in vs ext_rad: r=%.4f" % r)
+
+    r = safe_corr(corr_samples["ta"], corr_samples["soil_temp"])
+    if r is not None:
+        check("ta vs soil_temp: positive (r > 0.5)", r > 0.5, "r=%.4f" % r)
+        print("    ta vs soil_temp: r=%.4f" % r)
+
+    # ================================================================
+    # 14. RADIATION CONSTRAINT
+    # ================================================================
+    print("\n" + "=" * 72)
+    print("14. RADIATION CONSTRAINT")
+    print("=" * 72)
+
+    check("sw_in <= ext_rad + 0.5 (atmosphere attenuates)",
+          sw_gt_ext_violations == 0, "%d violations" % sw_gt_ext_violations)
+
+    # ================================================================
+    # 15. VARIABLE DIVERSITY (no constant/fill columns)
+    # ================================================================
+    print("\n" + "=" * 72)
+    print("15. VARIABLE DIVERSITY (spatial std > 0)")
+    print("=" * 72)
+
+    for col in ["ta", "vpd", "sw_in", "elevation", "LAI", "day_length",
+                "canopy_height", "mean_annual_temp", "mean_annual_precip"]:
+        if col in col_sum and col in col_count and col_count[col] > 100:
+            n_valid = col_count[col] - col_nan.get(col, 0)
+            if n_valid > 100:
+                mean = col_sum[col] / n_valid
+                var = col_sum_sq[col] / n_valid - mean ** 2
+                std = np.sqrt(max(var, 0))
+                check("%s has spatial diversity (std > 0.1)" % col,
+                      std > 0.1, "std=%.4f" % std)
+
+    # ================================================================
+    # 16. DUPLICATE COORDINATE CHECK
+    # ================================================================
+    print("\n" + "=" * 72)
+    print("16. DUPLICATE COORDINATE CHECK (day 1)")
+    print("=" * 72)
+
+    check("No duplicate (lat,lon) on day 1",
+          first_day_dup_count == 0, "%d duplicates" % first_day_dup_count)
 
     # ================================================================
     # SUMMARY

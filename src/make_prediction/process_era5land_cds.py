@@ -185,8 +185,74 @@ def _download_with_retry(client, dataset: str, request: dict, target: Path) -> P
 MAX_NC_SIZE_BYTES: int = 10 * 1024**3  # 10 GB upper bound for a single NC
 
 
+def _download_tile_geotiff(
+    image,
+    region_list: list[float],
+    scale: float,
+    band_name: str | None = None,
+    timeout: int = 300,
+) -> "np.ndarray | None":
+    """Download a single GEE image tile as GeoTIFF via getDownloadURL.
+
+    Unlike geemap.ee_to_numpy, this guarantees that the returned array
+    dimensions match the requested geographic extent because rasterio
+    reads the GeoTIFF with its embedded affine transform.
+
+    Parameters
+    ----------
+    image : ee.Image
+    region_list : list
+        [lon_min, lat_min, lon_max, lat_max]
+    scale : float
+        Pixel size in metres (at equator for EPSG:4326).
+    band_name : str, optional
+        Band to select before download.
+    timeout : int
+        HTTP timeout in seconds (default 300).
+
+    Returns
+    -------
+    np.ndarray or None
+        2-D array (height, width).  None on failure.
+    """
+    import tempfile
+    import requests
+    import rasterio
+    import ee
+
+    tile_img = image.select(band_name) if band_name else image
+    region = ee.Geometry.Rectangle(region_list, None, False)
+
+    url = tile_img.getDownloadURL({
+        "region": region,
+        "scale": scale,
+        "format": "GEO_TIFF",
+        "crs": "EPSG:4326",
+    })
+
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+
+        with rasterio.open(tmp_path) as src:
+            data = src.read(1)
+        return data.astype(np.float32)
+    finally:
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+
+
 def _unzip_netcdf(zip_path: Path, extract_dir: Path) -> Path:
-    """Extract a single NetCDF from a CDS-delivered ZIP archive.
+    """Extract NetCDF(s) from a CDS-delivered ZIP archive.
+
+    CDS ``derived-era5-land-daily-statistics`` returns **one NC file per
+    variable** inside a single ZIP.  This function extracts all of them,
+    merges into a single dataset, and writes one combined NC file.
 
     Guards against path-traversal entries and oversized (zip-bomb) files.
     """
@@ -195,25 +261,47 @@ def _unzip_netcdf(zip_path: Path, extract_dir: Path) -> Path:
         nc_names = [n for n in zf.namelist() if n.endswith(".nc")]
         if not nc_names:
             raise FileNotFoundError(f"No .nc file found inside {zip_path}")
-        member_name = nc_names[0]
 
-        # Zip-bomb guard: reject if claimed uncompressed size exceeds limit
-        info = zf.getinfo(member_name)
-        if info.file_size > MAX_NC_SIZE_BYTES:
-            raise ValueError(
-                f"ZIP entry {member_name!r} claims {info.file_size / 1e9:.1f} GB, "
-                f"exceeding {MAX_NC_SIZE_BYTES / 1e9:.0f} GB limit"
-            )
+        extracted_paths: list[Path] = []
+        for member_name in nc_names:
+            # Zip-bomb guard: reject if claimed uncompressed size exceeds limit
+            info = zf.getinfo(member_name)
+            if info.file_size > MAX_NC_SIZE_BYTES:
+                raise ValueError(
+                    f"ZIP entry {member_name!r} claims {info.file_size / 1e9:.1f} GB, "
+                    f"exceeding {MAX_NC_SIZE_BYTES / 1e9:.0f} GB limit"
+                )
 
-        # Path-traversal guard: use only the basename
-        safe_name = Path(member_name).name
-        target = (extract_dir / safe_name).resolve()
-        if not str(target).startswith(str(extract_dir.resolve())):
-            raise ValueError(f"ZIP entry would escape extract dir: {member_name!r}")
+            # Path-traversal guard: use only the basename
+            safe_name = Path(member_name).name
+            target = (extract_dir / safe_name).resolve()
+            if not str(target).startswith(str(extract_dir.resolve())):
+                raise ValueError(f"ZIP entry would escape extract dir: {member_name!r}")
 
-        with zf.open(member_name) as src, open(target, "wb") as dst:
-            dst.write(src.read())
-        return target
+            with zf.open(member_name) as src, open(target, "wb") as dst:
+                dst.write(src.read())
+            extracted_paths.append(target)
+
+    # Single NC — return as before
+    if len(extracted_paths) == 1:
+        return extracted_paths[0]
+
+    # Multiple NCs (one per variable) — merge into a single file
+    logger.info("ZIP contained %d NC files — merging into one dataset", len(extracted_paths))
+    datasets = [xr.open_dataset(p) for p in extracted_paths]
+    merged = xr.merge(datasets, compat="override")
+    for ds in datasets:
+        ds.close()
+
+    merged_path = extract_dir / f"_merged_{zip_path.stem}.nc"
+    merged.to_netcdf(merged_path)
+    merged.close()
+
+    # Clean up individual per-variable files
+    for p in extracted_paths:
+        p.unlink(missing_ok=True)
+
+    return merged_path
 
 
 def _validate_cache(nc_path: Path, expected_short_names: list[str]) -> bool:
@@ -796,8 +884,6 @@ def _download_static_from_gee(
 
     try:
         import math
-        import geemap
-
         METERS_PER_DEGREE = 111320.0
         deg_per_pixel = scale / METERS_PER_DEGREE
 
@@ -829,14 +915,11 @@ def _download_static_from_gee(
                 tile_lat_max = max_lat - row_start * deg_per_pixel
                 tile_lat_min = max_lat - row_end * deg_per_pixel
 
-                tile_region = ee.Geometry.Rectangle(
-                    [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
-                    None, False,
-                )
-
                 try:
-                    tile_data = geemap.ee_to_numpy(
-                        image, region=tile_region, scale=scale,
+                    tile_data = _download_tile_geotiff(
+                        image,
+                        [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
+                        scale,
                     )
                     if tile_data is None:
                         continue
@@ -985,8 +1068,6 @@ def _download_pft_from_gee(
 
     try:
         import math
-        import geemap
-
         METERS_PER_DEGREE = 111320.0
         deg_per_pixel = scale / METERS_PER_DEGREE
 
@@ -1022,14 +1103,11 @@ def _download_pft_from_gee(
                 tile_lat_max = max_lat - row_start * deg_per_pixel
                 tile_lat_min = max_lat - row_end * deg_per_pixel
 
-                tile_region = ee.Geometry.Rectangle(
-                    [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
-                    None, False,
-                )
-
                 try:
-                    tile_data = geemap.ee_to_numpy(
-                        modis_lc, region=tile_region, scale=scale,
+                    tile_data = _download_tile_geotiff(
+                        modis_lc,
+                        [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
+                        scale,
                     )
                     if tile_data is None:
                         continue

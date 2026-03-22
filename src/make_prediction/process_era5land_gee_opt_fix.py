@@ -1219,6 +1219,61 @@ class ERA5LandGEEProcessor:
 
         return results
 
+
+    def _download_tile_geotiff(self, image, region_list, scale, band_name=None, timeout=300):
+        """Download a single GEE image tile as GeoTIFF via getDownloadURL.
+
+        Unlike geemap.ee_to_numpy, this guarantees that the returned array
+        dimensions match the requested geographic extent because rasterio
+        reads the GeoTIFF with its embedded affine transform.
+
+        Parameters
+        ----------
+        image : ee.Image
+        region_list : list
+            [lon_min, lat_min, lon_max, lat_max]
+        scale : float
+            Pixel size in metres (at equator for EPSG:4326).
+        band_name : str, optional
+            Band to select before download.
+        timeout : int
+            HTTP timeout in seconds (default 300).
+
+        Returns
+        -------
+        np.ndarray or None
+            2-D array (height, width).  None on failure.
+        """
+        import tempfile
+        import requests
+        import rasterio
+
+        tile_img = image.select(band_name) if band_name else image
+        region = ee.Geometry.Rectangle(region_list, None, False)
+
+        url = tile_img.getDownloadURL({
+            "region": region,
+            "scale": scale,
+            "format": "GEO_TIFF",
+            "crs": "EPSG:4326",
+        })
+
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+                tmp.write(resp.content)
+                tmp_path = tmp.name
+
+            with rasterio.open(tmp_path) as src:
+                data = src.read(1)
+            return data.astype(np.float32)
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+
     def _download_gee_image_tiled(self, image, region, scale, band_name=None, max_tile_size=1024):
         """
         Download a large GEE image by splitting it into smaller tiles.
@@ -1288,17 +1343,20 @@ class ERA5LandGEEProcessor:
 
             # --- 4. Small Region Bypass (Optimization) ---
             if total_height <= max_tile_size and total_width <= max_tile_size:
-                print("  Small region - downloading directly...")
-                tile_img = image.select(band_name) if band_name else image
-
-                bbox_region = ee.Geometry.Rectangle([lon_min, lat_min, lon_max, lat_max], None, False)
-
-                result = geemap.ee_to_numpy(tile_img, region=bbox_region, scale=scale)
+                print("  Small region - downloading directly via GeoTIFF...")
+                try:
+                    result = self._download_tile_geotiff(
+                        image, [lon_min, lat_min, lon_max, lat_max], scale, band_name=band_name
+                    )
+                except Exception as e:
+                    print(f"  GeoTIFF download failed ({e}), falling back to geemap")
+                    tile_img = image.select(band_name) if band_name else image
+                    bbox_region = ee.Geometry.Rectangle([lon_min, lat_min, lon_max, lat_max], None, False)
+                    result = geemap.ee_to_numpy(tile_img, region=bbox_region, scale=scale)
 
                 if result is not None:
                     if result.ndim > 2:
                         result = result.squeeze()
-                    # Handle edge cases
                     if result.ndim == 0:
                         result = np.array([[result]])
                     elif result.ndim == 1:
@@ -1306,7 +1364,6 @@ class ERA5LandGEEProcessor:
                             result = result.reshape(1, -1)
                         else:
                             result = result.reshape(-1, 1)
-
                     print(f"  Download complete: {result.shape}")
 
                 return result, {"lon_min": lon_min, "lon_max": lon_max, "lat_min": lat_min, "lat_max": lat_max}
@@ -1341,9 +1398,12 @@ class ERA5LandGEEProcessor:
                     )
 
                     try:
-                        tile_img = image.select(band_name) if band_name else image
-
-                        tile_data = geemap.ee_to_numpy(tile_img, region=tile_region, scale=scale)
+                        tile_data = self._download_tile_geotiff(
+                            image,
+                            [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
+                            scale,
+                            band_name=band_name,
+                        )
 
                         if tile_data is None:
                             continue
@@ -1351,11 +1411,8 @@ class ERA5LandGEEProcessor:
                         # --- 7. Robust Shape Handling ---
                         if tile_data.ndim > 2:
                             tile_data = tile_data.squeeze()
-
-                        # Handle 1x1 pixels becoming scalars
                         if tile_data.ndim == 0:
                             tile_data = np.array([[tile_data]])
-                        # Handle 1xN or Nx1 vectors
                         elif tile_data.ndim == 1:
                             expected_h = row_end - row_start
                             expected_w = col_end - col_start
@@ -6483,7 +6540,7 @@ class ERA5LandGEEProcessor:
                     single_df["ta"] = single_df["ta"] - 273.15  # Convert to Celsius
                 if "td" in single_df.columns:
                     single_df["td"] = single_df["td"] - 273.15  # Convert to Celsius
-                single_df.to_csv(file_path, index_label="timestamp")
+                single_df.to_csv(file_path, index=False)
                 print(f"Saved dataset to {file_path}")
                 saved_paths.append(str(file_path))
 
@@ -6509,7 +6566,7 @@ class ERA5LandGEEProcessor:
                 print(
                     f"Warning: 'td' column missing in the combined DataFrame. Cannot convert units for {output_path.name}"
                 )
-            df_to_save.to_csv(output_path, index_label="timestamp")
+            df_to_save.to_csv(output_path, index=False)
             print(f"Saved dataset to {output_path}")
             return str(output_path)
 

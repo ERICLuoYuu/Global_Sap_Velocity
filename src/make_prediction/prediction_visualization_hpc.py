@@ -317,8 +317,8 @@ def rasterize_all_timestamps(
                              chunksize=chunk_size),
         desc="Reading prediction file",
     ):
-        # Daytime filter
-        if sw_in_threshold > 0 and "sw_in" in chunk.columns:
+        # Daytime filter (hourly data only — daily data has no diurnal cycle to filter)
+        if _hourly_mode and sw_in_threshold > 0 and "sw_in" in chunk.columns:
             chunk = chunk[chunk["sw_in"] > sw_in_threshold]
 
         # Drop rows with missing predictions
@@ -581,7 +581,7 @@ def _rasterize_timestamp_pandas(
     """Pandas-chunked fallback for rasterize_timestamp when Dask is absent."""
     start = time.time()
     cols_needed = ["latitude", "longitude", timestamp_col, value_column]
-    if sw_in_threshold > 0:
+    if hourly_mode and sw_in_threshold > 0:
         cols_needed.append("sw_in")
     cols_needed = list(dict.fromkeys(cols_needed))
 

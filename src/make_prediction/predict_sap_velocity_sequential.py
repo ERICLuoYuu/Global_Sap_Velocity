@@ -2115,6 +2115,23 @@ def main():
             validation_passed = validate_predictions(df_final, feature_columns)
             logger.info("Prediction validation %s", "passed" if validation_passed else "failed")
 
+        # Inverse-transform features back to original (physical) scale
+        if feature_scaler is not None:
+            try:
+                if hasattr(feature_scaler, 'feature_names_in_'):
+                    scaled_cols = [c for c in feature_scaler.feature_names_in_ if c in df_final.columns]
+                    if scaled_cols:
+                        df_final[scaled_cols] = feature_scaler.inverse_transform(df_final[scaled_cols])
+                        logger.info('Inverse-transformed %d features back to original scale.', len(scaled_cols))
+                else:
+                    pft_cols = ['MF', 'DNF', 'ENF', 'EBF', 'WSA', 'WET', 'DBF', 'SAV']
+                    continuous_cols = [c for c in feature_columns if c in df_final.columns and c not in pft_cols]
+                    if continuous_cols and hasattr(feature_scaler, 'n_features_in_') and len(continuous_cols) == feature_scaler.n_features_in_:
+                        df_final[continuous_cols] = feature_scaler.inverse_transform(df_final[continuous_cols])
+                        logger.info('Inverse-transformed %d features back to original scale.', len(continuous_cols))
+            except Exception as e:
+                logger.warning('Could not inverse-transform features: %s', e)
+
         # Save predictions
         if args.output_format == "parquet":
             ext = ".parquet"

@@ -66,6 +66,8 @@ def build_aoa_reference(
         raise ValueError("X_train contains NaN")
     if np.any(np.isnan(shap_importances)):
         raise ValueError("shap_importances contains NaN")
+    if np.any(shap_importances < 0):
+        raise ValueError("shap_importances contains negative values. Pass mean(|SHAP|), not raw SHAP values.")
 
     means = X_train.mean(axis=0)
     stds = X_train.std(axis=0, ddof=1)  # ddof=1 to match R CAST sd()
@@ -114,6 +116,11 @@ def load_aoa_reference(path: Path) -> dict:
     data["threshold"] = float(data["threshold"])
     data["feature_names"] = list(data["feature_names"])
     data["d_bar_method"] = str(data["d_bar_method"])
+    # Shape consistency check
+    n_features = len(data["feature_names"])
+    cloud = data["reference_cloud_weighted"]
+    if cloud.ndim != 2 or cloud.shape[1] != n_features:
+        raise ValueError(f"reference_cloud_weighted shape {cloud.shape} inconsistent with {n_features} feature_names")
     return data
 
 

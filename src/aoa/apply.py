@@ -149,6 +149,8 @@ def compute_monthly_summary(per_ts_df: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
+    # fillna for std_DI: single-timestamp pixels get NaN from ddof=1
+    summary["std_DI"] = summary["std_DI"].fillna(0.0)
     return summary.astype(
         {
             "latitude": np.float32,

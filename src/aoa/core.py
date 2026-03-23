@@ -24,13 +24,28 @@ def apply_importance_weights(X_standardized: np.ndarray, weights: np.ndarray) ->
     return X_standardized * weights[np.newaxis, :]
 
 
+_PDIST_WARN_THRESHOLD = 20_000
+
+
 def compute_d_bar_full(X_weighted: np.ndarray) -> float:
     """Mean pairwise Euclidean distance in weighted space.
 
     Raises ValueError if < 2 points or d_bar == 0.
+
+    Warning: pdist creates N*(N-1)/2 float64 values in memory.
+    For N=50,000 this is ~9.3 GB. Use compute_d_bar_sample for large N.
     """
-    if X_weighted.shape[0] < 2:
+    n = X_weighted.shape[0]
+    if n < 2:
         raise ValueError("Need >= 2 training points for d_bar")
+    if n > _PDIST_WARN_THRESHOLD:
+        import logging
+
+        mem_gb = n * (n - 1) / 2 * 8 / 1e9
+        logging.getLogger(__name__).warning(
+            f"compute_d_bar_full: N={n} will allocate ~{mem_gb:.1f} GB for pdist. "
+            f"Consider d_bar_method='sample:{min(n, 10000)}' to reduce memory."
+        )
     distances = pdist(X_weighted, metric="euclidean")
     d_bar = float(np.mean(distances))
     if d_bar == 0.0:

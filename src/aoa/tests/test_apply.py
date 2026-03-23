@@ -15,9 +15,11 @@ from src.aoa.apply import (
     compute_di_for_dataframe,
     compute_monthly_summary,
     discover_era5_files,
+    generate_slurm_script,
     load_input_file,
     load_model_config,
     parse_range,
+    process_files,
     select_and_validate_features,
     write_aoa_meta,
 )
@@ -224,3 +226,108 @@ class TestWriteAOAMeta:
         assert meta["d_bar"] == ref["d_bar"]
         assert "created_at" in meta
         assert meta["feature_names"] == FEATURE_NAMES
+
+
+class TestGenerateSlurmScript:
+    def test_writes_script(self, reference_and_tree, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        ref, _, ref_path = reference_and_tree
+        config = AOAConfig(
+            model_type="xgb",
+            run_id="test",
+            time_scale="daily",
+            aoa_reference_path=ref_path,
+            input_dir=Path("/data/input"),
+            model_config_path=Path("/data/config.json"),
+            output_dir=Path("/data/output"),
+            years=(2015, 2016),
+            months=(1, 2, 3),
+        )
+        generate_slurm_script(config, None)
+        script_path = tmp_path / "job_aoa_apply_test.sh"
+        assert script_path.exists()
+        content = script_path.read_text()
+        assert "#SBATCH --array=0-5" in content  # 2 years * 3 months = 6
+        assert "YEARS=(2015 2016)" in content
+        assert "MONTHS=(1 2 3)" in content
+        assert "--time-scale daily" in content
+
+
+class TestProcessFilesIntegration:
+    def test_end_to_end_with_mock_era5(self, synthetic_X_train, reference_and_tree, tmp_path):
+        ref, _, ref_path = reference_and_tree
+        # Create mock ERA5 CSV with correct features
+        era5_dir = tmp_path / "era5" / "2015_daily"
+        era5_dir.mkdir(parents=True)
+        df = pd.DataFrame(synthetic_X_train[:10], columns=FEATURE_NAMES)
+        df["latitude"] = [50.0] * 5 + [50.1] * 5
+        df["longitude"] = [10.0] * 10
+        df["timestamp"] = pd.date_range("2015-01-01", periods=10, freq="D")
+        df.to_csv(era5_dir / "prediction_2015_01_daily.csv", index=False)
+
+        model_config = {"feature_names": FEATURE_NAMES}
+        config = AOAConfig(
+            model_type="xgb",
+            run_id="test",
+            time_scale="daily",
+            aoa_reference_path=ref_path,
+            input_dir=tmp_path / "era5",
+            model_config_path=Path("/tmp/config.json"),
+            output_dir=tmp_path / "output",
+            years=(2015,),
+            months=(1,),
+            save_per_timestamp=True,
+        )
+        process_files(config, ref, model_config)
+
+        # Check outputs
+        monthly = tmp_path / "output" / "daily" / "monthly" / "di_monthly_2015_01.parquet"
+        assert monthly.exists()
+        mdf = pd.read_parquet(monthly)
+        assert "median_DI" in mdf.columns
+        assert "frac_inside_aoa" in mdf.columns
+        assert len(mdf) == 2  # 2 unique lat/lon combos
+
+        ts = tmp_path / "output" / "daily" / "per_timestamp" / "di_2015_01_daily.parquet"
+        assert ts.exists()
+        tdf = pd.read_parquet(ts)
+        assert len(tdf) == 10
+
+        meta = tmp_path / "output" / "daily" / "aoa_meta.json"
+        assert meta.exists()
+
+
+class TestMonthlySummaryStdNaN:
+    def test_single_timestamp_std_is_zero(self):
+        """Single timestamp per pixel should have std_DI=0, not NaN."""
+        df = pd.DataFrame(
+            {
+                "latitude": [50.0],
+                "longitude": [10.0],
+                "timestamp": pd.Timestamp("2015-01-01"),
+                "DI": [0.5],
+                "aoa_mask": [True],
+            }
+        )
+        summary = compute_monthly_summary(df)
+        assert not np.isnan(summary["std_DI"].iloc[0])
+        assert_allclose(summary["std_DI"].iloc[0], 0.0)
+
+
+class TestNegativeShapRejected:
+    def test_negative_shap_raises(
+        self,
+        synthetic_X_train,
+        synthetic_fold_labels,
+        tmp_path,
+    ):
+        bad_shap = np.array([0.5, -0.3, 0.1, 0.2, 0.4, 0.1, 0.3, 0.2])
+        with pytest.raises(ValueError, match="negative"):
+            build_aoa_reference(
+                X_train=synthetic_X_train,
+                fold_labels=synthetic_fold_labels,
+                shap_importances=bad_shap,
+                feature_names=FEATURE_NAMES,
+                output_dir=tmp_path,
+                run_id="test",
+            )

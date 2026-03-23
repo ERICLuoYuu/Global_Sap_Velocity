@@ -127,10 +127,14 @@ def backfill_from_merged_data(
     merged_data_dir: Path,
     d_bar_method: str = "full",
     shap_sample_size: int = 50_000,
+    output_dir: Path | None = None,
 ) -> Path:
     """Re-derive training data from merged CSVs and compute SHAP.
 
     For models trained before M7 integration (no saved arrays).
+
+    Args:
+        output_dir: Where to save the reference NPZ. Defaults to model_dir.
     """
     model_dir = models_dir / model_type / run_id
 
@@ -231,12 +235,13 @@ def backfill_from_merged_data(
     logger.info(f"Computing SHAP on {min(shap_sample_size, len(X_scaled))} samples...")
     shap_importances = _compute_shap_importances(model, X_scaled, sample_size=shap_sample_size)
 
+    save_dir = output_dir if output_dir is not None else model_dir
     return build_aoa_reference(
         X_train=X_all,
         fold_labels=fold_labels,
         shap_importances=shap_importances,
         feature_names=feature_names,
-        output_dir=model_dir,
+        output_dir=save_dir,
         run_id=run_id,
         d_bar_method=d_bar_method,
     )

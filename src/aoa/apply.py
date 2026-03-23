@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from src.aoa import core
 from src.aoa.prepare import load_aoa_reference
 
 logger = logging.getLogger(__name__)
+
+_WINDOWED_RE = re.compile(r"^(.+)_t-(\d+)$")
 
 
 def load_model_config(path: Path) -> dict:
@@ -29,6 +32,57 @@ def load_model_config(path: Path) -> dict:
         "input_width": raw.get("data_info", {}).get("input_width"),
         "shift": raw.get("data_info", {}).get("shift"),
     }
+
+
+def parse_windowed_feature_names(
+    feature_names: list[str],
+) -> tuple[dict[str, list[int]], list[str]]:
+    """Parse windowed feature names into dynamic {base: [lags]} and static names.
+
+    Example:
+        ["ta_t-0", "ta_t-1", "vpd_t-0", "elevation"]
+        -> ({"ta": [0, 1], "vpd": [0]}, ["elevation"])
+    """
+    dynamic: dict[str, list[int]] = {}
+    static: list[str] = []
+    for name in feature_names:
+        m = _WINDOWED_RE.match(name)
+        if m:
+            base, lag = m.group(1), int(m.group(2))
+            dynamic.setdefault(base, []).append(lag)
+        else:
+            static.append(name)
+    return dynamic, static
+
+
+def create_windowed_features(
+    df: pd.DataFrame,
+    dynamic_features: dict[str, list[int]],
+    static_features: list[str],
+) -> pd.DataFrame:
+    """Create lagged columns from raw data grouped by pixel.
+
+    Groups by (latitude, longitude), sorts by timestamp, creates
+    {feat}_t-{lag} columns via shift. Rows with incomplete history
+    (NaN from shift) are kept — handled by downstream NaN dropping.
+    """
+    df = df.sort_values(["latitude", "longitude", "timestamp"]).reset_index(drop=True)
+    result = df[["latitude", "longitude", "timestamp"]].copy()
+
+    for feat in static_features:
+        result[feat] = df[feat].values
+
+    for base, lags in dynamic_features.items():
+        if base not in df.columns:
+            raise ValueError(f"Base feature '{base}' not found in input columns")
+        for lag in sorted(lags):
+            col_name = f"{base}_t-{lag}"
+            if lag == 0:
+                result[col_name] = df[base].values
+            else:
+                result[col_name] = df.groupby(["latitude", "longitude"])[base].shift(lag).values
+
+    return result
 
 
 def parse_range(s: str) -> list[int]:
@@ -194,7 +248,15 @@ def write_aoa_meta(config, reference: dict, output_dir: Path) -> None:
 def process_files(config, reference: dict, model_config: dict) -> None:
     """Main processing loop: iterate files, compute DI, write outputs."""
     feature_names = model_config["feature_names"]
+    is_windowing = model_config.get("is_windowing", False)
     tree = core.build_kdtree(reference["reference_cloud_weighted"])
+
+    # Pre-parse windowed feature names once
+    windowing_info = None
+    if is_windowing:
+        dynamic, static = parse_windowed_feature_names(feature_names)
+        windowing_info = (dynamic, static)
+        logger.info(f"Windowed model: {len(dynamic)} dynamic features, {len(static)} static features")
 
     ts_dir = config.output_dir / config.time_scale / "per_timestamp"
     monthly_dir = config.output_dir / config.time_scale / "monthly"
@@ -210,6 +272,12 @@ def process_files(config, reference: dict, model_config: dict) -> None:
         try:
             logger.info(f"Processing {file_path.name}")
             df = load_input_file(file_path)
+
+            # Apply windowing if model uses it
+            if windowing_info is not None:
+                dynamic, static = windowing_info
+                df = create_windowed_features(df, dynamic, static)
+
             meta_cols = ["latitude", "longitude", "timestamp"]
             meta = df[meta_cols].copy()
 

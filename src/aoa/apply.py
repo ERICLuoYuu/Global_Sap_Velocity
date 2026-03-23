@@ -340,10 +340,10 @@ YEAR=${{YEARS[$((SLURM_ARRAY_TASK_ID / N_MONTHS))]}}
 MONTH=${{MONTHS[$((SLURM_ARRAY_TASK_ID % N_MONTHS))]}}
 
 python -m src.aoa.apply \\
-    --aoa-reference {config.aoa_reference_path} \\
-    --input-dir {config.input_dir} \\
-    --model-config {config.model_config_path} \\
-    --output-dir {config.output_dir} \\
+    --aoa-reference "{config.aoa_reference_path}" \\
+    --input-dir "{config.input_dir}" \\
+    --model-config "{config.model_config_path}" \\
+    --output-dir "{config.output_dir}" \\
     --time-scale {config.time_scale} \\
     {save_flag} \\
     --years $YEAR --months $MONTH \\

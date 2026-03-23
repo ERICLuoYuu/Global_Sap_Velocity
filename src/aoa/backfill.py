@@ -220,8 +220,13 @@ def backfill_from_merged_data(
     fold_labels = _reconstruct_fold_labels(groups_all, pfts_all)
 
     # Compute SHAP from saved model
+    # SECURITY: joblib.load uses pickle — only load files from trusted pipeline outputs.
     model_path = model_dir / f"FINAL_{model_type}_{run_id}.joblib"
     scaler_path = model_dir / f"FINAL_scaler_{run_id}_feature.pkl"
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+    if not scaler_path.exists():
+        raise FileNotFoundError(f"Scaler not found: {scaler_path}")
 
     model = joblib.load(model_path)
     scaler = joblib.load(scaler_path)

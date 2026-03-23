@@ -108,7 +108,7 @@ def build_aoa_reference(
 
 def load_aoa_reference(path: Path) -> dict:
     """Load and validate reference NPZ."""
-    data = dict(np.load(path, allow_pickle=True))
+    data = dict(np.load(path, allow_pickle=False))
     missing = REQUIRED_NPZ_KEYS - set(data.keys())
     if missing:
         raise ValueError(f"Reference NPZ missing keys: {missing}")

@@ -73,13 +73,7 @@ class TestCastComparison:
         assert_allclose(training_di, expected, atol=1e-10, err_msg="Training DI mismatch between Python and R CAST")
 
     def test_threshold_matches(self, cast_fixtures):
-        """Python threshold should be close to CAST threshold.
-
-        Known difference: our threshold = max(DI[DI <= whisker]) per
-        Meyer & Pebesma (2021), while CAST uses the whisker value
-        (Q75 + 1.5*IQR) directly. Our value is always <= CAST's.
-        We verify both that our threshold <= CAST's and the whisker matches.
-        """
+        """Python threshold should match CAST threshold within 1e-10."""
         X = np.column_stack([cast_fixtures["X_train"][f] for f in cast_fixtures["feature_names"]])
         weights = np.array(cast_fixtures["weights"])
         means = np.array(cast_fixtures["feature_means"])
@@ -92,17 +86,8 @@ class TestCastComparison:
         training_di = core.compute_training_di(X_sw, fold_labels, d_bar)
         threshold = core.compute_threshold(training_di)
 
-        # Our threshold <= CAST threshold (we take max observed, they take whisker)
-        assert threshold <= cast_fixtures["threshold"] + 1e-10
-
-        # The whisker formula itself matches exactly
-        q25, q75 = np.percentile(training_di, [25, 75])
-        whisker = q75 + 1.5 * (q75 - q25)
         assert_allclose(
-            whisker,
-            cast_fixtures["threshold"],
-            atol=1e-10,
-            err_msg="Whisker formula mismatch between Python and R CAST",
+            threshold, cast_fixtures["threshold"], atol=1e-10, err_msg="Threshold mismatch between Python and R CAST"
         )
 
     def test_prediction_di_matches(self, cast_fixtures):

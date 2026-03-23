@@ -63,14 +63,16 @@ class TestThresholdBounds:
         assert threshold >= 0
 
     @pytest.mark.parametrize("seed", SEEDS)
-    def test_threshold_leq_max_training_di(self, seed):
+    def test_threshold_geq_q75(self, seed):
+        """Whisker threshold is always >= Q75 (since IQR >= 0)."""
         rng = np.random.default_rng(seed)
         X = rng.standard_normal((30, 5))
         folds = np.tile([0, 1, 2], 10)
         d_bar = compute_d_bar_full(X)
         di = compute_training_di(X, folds, d_bar)
         threshold = compute_threshold(di)
-        assert threshold <= np.max(di) + 1e-10
+        q75 = np.percentile(di, 75)
+        assert threshold >= q75 - 1e-10
 
 
 class TestFeaturePermutationInvariance:

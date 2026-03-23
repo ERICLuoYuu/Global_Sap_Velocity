@@ -93,17 +93,37 @@ def parse_range(s: str) -> list[int]:
     return [int(x.strip()) for x in s.split(",")]
 
 
-def load_input_file(path: Path) -> pd.DataFrame:
-    """Load CSV or parquet; deduplicate column names."""
+def load_input_file(path: Path, usecols: list[str] | None = None) -> pd.DataFrame:
+    """Load CSV or parquet; deduplicate column names.
+
+    Args:
+        usecols: If provided, only load these columns (significant speedup for CSV).
+    """
     if path.suffix == ".csv":
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, usecols=usecols)
     elif path.suffix == ".parquet":
-        df = pd.read_parquet(path)
+        df = pd.read_parquet(path, columns=usecols)
     else:
         raise ValueError(f"Unsupported format: {path.suffix}")
     if df.columns.duplicated().any():
         df = df.loc[:, ~df.columns.duplicated()]
     return df
+
+
+def convert_csv_to_parquet(csv_path: Path, parquet_path: Path | None = None) -> Path:
+    """Convert ERA5 CSV to parquet for faster I/O.
+
+    Parquet is typically 5-10x smaller and 10-50x faster to load than CSV.
+    """
+    if parquet_path is None:
+        parquet_path = csv_path.with_suffix(".parquet")
+    logger.info(f"Converting {csv_path.name} -> {parquet_path.name}")
+    df = pd.read_csv(csv_path)
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
+    df.to_parquet(parquet_path, index=False, compression="snappy")
+    logger.info(f"Saved {parquet_path} ({parquet_path.stat().st_size / 1e6:.0f} MB)")
+    return parquet_path
 
 
 def select_and_validate_features(
@@ -176,6 +196,7 @@ def discover_era5_files(
     """Find ERA5 preprocessed files matching year/month filters.
 
     Pattern: {input_dir}/{YYYY}_{time_scale}/prediction_{YYYY}_{MM}_{time_scale}.*
+    Prefers parquet over CSV when both exist (parquet is 10-50x faster to load).
     """
     files = []
     for year in years:
@@ -186,7 +207,12 @@ def discover_era5_files(
         for month in months:
             pattern = f"prediction_{year}_{month:02d}_{time_scale}.*"
             matches = list(year_dir.glob(pattern))
-            files.extend(matches)
+            # Prefer parquet over CSV when both exist
+            parquet = [m for m in matches if m.suffix == ".parquet"]
+            if parquet:
+                files.extend(parquet)
+            else:
+                files.extend(matches)
     return sorted(files)
 
 
@@ -256,7 +282,14 @@ def process_files(config, reference: dict, model_config: dict) -> None:
     if is_windowing:
         dynamic, static = parse_windowed_feature_names(feature_names)
         windowing_info = (dynamic, static)
+        # For usecols: need base dynamic features + static + meta
+        base_features = list(dynamic.keys()) + static
         logger.info(f"Windowed model: {len(dynamic)} dynamic features, {len(static)} static features")
+    else:
+        base_features = list(feature_names)
+
+    # Only load columns we need (significant CSV speedup)
+    needed_cols = ["latitude", "longitude", "timestamp"] + base_features
 
     ts_dir = config.output_dir / config.time_scale / "per_timestamp"
     monthly_dir = config.output_dir / config.time_scale / "monthly"
@@ -271,7 +304,7 @@ def process_files(config, reference: dict, model_config: dict) -> None:
     for file_path in files:
         try:
             logger.info(f"Processing {file_path.name}")
-            df = load_input_file(file_path)
+            df = load_input_file(file_path, usecols=needed_cols)
 
             # Apply windowing if model uses it
             if windowing_info is not None:
@@ -384,6 +417,11 @@ def parse_args():
         action="store_true",
         help="Write SLURM script instead of running",
     )
+    parser.add_argument(
+        "--convert-parquet",
+        action="store_true",
+        help="Convert discovered CSV files to parquet and exit",
+    )
     return parser.parse_args()
 
 
@@ -407,6 +445,12 @@ def main() -> None:
         batch_size=args.batch_size,
         n_jobs=args.n_jobs,
     )
+    if args.convert_parquet:
+        files = discover_era5_files(config.input_dir, config.time_scale, config.years, config.months)
+        for f in files:
+            if f.suffix == ".csv":
+                convert_csv_to_parquet(f)
+        return
     if args.generate_slurm:
         generate_slurm_script(config, args)
     else:

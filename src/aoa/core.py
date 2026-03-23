@@ -84,15 +84,14 @@ def compute_training_di(X_weighted: np.ndarray, fold_labels: np.ndarray, d_bar: 
 
 
 def compute_threshold(training_di: np.ndarray, iqr_multiplier: float = 1.5) -> float:
-    """Outlier-removed max of training DI.
+    """AOA threshold: upper whisker of training DI distribution.
 
-    Formula: max(DI[DI <= Q75 + iqr_multiplier * IQR])
+    Formula: Q75 + iqr_multiplier * IQR
+    Matches R CAST::trainDI() implementation (the reference by Meyer & Pebesma).
     """
     q25, q75 = np.percentile(training_di, [25, 75])
     iqr = q75 - q25
-    upper_whisker = q75 + iqr_multiplier * iqr
-    below_whisker = training_di[training_di <= upper_whisker]
-    return float(np.max(below_whisker))
+    return float(q75 + iqr_multiplier * iqr)
 
 
 def compute_prediction_di(X_new_weighted: np.ndarray, tree: cKDTree, d_bar: float) -> np.ndarray:

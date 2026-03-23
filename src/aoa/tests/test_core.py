@@ -173,21 +173,19 @@ class TestComputeTrainingDI:
 # compute_threshold
 # ---------------------------------------------------------------------------
 class TestComputeThreshold:
-    def test_no_outliers_returns_max(self):
+    def test_no_outliers_returns_whisker(self):
         di = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
-        # Q25=0.2, Q75=0.4, IQR=0.2, upper_whisker=0.7
-        # All values <= 0.7 → threshold = 0.5
-        assert_allclose(compute_threshold(di), 0.5)
+        # Q25=0.2, Q75=0.4, IQR=0.2 → threshold = Q75 + 1.5*IQR = 0.7
+        assert_allclose(compute_threshold(di), 0.7)
 
-    def test_with_outlier(self):
+    def test_with_outlier_still_returns_whisker(self):
         di = np.array([0.1, 0.2, 0.3, 0.4, 2.0])
-        # Q25=0.2, Q75=0.4, IQR=0.2, upper_whisker=0.7
-        # Values <= 0.7: [0.1, 0.2, 0.3, 0.4] → threshold = 0.4
-        assert_allclose(compute_threshold(di), 0.4)
+        # Q25=0.2, Q75=0.4, IQR=0.2 → threshold = 0.7 (matches R CAST)
+        assert_allclose(compute_threshold(di), 0.7)
 
     def test_all_identical(self):
         di = np.array([0.5, 0.5, 0.5, 0.5])
-        # IQR=0, upper_whisker=0.5, threshold=0.5
+        # IQR=0 → threshold = Q75 + 0 = 0.5
         assert_allclose(compute_threshold(di), 0.5)
 
     def test_single_value(self):

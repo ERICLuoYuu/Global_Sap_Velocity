@@ -128,6 +128,7 @@ def backfill_from_merged_data(
     d_bar_method: str = "full",
     shap_sample_size: int = 50_000,
     output_dir: Path | None = None,
+    daytime_only: bool = True,
 ) -> Path:
     """Re-derive training data from merged CSVs and compute SHAP.
 
@@ -135,6 +136,7 @@ def backfill_from_merged_data(
 
     Args:
         output_dir: Where to save the reference NPZ. Defaults to model_dir.
+        daytime_only: If True, apply sw_in > 10 filter to match training script.
     """
     model_dir = models_dir / model_type / run_id
 
@@ -165,6 +167,19 @@ def backfill_from_merged_data(
         if df.empty:
             continue
 
+        # Skip CZE sites (matches training script exclusion)
+        site_col = "site_name" if "site_name" in df.columns else None
+        if site_col and df[site_col].iloc[0].startswith("CZE"):
+            logger.info(f"Skipping {csv_path.name}: CZE site excluded")
+            continue
+
+        # Daytime filter: matches training script IS_ONLY_DAY=True
+        if daytime_only and "sw_in" in df.columns:
+            df = df[df["sw_in"] > 10]
+            if df.empty:
+                logger.warning(f"Skipping {csv_path.name}: no daytime data")
+                continue
+
         # Extract site metadata
         lat = df["latitude_x"].iloc[0] if "latitude_x" in df.columns else None
         lon = df["longitude_x"].iloc[0] if "longitude_x" in df.columns else None
@@ -185,13 +200,46 @@ def backfill_from_merged_data(
         for col in ALL_PFT_TYPES:
             df[col] = float(pft_dummies[col].iloc[0])
 
-        # Select model features
+        # Match training script's column selection and NaN handling.
+        # The training script loads base_features (which includes columns like
+        # ta_min, vpd_max, day_length that aren't model features) and drops
+        # rows where ANY base column is NaN. This is stricter than dropping
+        # only on model feature columns.
+        training_base_cols = [
+            "sap_velocity",
+            "sw_in",
+            "ws",
+            "precip",
+            "ta",
+            "ta_max",
+            "ta_min",
+            "vpd",
+            "vpd_max",
+            "vpd_min",
+            "ext_rad",
+            "ppfd_in",
+            "canopy_height",
+            "elevation",
+            "LAI",
+            "prcip/PET",
+            "volumetric_soil_water_layer_1",
+            "soil_temperature_level_1",
+            "day_length",
+        ]
+        # Only check columns that exist in this CSV
+        available_base = [c for c in training_base_cols if c in df.columns]
+        df = df.dropna(subset=available_base)
+        if df.empty:
+            continue
+
         missing = [f for f in feature_names if f not in df.columns]
         if missing:
             logger.warning(f"Skipping {csv_path.name}: missing features {missing}")
             continue
 
-        X_site = df[feature_names].dropna().values
+        X_df = df[feature_names].astype(np.float32)
+        X_df = X_df.replace([np.inf, -np.inf], np.nan)
+        X_site = X_df.dropna().values
         n_site = len(X_site)
         if n_site == 0:
             continue

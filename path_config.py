@@ -143,6 +143,7 @@ class PathConfig:
         self.merged_data_root = self.processed_root / self.scale / "merged"
         # self.merged_site_hourly_after_outlier_removal_dir = self.merged_data_root / "hourly_after_outlier_removal"
         self.merged_daily_dir = self.merged_data_root / "daily"
+        self.merged_daytime_only_dir = Path("/scratch/tmp/yluo2/gsv-wt/aoa/data_local/merged_daytime_only")
 
         
        

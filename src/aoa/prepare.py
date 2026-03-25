@@ -168,7 +168,7 @@ def main() -> None:
     feature_names = config["feature_names"]
 
     if args.training_data.suffix == ".npy":
-        X_train = np.load(args.training_data)
+        X_train = np.load(args.training_data, allow_pickle=False)
     elif args.training_data.suffix == ".parquet":
         df = pd.read_parquet(args.training_data)
         X_train = df[feature_names].values
@@ -179,9 +179,9 @@ def main() -> None:
     shap_importances = shap_df.set_index("feature")["importance"].reindex(feature_names).values
 
     if args.cv_folds.suffix == ".npy":
-        fold_labels = np.load(args.cv_folds)
+        fold_labels = np.load(args.cv_folds, allow_pickle=False)
     elif args.cv_folds.suffix == ".npz":
-        fold_labels = np.load(args.cv_folds)["fold_labels"]
+        fold_labels = np.load(args.cv_folds, allow_pickle=False)["fold_labels"]
     else:
         raise ValueError(f"Unsupported format: {args.cv_folds.suffix}")
 

@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -159,8 +160,12 @@ def compute_di_for_dataframe(
     tree: core.cKDTree,
     feature_names: list[str],
     batch_size: int = 500_000,
+    n_jobs: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, pd.Series]:
     """Compute DI and AOA mask for a DataFrame.
+
+    Args:
+        n_jobs: Number of threads for KDTree queries. -1 uses all cores.
 
     Returns:
         (di_values, aoa_mask, valid_mask) — di/aoa aligned to valid rows only.
@@ -181,7 +186,7 @@ def compute_di_for_dataframe(
     di = np.empty(len(X_sw))
     for start in range(0, len(X_sw), batch_size):
         end = min(start + batch_size, len(X_sw))
-        di[start:end] = core.compute_prediction_di(X_sw[start:end], tree, reference["d_bar"])
+        di[start:end] = core.compute_prediction_di(X_sw[start:end], tree, reference["d_bar"], workers=n_jobs)
 
     aoa_mask = di <= reference["threshold"]
     return di, aoa_mask, valid_mask
@@ -273,9 +278,11 @@ def write_aoa_meta(config, reference: dict, output_dir: Path) -> None:
 
 def process_files(config, reference: dict, model_config: dict) -> None:
     """Main processing loop: iterate files, compute DI, write outputs."""
+
     feature_names = model_config["feature_names"]
     is_windowing = model_config.get("is_windowing", False)
     tree = core.build_kdtree(reference["reference_cloud_weighted"])
+    logger.info(f"Using n_jobs={config.n_jobs} for KDTree queries")
 
     # Pre-parse windowed feature names once
     windowing_info = None
@@ -303,8 +310,11 @@ def process_files(config, reference: dict, model_config: dict) -> None:
 
     for file_path in files:
         try:
+            t0 = time.perf_counter()
             logger.info(f"Processing {file_path.name}")
             df = load_input_file(file_path, usecols=needed_cols)
+            t_load = time.perf_counter()
+            logger.info(f"  Load: {t_load - t0:.1f}s, {len(df)} rows")
 
             # Apply windowing if model uses it
             if windowing_info is not None:
@@ -315,8 +325,11 @@ def process_files(config, reference: dict, model_config: dict) -> None:
             meta = df[meta_cols].copy()
 
             di_values, aoa_mask, valid_mask = compute_di_for_dataframe(
-                df, reference, tree, feature_names, config.batch_size
+                df, reference, tree, feature_names, config.batch_size, n_jobs=config.n_jobs
             )
+            t_di = time.perf_counter()
+            logger.info(f"  DI compute: {t_di - t_load:.1f}s, {len(di_values)} valid rows")
+
             if len(di_values) == 0:
                 logger.warning(f"No valid rows in {file_path.name}, skipping")
                 continue
@@ -343,6 +356,8 @@ def process_files(config, reference: dict, model_config: dict) -> None:
             summary = compute_monthly_summary(per_ts_df)
             summary_path = monthly_dir / f"di_monthly_{year}_{month}.parquet"
             summary.to_parquet(summary_path, index=False, compression="gzip")
+            t_write = time.perf_counter()
+            logger.info(f"  Write: {t_write - t_di:.1f}s | Total: {t_write - t0:.1f}s")
 
         except Exception as e:
             logger.error(f"Failed processing {file_path.name}: {e}")
@@ -352,8 +367,14 @@ def process_files(config, reference: dict, model_config: dict) -> None:
     write_aoa_meta(config, reference, meta_dir)
 
 
+def _sanitize_run_id(run_id: str) -> str:
+    """Strip shell-unsafe characters from run_id for use in filenames/SLURM."""
+    return re.sub(r"[^a-zA-Z0-9_\-.]", "_", run_id)
+
+
 def generate_slurm_script(config, args) -> None:
     """Write SLURM array job script."""
+    safe_run_id = _sanitize_run_id(config.run_id)
     n_months = len(config.years) * len(config.months)
     years_str = " ".join(str(y) for y in config.years)
     months_str = " ".join(str(m) for m in config.months)
@@ -364,7 +385,7 @@ def generate_slurm_script(config, args) -> None:
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=36
 #SBATCH --mem=200G --time=01:00:00
 #SBATCH --array=0-{n_months - 1}
-#SBATCH --job-name=aoa_di_{config.run_id}
+#SBATCH --job-name=aoa_di_{safe_run_id}
 
 YEARS=({years_str})
 MONTHS=({months_str})
@@ -382,7 +403,7 @@ python -m src.aoa.apply \\
     --years $YEAR --months $MONTH \\
     --n-jobs 36
 """
-    script_path = Path(f"job_aoa_apply_{config.run_id}.sh")
+    script_path = Path(f"job_aoa_apply_{safe_run_id}.sh")
     script_path.write_text(script)
     logger.info(f"SLURM script written to {script_path}")
 
@@ -426,8 +447,15 @@ def parse_args():
 
 
 def main() -> None:
+    import time as _time
+
     from src.aoa.config import AOAConfig
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    t_start = _time.perf_counter()
     args = parse_args()
     model_config = load_model_config(args.model_config)
     reference = load_aoa_reference(args.aoa_reference)

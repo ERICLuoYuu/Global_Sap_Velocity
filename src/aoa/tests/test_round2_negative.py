@@ -172,3 +172,44 @@ class TestBuildReferenceNegative:
         shap = np.array([0.5, 0.3])
         with pytest.raises(ValueError, match="fold_labels length"):
             build_aoa_reference(X, folds, shap, ["a", "b"], tmp_path, "test")
+
+
+class TestAllowPickleSecurityNegative:
+    """Verify pickle deserialization is blocked."""
+
+    def test_load_aoa_reference_rejects_pickle(self, tmp_path):
+        """NPZ with object arrays should fail with allow_pickle=False."""
+        # Create an NPZ with a pickle-requiring object array
+        obj_arr = np.array([{"malicious": "payload"}], dtype=object)
+        path = tmp_path / "bad_reference.npz"
+        np.savez(path, evil=obj_arr)
+        with pytest.raises(ValueError):
+            load_aoa_reference(path)
+
+    def test_load_aoa_reference_rejects_missing_keys(self, tmp_path):
+        """NPZ missing required keys should raise ValueError."""
+        path = tmp_path / "incomplete.npz"
+        np.savez(path, some_random_key=np.array([1, 2, 3]))
+        with pytest.raises(ValueError, match="missing keys"):
+            load_aoa_reference(path)
+
+
+class TestNJobsNegative:
+    """Negative tests for n_jobs parameter threading."""
+
+    def test_compute_di_all_nan_with_n_jobs(self):
+        """All-NaN input with n_jobs should return empty, not crash."""
+        ref = {
+            "feature_names": ["a", "b"],
+            "feature_means": np.array([0.0, 0.0]),
+            "feature_stds": np.array([1.0, 1.0]),
+            "feature_weights": np.array([1.0, 1.0]),
+            "d_bar": 1.0,
+            "threshold": 1.0,
+            "reference_cloud_weighted": np.array([[0.0, 0.0], [1.0, 1.0]]),
+        }
+        tree = core.build_kdtree(ref["reference_cloud_weighted"])
+        df = pd.DataFrame({"a": [np.nan, np.nan], "b": [np.nan, np.nan]})
+        di, mask, valid = compute_di_for_dataframe(df, ref, tree, ["a", "b"], n_jobs=2)
+        assert len(di) == 0
+        assert len(mask) == 0

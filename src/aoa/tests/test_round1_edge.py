@@ -12,6 +12,7 @@ from numpy.testing import assert_allclose
 
 from src.aoa import core
 from src.aoa.apply import (
+    _sanitize_run_id,
     compute_di_for_dataframe,
     create_windowed_features,
     generate_slurm_script,
@@ -150,3 +151,63 @@ class TestSlurmPathQuoting:
         assert '"/another path/input"' in script
         assert '"/yet another/config.json"' in script
         assert '"/output dir/aoa"' in script
+
+
+class TestWorkersEdgeCases:
+    """Edge cases for parallel KDTree workers parameter."""
+
+    def test_workers_zero_raises(self):
+        """workers=0 should raise ValueError from scipy."""
+        X_train = np.array([[0.0], [5.0], [10.0]])
+        tree = core.build_kdtree(X_train)
+        with pytest.raises(ValueError):
+            core.compute_prediction_di(np.array([[7.0]]), tree, d_bar=5.0, workers=0)
+
+    def test_workers_one_is_default(self):
+        """Default workers=1 produces correct results."""
+        X_train = np.array([[0.0], [10.0]])
+        tree = core.build_kdtree(X_train)
+        di = core.compute_prediction_di(np.array([[5.0]]), tree, d_bar=10.0)
+        assert_allclose(di, [0.5], atol=1e-10)
+
+    def test_large_workers_value(self):
+        """workers > actual cores delegates safely to scipy."""
+        X_train = np.array([[0.0], [5.0], [10.0]])
+        tree = core.build_kdtree(X_train)
+        di = core.compute_prediction_di(np.array([[7.0]]), tree, d_bar=5.0, workers=999)
+        assert_allclose(di, [2.0 / 5.0], atol=1e-10)
+
+
+class TestSanitizeRunId:
+    """Edge cases for run_id sanitization."""
+
+    def test_clean_id_unchanged(self):
+        assert _sanitize_run_id("default_daily_without_coordinates") == "default_daily_without_coordinates"
+
+    def test_shell_metacharacters_replaced(self):
+        assert _sanitize_run_id("test$(whoami)") == "test__whoami_"
+
+    def test_spaces_replaced(self):
+        assert _sanitize_run_id("my run id") == "my_run_id"
+
+    def test_path_traversal_replaced(self):
+        assert _sanitize_run_id("../../etc/passwd") == ".._.._etc_passwd"
+
+    def test_slurm_script_uses_sanitized_id(self, tmp_path, monkeypatch):
+        """SLURM script filename uses sanitized run_id."""
+        monkeypatch.chdir(tmp_path)
+        config = AOAConfig(
+            model_type="xgb",
+            run_id="bad;rm -rf /",
+            time_scale="daily",
+            aoa_reference_path=Path("/ref.npz"),
+            input_dir=Path("/input"),
+            model_config_path=Path("/config.json"),
+            output_dir=Path("/output"),
+            years=(2015,),
+            months=(1,),
+        )
+        generate_slurm_script(config, None)
+        # ; space / all become _, so "bad;rm -rf /" -> "bad_rm_-rf__"
+        expected_name = "job_aoa_apply_bad_rm_-rf__.sh"
+        assert (tmp_path / expected_name).exists()

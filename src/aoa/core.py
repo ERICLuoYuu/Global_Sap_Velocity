@@ -94,9 +94,13 @@ def compute_threshold(training_di: np.ndarray, iqr_multiplier: float = 1.5) -> f
     return float(q75 + iqr_multiplier * iqr)
 
 
-def compute_prediction_di(X_new_weighted: np.ndarray, tree: cKDTree, d_bar: float) -> np.ndarray:
-    """Prediction DI: nearest training neighbor, normalized by d_bar."""
-    distances, _ = tree.query(X_new_weighted, k=1)
+def compute_prediction_di(X_new_weighted: np.ndarray, tree: cKDTree, d_bar: float, workers: int = 1) -> np.ndarray:
+    """Prediction DI: nearest training neighbor, normalized by d_bar.
+
+    Args:
+        workers: Number of threads for tree.query. -1 uses all cores.
+    """
+    distances, _ = tree.query(X_new_weighted, k=1, workers=workers)
     return distances / d_bar
 
 

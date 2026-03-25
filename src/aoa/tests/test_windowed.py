@@ -298,3 +298,27 @@ class TestWindowedModelE2E:
         tdf = pd.read_parquet(ts)
         # All 6 rows should be valid (no windowing NaN)
         assert len(tdf) == 6
+
+
+# --- Tests: n_jobs threading ---
+
+
+class TestNJobsThreading:
+    """Verify n_jobs parameter is threaded through to KDTree workers."""
+
+    def test_compute_di_for_dataframe_accepts_n_jobs(self, windowed_reference, windowed_training_data):
+        """compute_di_for_dataframe accepts and uses n_jobs parameter."""
+        ref, tree, _ = windowed_reference
+        df = pd.DataFrame(windowed_training_data[:10], columns=WINDOWED_NAMES)
+        # Should not raise — n_jobs threaded to tree.query(workers=...)
+        di_1, mask_1, _ = compute_di_for_dataframe(df, ref, tree, WINDOWED_NAMES, n_jobs=1)
+        di_2, mask_2, _ = compute_di_for_dataframe(df, ref, tree, WINDOWED_NAMES, n_jobs=2)
+        assert_allclose(di_1, di_2, atol=1e-10)
+
+    def test_compute_di_for_dataframe_n_jobs_minus_one(self, windowed_reference, windowed_training_data):
+        """n_jobs=-1 delegates to all cores via scipy."""
+        ref, tree, _ = windowed_reference
+        df = pd.DataFrame(windowed_training_data[:10], columns=WINDOWED_NAMES)
+        di, _, _ = compute_di_for_dataframe(df, ref, tree, WINDOWED_NAMES, n_jobs=-1)
+        assert len(di) == 10
+        assert np.all(di >= 0)

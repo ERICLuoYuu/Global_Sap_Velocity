@@ -218,3 +218,77 @@ class TestAllowPickleFalse:
         ref = load_aoa_reference(path)
         assert ref["d_bar"] > 0
         assert ref["feature_names"] == FEATURE_NAMES
+
+
+class TestParallelPipelineIntegration:
+    """Integration: n_jobs=2 produces same output as n_jobs=1."""
+
+    def test_parallel_matches_single_threaded(
+        self, synthetic_X_train, synthetic_fold_labels, synthetic_shap_weights, tmp_path
+    ):
+        """Full pipeline with n_jobs=1 and n_jobs=2 produces identical DI."""
+        ref_path = build_aoa_reference(
+            X_train=synthetic_X_train,
+            fold_labels=synthetic_fold_labels,
+            shap_importances=synthetic_shap_weights,
+            feature_names=FEATURE_NAMES,
+            output_dir=tmp_path,
+            run_id="parallel_test",
+        )
+        ref = load_aoa_reference(ref_path)
+        tree = core.build_kdtree(ref["reference_cloud_weighted"])
+
+        # Create test data
+        rng = np.random.default_rng(99)
+        X_new = rng.standard_normal((50, len(FEATURE_NAMES)))
+        df = pd.DataFrame(X_new, columns=FEATURE_NAMES)
+
+        di_1, mask_1, _ = compute_di_for_dataframe(df, ref, tree, FEATURE_NAMES, n_jobs=1)
+        di_2, mask_2, _ = compute_di_for_dataframe(df, ref, tree, FEATURE_NAMES, n_jobs=2)
+        assert_allclose(di_1, di_2, atol=1e-10)
+        assert np.array_equal(mask_1, mask_2)
+
+    def test_process_files_with_n_jobs(
+        self, synthetic_X_train, synthetic_fold_labels, synthetic_shap_weights, tmp_path
+    ):
+        """process_files respects config.n_jobs and produces valid output."""
+        ref_path = build_aoa_reference(
+            X_train=synthetic_X_train,
+            fold_labels=synthetic_fold_labels,
+            shap_importances=synthetic_shap_weights,
+            feature_names=FEATURE_NAMES,
+            output_dir=tmp_path,
+            run_id="njobs_test",
+        )
+        ref = load_aoa_reference(ref_path)
+
+        # Write mock ERA5 data
+        rng = np.random.default_rng(42)
+        era5_dir = tmp_path / "era5" / "2015_daily"
+        era5_dir.mkdir(parents=True)
+        df = pd.DataFrame(rng.standard_normal((20, len(FEATURE_NAMES))), columns=FEATURE_NAMES)
+        df["latitude"] = np.tile([50.0, 50.1], 10)
+        df["longitude"] = 10.0
+        df["timestamp"] = pd.date_range("2015-01-01", periods=20)
+        df.to_csv(era5_dir / "prediction_2015_01_daily.csv", index=False)
+
+        config = AOAConfig(
+            model_type="xgb",
+            run_id="njobs_test",
+            time_scale="daily",
+            aoa_reference_path=ref_path,
+            input_dir=tmp_path / "era5",
+            model_config_path=Path("/tmp/c.json"),
+            output_dir=tmp_path / "out",
+            years=(2015,),
+            months=(1,),
+            n_jobs=2,
+            save_per_timestamp=True,
+        )
+        model_config = {"feature_names": FEATURE_NAMES, "is_windowing": False}
+        process_files(config, ref, model_config)
+
+        monthly = tmp_path / "out" / "daily" / "monthly" / "di_monthly_2015_01.parquet"
+        assert monthly.exists()
+        mdf = pd.read_parquet(monthly)
+        assert len(mdf) > 0

@@ -223,6 +223,24 @@ class TestComputePredictionDI:
         di = compute_prediction_di(X_new, tree, d_bar)
         assert_allclose(di, [48 / 43, 0.0], atol=1e-10)
 
+    def test_workers_parameter_matches_single_thread(self):
+        """Parallel workers produce identical results to single-threaded."""
+        rng = np.random.default_rng(42)
+        X_train = rng.standard_normal((200, 5))
+        tree = build_kdtree(X_train)
+        d_bar = 3.0
+        X_new = rng.standard_normal((1000, 5))
+        di_single = compute_prediction_di(X_new, tree, d_bar, workers=1)
+        di_parallel = compute_prediction_di(X_new, tree, d_bar, workers=2)
+        assert_allclose(di_single, di_parallel, atol=1e-10)
+
+    def test_workers_minus_one_uses_all_cores(self):
+        """workers=-1 should work (delegates to scipy)."""
+        X_train = np.array([[0.0], [5.0], [10.0]])
+        tree = build_kdtree(X_train)
+        di = compute_prediction_di(np.array([[7.0]]), tree, d_bar=5.0, workers=-1)
+        assert_allclose(di, [2.0 / 5.0], atol=1e-10)
+
 
 # ---------------------------------------------------------------------------
 # build_kdtree

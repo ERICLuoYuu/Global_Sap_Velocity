@@ -176,7 +176,11 @@ def main() -> None:
         raise ValueError(f"Unsupported format: {args.training_data.suffix}")
 
     shap_df = pd.read_csv(args.shap_csv)
-    shap_importances = shap_df.set_index("feature")["importance"].reindex(feature_names).values
+    shap_indexed = shap_df.set_index("feature")["importance"]
+    missing_shap = [f for f in feature_names if f not in shap_indexed.index]
+    if missing_shap:
+        raise ValueError(f"SHAP CSV missing entries for features: {missing_shap}")
+    shap_importances = shap_indexed.reindex(feature_names).values
 
     if args.cv_folds.suffix == ".npy":
         fold_labels = np.load(args.cv_folds, allow_pickle=False)

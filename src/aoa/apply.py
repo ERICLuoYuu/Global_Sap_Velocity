@@ -346,8 +346,11 @@ def process_files(config, reference: dict, model_config: dict) -> None:
             )
 
             stem = file_path.stem
-            parts = stem.split("_")
-            year, month = parts[1], parts[2]
+            stem_match = re.match(r"prediction_(\d{4})_(\d{2})_\w+", stem)
+            if not stem_match:
+                logger.error(f"Unexpected filename pattern: {stem}, expected prediction_YYYY_MM_*")
+                continue
+            year, month = stem_match.group(1), stem_match.group(2)
 
             if config.save_per_timestamp:
                 ts_path = ts_dir / f"di_{year}_{month}_{config.time_scale}.parquet"

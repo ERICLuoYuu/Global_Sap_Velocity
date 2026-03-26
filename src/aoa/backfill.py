@@ -35,7 +35,8 @@ def _reconstruct_fold_labels(
     X_dummy = np.zeros((len(groups), 1))
     for fold_idx, (_, test_idx) in enumerate(cv.split(X_dummy, pfts_encoded, groups)):
         fold_labels[test_idx] = fold_idx
-    assert (fold_labels >= 0).all(), "Some samples not assigned to any fold"
+    if not (fold_labels >= 0).all():
+        raise ValueError("Some samples not assigned to any fold")
     return fold_labels
 
 
@@ -74,8 +75,8 @@ def _create_spatial_groups(
     )
     lat_indices = np.digitize(latitudes, lat_bins) - 1
     lon_indices = np.digitize(longitudes, lon_bins) - 1
-    n_lon_bins = len(lon_bins)
-    grid_cell_ids = lat_indices * n_lon_bins + lon_indices
+    n_lon_outcomes = len(lon_bins) + 1  # +1: digitize can return 0..len(bins)
+    grid_cell_ids = lat_indices * n_lon_outcomes + lon_indices
     unique_groups = np.unique(grid_cell_ids)
     group_map = {g: n for n, g in enumerate(unique_groups)}
     return np.array([group_map[g] for g in grid_cell_ids])
@@ -103,7 +104,7 @@ def backfill_from_saved_arrays(
         raise FileNotFoundError(f"CV folds not found: {folds_path}")
 
     X_train = pd.read_parquet(x_path)[feature_names].values
-    folds_data = np.load(folds_path)
+    folds_data = np.load(folds_path, allow_pickle=False)
     fold_labels = folds_data["fold_labels"]
 
     shap_df = pd.read_csv(shap_csv_path)

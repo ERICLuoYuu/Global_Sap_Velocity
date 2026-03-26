@@ -359,7 +359,7 @@ def process_files(config, reference: dict, model_config: dict) -> None:
             t_write = time.perf_counter()
             logger.info(f"  Write: {t_write - t_di:.1f}s | Total: {t_write - t0:.1f}s")
 
-        except Exception as e:
+        except (OSError, ValueError, KeyError, pd.errors.EmptyDataError) as e:
             logger.error(f"Failed processing {file_path.name}: {e}")
             continue
 

@@ -88,6 +88,11 @@ def run_forward_selection(
         candidate_names[:10],
     )
 
+    # 3b. Build complete feature_groups for mlxtend (must cover ALL indices).
+    #     Mandatory features become individual groups; fixed_features locks them.
+    mandatory_groups = [[idx] for idx in mandatory_idx]
+    all_groups = mandatory_groups + candidate_groups
+
     # 4. Build estimator pipeline
     xgb_params = hyper.to_xgb_params(n_jobs=config.n_jobs_xgb, random_state=config.random_seed)
     estimator = Pipeline(
@@ -114,10 +119,11 @@ def run_forward_selection(
     scorer = get_scorer(config.scoring)
 
     # 7. Run mlxtend SFS
-    total_features = len(mandatory_idx) + len(candidate_groups)
+    total_groups = len(all_groups)
     k_feat = config.k_features
     if k_feat == "best":
-        k_feat = (len(mandatory_idx) + 1, total_features)
+        # min = mandatory only + 1 candidate; max = all groups
+        k_feat = (len(mandatory_idx) + 1, total_groups)
 
     sfs = SequentialFeatureSelector(
         estimator,
@@ -127,7 +133,7 @@ def run_forward_selection(
         scoring=scorer,
         cv=cv_splits,
         n_jobs=config.n_jobs_sfs,
-        feature_groups=candidate_groups,
+        feature_groups=all_groups,
         fixed_features=list(mandatory_idx),
         verbose=2,
     )

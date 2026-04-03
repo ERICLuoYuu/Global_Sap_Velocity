@@ -126,6 +126,8 @@ CANDIDATE_FEATURES: OrderedDict[str, list[str]] = OrderedDict(
         ("stand_age", ["stand_age"]),
         ("soil_sand", ["soil_sand"]),
         ("soil_clay", ["soil_clay"]),
+        ("soil_soc", ["soil_soc"]),
+        ("soil_cfvo", ["soil_cfvo"]),
         ("temp_seasonality", ["temp_seasonality"]),
         ("precip_seasonality", ["precip_seasonality"]),
         ("mean_annual_temp", ["mean_annual_temp"]),

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=zen2-128C-496G
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=128
-#SBATCH --mem=496G --time=12:00:00
+#SBATCH --mem=480G --time=12:00:00
 #SBATCH --job-name=ffs_neg_rmse
 #SBATCH --output=/scratch/tmp/yluo2/gsv/outputs/forward_selection/slurm_ffs_neg_rmse_%j.out
 

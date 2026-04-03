@@ -165,10 +165,12 @@ def load_and_cache_features(
 
             lat_col = next((c for c in df.columns if c.lower() in ["lat", "latitude_x"]), None)
             lon_col = next((c for c in df.columns if c.lower() in ["lon", "longitude_x"]), None)
-            pft_col = next(
-                (c for c in df.columns if c.lower() in ["pft", "plant_functional_type", "biome"]),
-                None,
-            )
+            pft_col = None
+            for candidate in ["pft", "plant_functional_type", "biome"]:
+                match = [c for c in df.columns if c.lower() == candidate]
+                if match:
+                    pft_col = match[0]
+                    break
             if not (lat_col and lon_col and pft_col):
                 logger.warning("Missing lat/lon/pft for %s, skipping", site_id)
                 continue

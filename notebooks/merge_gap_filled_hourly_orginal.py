@@ -13,49 +13,46 @@ paths = get_default_paths()
 
 def calculate_soil_hydraulics(sand, clay, organic_matter, coarse_fragments_vol_percent):
     """
-    Calculate soil hydraulic properties using Saxton & Rawls (2006).
+    Saxton & Rawls (2006) two-step soil hydraulic property estimation.
+
+    Parameters
+    ----------
+    sand, clay : float
+        Fractions (0-1), NOT percentages.
+    organic_matter : float
+        Percentage (0-5 typical).
+    coarse_fragments_vol_percent : float
+        Volumetric coarse fragment percentage (0-100).
+
+    Returns
+    -------
+    (theta_wp, theta_fc, theta_sat) : tuple of float
+        Volumetric water content (m³/m³) at wilting point, field capacity,
+        and saturation, adjusted for coarse fragments.
     """
-    # 1. Permanent Wilting Point (1500 kPa)
-    theta_wp = (
-        -0.024 * sand
-        + 0.487 * clay
-        + 0.006 * organic_matter
-        + 0.005 * (sand * organic_matter)
-        - 0.013 * (clay * organic_matter)
-        + 0.068 * (sand * clay)
-        + 0.031
-    )
+    S, C, OM = sand, clay, organic_matter
 
-    # 2. Field Capacity (33 kPa)
-    theta_fc = (
-        -0.251 * sand
-        + 0.195 * clay
-        + 0.011 * organic_matter
-        + 0.006 * (sand * organic_matter)
-        - 0.027 * (clay * organic_matter)
-        + 0.452 * (sand * clay)
-        + 0.299
-    ) + (1.283 * (theta_wp) ** 2 - 0.374 * (theta_wp) - 0.015)
+    # 1. Wilting point (1500 kPa) — first estimate then adjustment
+    t1500t = -0.024 * S + 0.487 * C + 0.006 * OM + 0.005 * (S * OM) - 0.013 * (C * OM) + 0.068 * (S * C) + 0.031
+    theta_wp = t1500t + (0.14 * t1500t - 0.02)
 
-    # 3. Saturation (Porosity)
-    theta_sat = (
-        0.278 * sand
-        + 0.034 * clay
-        + 0.022 * organic_matter
-        + -0.018 * (sand * organic_matter)
-        - 0.027 * (clay * organic_matter)
-        + -0.584 * (sand * clay)
-        + 0.078
-    ) + (0.636 * theta_wp - 0.107)
+    # 2. Field capacity (33 kPa) — first estimate then adjustment
+    #    Correction uses t33t itself, NOT theta_wp
+    t33t = -0.251 * S + 0.195 * C + 0.011 * OM + 0.006 * (S * OM) - 0.027 * (C * OM) + 0.452 * (S * C) + 0.299
+    theta_fc = t33t + (1.283 * t33t**2 - 0.374 * t33t - 0.015)
 
-    # ADJUST FOR COARSE FRAGMENTS (ROCKS)
+    # 3. Saturation (porosity) — three steps
+    ts33t = 0.278 * S + 0.034 * C + 0.022 * OM - 0.018 * (S * OM) - 0.027 * (C * OM) - 0.584 * (S * C) + 0.078
+    ts33 = ts33t + (0.636 * ts33t - 0.107)
+    theta_sat = theta_fc + ts33 - 0.097 * S + 0.043
+
+    # Adjust for coarse fragments (rocks reduce pore volume)
     cf_frac = coarse_fragments_vol_percent / 100.0
-
-    theta_wp_adj = theta_wp * (1 - cf_frac)
-    theta_fc_adj = theta_fc * (1 - cf_frac)
-    theta_sat_adj = theta_sat * (1 - cf_frac)
-
-    return theta_wp_adj, theta_fc_adj, theta_sat_adj
+    return (
+        theta_wp * (1 - cf_frac),
+        theta_fc * (1 - cf_frac),
+        theta_sat * (1 - cf_frac),
+    )
 
 
 def get_weighted_soil_props(soil_row, depths=["0_5", "5_15", "15_30", "30_60", "60_100"]):
@@ -134,18 +131,28 @@ def load_stand_age_map(base_path):
     return {}
 
 
-def merge_sap_env_data_site(output_base_dir, daytime_only=False):
+def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=False):
     """
     Merge sap flow and environmental data for all sites.
 
     Args:
         output_base_dir: Base directory for output files
         daytime_only: If True, filter to daytime data only before daily aggregation
+        plant_level: If True, output one row per tree per timestamp (long format)
+                     instead of site-averaged sap velocity. Joins plant_md.csv
+                     to add tree metadata (pl_dbh, pl_species, pl_sens_meth, etc.).
     """
     if daytime_only:
         print("\n" + "=" * 60)
         print("DAYTIME-ONLY MODE ENABLED")
         print("Nighttime data will be filtered out before daily aggregation")
+        print("=" * 60 + "\n")
+
+    if plant_level:
+        print("\n" + "=" * 60)
+        print("PLANT-LEVEL MODE ENABLED")
+        print("Output: one row per tree per timestamp (long format)")
+        print("Tree metadata from plant_md.csv will be joined")
         print("=" * 60 + "\n")
 
     # --- SETUP DIRECTORIES ---
@@ -217,19 +224,9 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False):
 
     count = 0
 
-    # --- Prefer gap-filled data if available, fallback to outliers_removed ---
-    sap_gap_filled_dir = paths.sap_outliers_removed_dir.parent / "gap_filled"
-    env_gap_filled_dir = paths.env_outliers_removed_dir.parent / "gap_filled"
-    sap_input_dir = (
-        sap_gap_filled_dir
-        if sap_gap_filled_dir.exists() and any(sap_gap_filled_dir.glob("*.csv"))
-        else paths.sap_outliers_removed_dir
-    )
-    env_input_dir = (
-        env_gap_filled_dir
-        if env_gap_filled_dir.exists() and any(env_gap_filled_dir.glob("*.csv"))
-        else paths.env_outliers_removed_dir
-    )
+    # --- Always use outliers_removed (gap-filling is NOT part of the main pipeline) ---
+    sap_input_dir = paths.sap_outliers_removed_dir
+    env_input_dir = paths.env_outliers_removed_dir
     print(f"Sap input: {sap_input_dir}")
     print(f"Env input: {env_input_dir}")
 
@@ -237,15 +234,12 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False):
     for sap_data_file in sap_input_dir.glob("*.csv"):
         try:
             parts = sap_data_file.stem.split("_")
-            # Handle both "_gap_filled" and "_outliers_removed" suffixes
-            suffix_words = 2 if "gap_filled" in sap_data_file.stem else 4
+            # Handle both "_sapf_data_gap_filled" and "_sapf_data_outliers_removed" suffixes (4 words each)
+            suffix_words = 4
             location_type = "_".join(parts[:-suffix_words])
 
             # --- LOAD SITE METADATA ---
-            env_suffix = (
-                "_env_data_gap_filled.csv" if env_input_dir == env_gap_filled_dir else "_env_data_outliers_removed.csv"
-            )
-            env_data_file = env_input_dir / f"{location_type}{env_suffix}"
+            env_data_file = env_input_dir / f"{location_type}_env_data_outliers_removed.csv"
             biome_data_file = paths.raw_csv_dir / f"{location_type}_site_md.csv"
 
             try:
@@ -307,8 +301,8 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False):
                         if not pd.isna(avg_props["sand"]) and not pd.isna(avg_props["clay"]):
                             om_pct = (avg_props["soc"] / 10.0) * 1.72
                             theta_wp, theta_fc, theta_sat = calculate_soil_hydraulics(
-                                sand=avg_props["sand"],
-                                clay=avg_props["clay"],
+                                sand=avg_props["sand"] / 100.0,
+                                clay=avg_props["clay"] / 100.0,
                                 organic_matter=om_pct,
                                 coarse_fragments_vol_percent=avg_props["cfvo"],
                             )
@@ -327,19 +321,53 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False):
             sap_data.drop(columns=[col for col in sap_data.columns if "Unnamed" in col], inplace=True)
 
             env_data.set_index("TIMESTAMP", inplace=True)
+            # solar_TIMESTAMP comes from sap side (canonical); drop env duplicate to avoid merge conflict
+            env_data.drop(columns=["solar_TIMESTAMP"], errors="ignore", inplace=True)
 
             col_names = [
                 col for col in sap_data.columns if col not in ["solar_TIMESTAMP", "TIMESTAMP", "TIMESTAMP_LOCAL"]
             ]
-            sap_data["site"] = sap_data[col_names].mean(axis=1)
 
-            plant_sap_data = pd.DataFrame(
-                {
+            if plant_level:
+                # --- PLANT-LEVEL: melt wide → long (one row per tree per timestamp) ---
+                id_vars = ["TIMESTAMP"]
+                if "solar_TIMESTAMP" in sap_data.columns:
+                    id_vars.append("solar_TIMESTAMP")
+                sap_long = sap_data.melt(
+                    id_vars=id_vars,
+                    value_vars=col_names,
+                    var_name="pl_code",
+                    value_name="sap_velocity",
+                )
+                # Drop rows where sap_velocity is NaN (tree not measured at this timestamp)
+                sap_long = sap_long.dropna(subset=["sap_velocity"])
+
+                # Join plant metadata from plant_md.csv
+                plant_md_file = paths.raw_csv_dir / f"{location_type}_plant_md.csv"
+                if plant_md_file.exists():
+                    plant_md = pd.read_csv(plant_md_file)
+                    # Keep only useful columns for driver analysis
+                    md_cols = [
+                        "pl_code",
+                        "pl_dbh",
+                        "pl_sens_meth",
+                        "pl_species",
+                    ]
+                    md_cols = [c for c in md_cols if c in plant_md.columns]
+                    sap_long = sap_long.merge(plant_md[md_cols], on="pl_code", how="left")
+
+                plant_sap_data = sap_long.set_index("TIMESTAMP")
+            else:
+                # --- SITE-LEVEL: average across trees (original behaviour) ---
+                sap_data["site"] = sap_data[col_names].mean(axis=1)
+                sap_dict = {
                     "TIMESTAMP": sap_data["TIMESTAMP"],
                     "sap_velocity": sap_data["site"],
                     "TIMESTAMP_LOCAL": sap_data.get("TIMESTAMP_LOCAL"),
                 }
-            ).set_index("TIMESTAMP")
+                if "solar_TIMESTAMP" in sap_data.columns:
+                    sap_dict["solar_TIMESTAMP"] = sap_data["solar_TIMESTAMP"]
+                plant_sap_data = pd.DataFrame(sap_dict).set_index("TIMESTAMP")
 
             df = pd.merge(plant_sap_data, env_data, left_index=True, right_index=True)
 
@@ -358,8 +386,33 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False):
             if "solar_TIMESTAMP" in df.columns:
                 agg_dict["solar_TIMESTAMP"] = "first"
 
+            # Plant-level: carry tree metadata through as "first" (static per tree)
+            plant_meta_cols = []
+            if plant_level:
+                plant_meta_cols = [
+                    c
+                    for c in [
+                        "pl_code",
+                        "pl_dbh",
+                        "pl_sens_meth",
+                        "pl_species",
+                    ]
+                    if c in df.columns
+                ]
+                for c in plant_meta_cols:
+                    agg_dict[c] = "first"
+
             # Resample to hourly using UTC TIMESTAMP
-            df_hourly = df.resample("h").agg(agg_dict).reset_index()
+            if plant_level and "pl_code" in df.columns:
+                # Group by pl_code first, then resample each tree independently
+                df_hourly = (
+                    df.groupby("pl_code")
+                    .resample("h")
+                    .agg({k: v for k, v in agg_dict.items() if k != "pl_code"})
+                    .reset_index()
+                )
+            else:
+                df_hourly = df.resample("h").agg(agg_dict).reset_index()
             df_hourly.rename(columns={"index": "TIMESTAMP"}, inplace=True)
 
             # --- ADD STATIC VARIABLES (Common function for DF population) ---
@@ -413,6 +466,18 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False):
                     # If std is ~0 (constant values), set normalized to 0
                     df_hourly["volumetric_soil_water_layer_1"] = 0.0
                     print(f"  Warning: {location_type} has near-zero std for volumetric_soil_water_layer_1")
+
+            # --- NORMALIZE DEEPER SOIL WATER LAYERS (same approach as layer 1) ---
+            for _layer in [2, 3, 4]:
+                _col = f"volumetric_soil_water_layer_{_layer}"
+                if _col in df_hourly.columns:
+                    _vsw = df_hourly[_col]
+                    _vsw_std = _vsw.std()
+                    if _vsw_std > 1e-10:
+                        df_hourly[_col] = _vsw / _vsw_std
+                    else:
+                        df_hourly[_col] = 0.0
+                        print(f"  Warning: {location_type} has near-zero std for {_col}")
 
             # --- CALCULATE DAY LENGTH ---
             # Day length in hours based on latitude, elevation, and date (astronomical calculation)
@@ -497,6 +562,10 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False):
                 "canopy_height",
                 "stand_age",
             ]
+            if plant_level:
+                # Tree metadata columns are static per tree — aggregate as "first"
+                static_prefixes.append("pl_")
+                static_exact.append("pl_code")
 
             daily_agg_rules = {}
 
@@ -520,23 +589,29 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False):
             # 2. Resample using UTC TIMESTAMP
             # This creates a MultiIndex column structure (e.g. ('vpd', 'mean'), ('vpd', 'sum'))
             df_hourly_for_daily = df_hourly_for_daily.set_index("TIMESTAMP")
-            df_daily = df_hourly_for_daily.resample("D").agg(daily_agg_rules)
+            if plant_level and "pl_code" in df_hourly_for_daily.columns:
+                # Group by tree, then resample each tree to daily
+                agg_no_plcode = {k: v for k, v in daily_agg_rules.items() if k != "pl_code"}
+                df_daily = df_hourly_for_daily.groupby("pl_code").resample("D").agg(agg_no_plcode)
+                # pl_code is now in the index; move it back to a column
+                df_daily = df_daily.reset_index(level="pl_code")
+            else:
+                df_daily = df_hourly_for_daily.resample("D").agg(daily_agg_rules)
 
             # 3. Flatten MultiIndex columns
             new_cols = []
             for col_info in df_daily.columns:
-                col_name = col_info[0]
-                agg_method = col_info[1]
-
-                if agg_method == "first":
-                    # Keep original name for static vars
-                    new_cols.append(col_name)
-                else:
-                    # Append aggregation suffix (e.g., vpd_mean, vpd_max)
-                    if agg_method == "mean":
+                if isinstance(col_info, tuple) and len(col_info) == 2:
+                    col_name, agg_method = col_info
+                    if not agg_method or agg_method == "first":
+                        new_cols.append(col_name)
+                    elif agg_method == "mean":
                         new_cols.append(f"{col_name}")
                     else:
                         new_cols.append(f"{col_name}_{agg_method}")
+                else:
+                    # Regular column (e.g. pl_code after groupby reset_index)
+                    new_cols.append(col_info)
 
             df_daily.columns = new_cols
             df_daily = df_daily.reset_index()
@@ -642,6 +717,12 @@ def main():
     parser.add_argument(
         "--output-dir", type=str, default=None, help="Output directory (default: paths.merged_data_root)"
     )
+    parser.add_argument(
+        "--plant-level",
+        action="store_true",
+        help="Output one row per tree per timestamp (long format) instead of site-averaged. "
+        "Joins plant_md.csv to add tree metadata (pl_dbh, pl_species, pl_sens_meth, etc.).",
+    )
     args = parser.parse_args()
     # Defines the base directory for output
     if args.output_dir:
@@ -649,7 +730,7 @@ def main():
     else:
         output_base_dir = paths.merged_data_root
 
-    merge_sap_env_data_site(output_base_dir, daytime_only=args.daytime_only)
+    merge_sap_env_data_site(output_base_dir, daytime_only=args.daytime_only, plant_level=args.plant_level)
 
 
 if __name__ == "__main__":

@@ -31,36 +31,65 @@ def parquet_to_geotiff(
     output_path: Path,
     di_col: str = "median_DI",
     threshold: float | None = None,
-    resolution: float = 0.1,
 ) -> None:
-    """Convert DI parquet to 2-band GeoTIFF (DI, AOA mask)."""
+    """Convert DI parquet to 2-band GeoTIFF (DI, AOA mask).
+
+    Builds a full regular grid at the detected resolution so that pixel
+    widths match the actual data spacing.  Ocean/missing cells are NaN.
+    The previous implementation used a compact grid of unique coordinates
+    which caused pixel stretching (0.107 vs 0.1 deg) when ocean columns
+    were absent, leading to basemap-raster misalignment.
+    """
     import rasterio
     from rasterio.transform import from_bounds
 
-    lats = np.sort(df["latitude"].unique())[::-1]  # N->S
-    lons = np.sort(df["longitude"].unique())
-    nrows, ncols = len(lats), len(lons)
+    lats_sorted = np.sort(df["latitude"].unique())[::-1]  # N->S
+    lons_sorted = np.sort(df["longitude"].unique())
 
-    lat_to_row = {lat: i for i, lat in enumerate(lats)}
-    lon_to_col = {lon: j for j, lon in enumerate(lons)}
+    # Detect actual grid resolution from median spacing
+    res_lon = float(np.median(np.diff(np.sort(df["longitude"].unique()))))
+    res_lat = float(np.median(np.diff(np.sort(df["latitude"].unique()))))
+
+    # Build full regular grid anchored to the first data point
+    full_lons = np.arange(lons_sorted[0], lons_sorted[-1] + res_lon / 2, res_lon)
+    full_lats = np.arange(lats_sorted[0], lats_sorted[-1] - res_lat / 2, -res_lat)
+    nrows, ncols = len(full_lats), len(full_lons)
+
+    # Map data coordinates to grid positions via rounding
+    col_indices = np.round(
+        (df["longitude"].values - full_lons[0]) / res_lon
+    ).astype(int)
+    row_indices = np.round(
+        (full_lats[0] - df["latitude"].values) / res_lat
+    ).astype(int)
+    valid = (
+        (row_indices >= 0)
+        & (row_indices < nrows)
+        & (col_indices >= 0)
+        & (col_indices < ncols)
+    )
 
     di_grid = np.full((nrows, ncols), np.nan, dtype=np.float32)
     mask_grid = np.full((nrows, ncols), np.nan, dtype=np.float32)
 
-    rows = df["latitude"].map(lat_to_row).values
-    cols = df["longitude"].map(lon_to_col).values
-    di_grid[rows, cols] = df[di_col].values.astype(np.float32)
+    di_grid[row_indices[valid], col_indices[valid]] = (
+        df[di_col].values[valid].astype(np.float32)
+    )
 
     if "aoa_mask" in df.columns:
-        mask_grid[rows, cols] = df["aoa_mask"].astype(np.float32)
+        mask_grid[row_indices[valid], col_indices[valid]] = (
+            df["aoa_mask"].values[valid].astype(np.float32)
+        )
     elif "frac_inside_aoa" in df.columns and threshold is not None:
-        mask_grid[rows, cols] = (df["frac_inside_aoa"] >= 0.5).astype(np.float32)
+        mask_grid[row_indices[valid], col_indices[valid]] = (
+            (df["frac_inside_aoa"].values[valid] >= 0.5).astype(np.float32)
+        )
 
     transform = from_bounds(
-        float(lons.min()) - resolution / 2,
-        float(lats.min()) - resolution / 2,
-        float(lons.max()) + resolution / 2,
-        float(lats.max()) + resolution / 2,
+        float(full_lons[0]) - res_lon / 2,
+        float(full_lats[-1]) - res_lat / 2,
+        float(full_lons[-1]) + res_lon / 2,
+        float(full_lats[0]) + res_lat / 2,
         ncols,
         nrows,
     )

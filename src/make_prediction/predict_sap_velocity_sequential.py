@@ -23,6 +23,8 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from src.make_prediction.io_utils import discover_input_files, read_df
 from pathlib import Path
 from typing import Any
 
@@ -171,7 +173,7 @@ def safe_joblib_load(path: Path, allowed_root: Path) -> Any:
 
 
 # Maximum input CSV file size (bytes) to prevent OOM on shared HPC nodes
-MAX_CSV_BYTES = 5 * 1024**3  # 5 GB
+MAX_INPUT_BYTES = 200 * 1024**3  # 200 GB
 
 
 # =============================================================================
@@ -790,7 +792,6 @@ def load_scalers(models_dir: Path, model_type: str, run_id: str) -> tuple[Any | 
 # Canonical timestamp column candidates (tried in order)
 _TIMESTAMP_CANDIDATES = [
     "timestamp",
-    "timestamp.1",
     "date",
     "datetime",
     "time",
@@ -856,17 +857,17 @@ def load_preprocessed_data(data_file):
 
         # Guard against OOM from oversized files on shared HPC nodes
         file_size = data_file_path.stat().st_size
-        if file_size > MAX_CSV_BYTES:
+        if file_size > MAX_INPUT_BYTES:
             logger.error(
                 "Input file exceeds size limit (%d bytes > %d): %s",
                 file_size,
-                MAX_CSV_BYTES,
+                MAX_INPUT_BYTES,
                 data_file_path,
             )
             return None
 
         # Load the data using pandas
-        df = pd.read_csv(data_file_path, low_memory=False)
+        df = read_df(data_file_path)
         # Drop unnamed index column if present (e.g. from to_csv with index=True)
         unnamed_cols = [c for c in df.columns if c.startswith("Unnamed")]
         if unnamed_cols:
@@ -1976,10 +1977,10 @@ def main():
     if not input_dir.is_dir():
         logger.error("Input directory not found: %s", input_dir)
         sys.exit(1)
-    input_files = list(input_dir.glob("*.csv"))
+    input_files = discover_input_files(input_dir)
     logger.info("Found %s input files in %s", len(input_files), input_dir)
     if not input_files:
-        logger.error("No CSV files found in %s", input_dir)
+        logger.error("No input files (Parquet/CSV) found in %s", input_dir)
         sys.exit(1)
     for input_file in input_files:
         file_start_time = time.time()

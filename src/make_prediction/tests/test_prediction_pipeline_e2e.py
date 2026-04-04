@@ -11,8 +11,8 @@ Designed for the 3-stage pipeline:
 
 Usage:
     python test_prediction_pipeline_e2e.py \\
-        --pred-csv  outputs/e2e_test/predictions/prediction_*.csv \\
-        --era5-csv  outputs/e2e_test/era5/2020_daily/prediction_*.csv \\
+        --pred-file outputs/e2e_test/predictions/prediction_*.parquet \\
+        --era5-file outputs/e2e_test/era5/2020_daily/prediction_*.parquet \\
         --tif-dir   outputs/e2e_test/maps/<run_id>/
 
 Exit code 0 = all pass, 1 = failures found.
@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+from src.make_prediction.io_utils import read_df
 import pandas as pd
 
 PASS_COUNT = 0
@@ -394,7 +396,7 @@ def test_geotiff_structure(tif_path):
 def test_geotiff_vs_csv(tif_path, df):
     """GeoTIFF pixel values should match the prediction CSV statistics."""
     print("\n" + "=" * 70)
-    print("STAGE 3.2: GEOTIFF vs CSV CONSISTENCY")
+    print("STAGE 3.2: GEOTIFF vs PREDICTION CONSISTENCY")
     print("=" * 70)
 
     import rasterio
@@ -544,19 +546,19 @@ def test_era5_vs_prediction_consistency(era5_df, pred_df):
 
 def main():
     parser = argparse.ArgumentParser(description="E2E prediction pipeline validation")
-    parser.add_argument("--pred-csv", type=str, required=True, help="Path to prediction CSV (glob pattern OK)")
-    parser.add_argument("--era5-csv", type=str, default=None, help="Path to ERA5 CSV for cross-stage checks (optional)")
+    parser.add_argument("--pred-file", type=str, required=True, help="Path to prediction file (CSV or Parquet, glob pattern OK)")
+    parser.add_argument("--era5-file", type=str, default=None, help="Path to ERA5 file for cross-stage checks (CSV or Parquet, optional)")
     parser.add_argument("--tif-dir", type=str, default=None, help="Directory with GeoTIFF/PNG output (optional)")
     args = parser.parse_args()
 
     # Resolve glob patterns
-    pred_files = sorted(glob.glob(args.pred_csv))
+    pred_files = sorted(glob.glob(args.pred_file))
     if not pred_files:
-        print(f"ERROR: No files match {args.pred_csv}")
+        print(f"ERROR: No files match {args.pred_file}")
         sys.exit(1)
 
-    print(f"Loading prediction CSV: {pred_files[0]}")
-    pred_df = pd.read_csv(pred_files[0])
+    print(f"Loading prediction file: {pred_files[0]}")
+    pred_df = read_df(pred_files[0])
     print(f"  Shape: {pred_df.shape}")
     print(f"  Columns: {list(pred_df.columns)}")
 
@@ -583,11 +585,11 @@ def main():
         test_png_exists(args.tif_dir)
 
     # ── Cross-stage tests ──
-    if args.era5_csv:
-        era5_files = sorted(glob.glob(args.era5_csv))
+    if args.era5_file:
+        era5_files = sorted(glob.glob(args.era5_file))
         if era5_files:
-            print(f"\nLoading ERA5 CSV: {era5_files[0]}")
-            era5_df = pd.read_csv(era5_files[0])
+            print(f"\nLoading ERA5 file: {era5_files[0]}")
+            era5_df = read_df(era5_files[0])
             test_era5_vs_prediction_consistency(era5_df, pred_df)
 
     # ── Summary ──

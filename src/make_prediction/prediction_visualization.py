@@ -1,4 +1,8 @@
 import pandas as pd
+from pathlib import Path as _Path
+
+def _is_parquet(filepath):
+    return _Path(filepath).suffix.lower() in {'.parquet', '.pq'}
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
@@ -55,19 +59,23 @@ def get_valid_block_size(dimension, preferred_block_size=256, block_multiple=16)
 # =============================================================================
 # Data Inspection Function
 # =============================================================================
-def inspect_large_csv(csv_filepath, chunk_size=100000, sample_size=10):
+
+
+def inspect_large_file(data_filepath, chunk_size=100000, sample_size=10):
     """
-    Memory-efficient inspection of large CSV files with detailed sap velocity analysis.
-    [Function code remains the same as previous version - omitted for brevity]
+    Memory-efficient inspection of large data files (Parquet or CSV).
     """
     start_time = time.time()
-    file_size_bytes = os.path.getsize(csv_filepath)
+    file_size_bytes = os.path.getsize(data_filepath)
     file_size_gb = file_size_bytes / (1024**3)
-    print(f"File: {os.path.basename(csv_filepath)}")
+    print(f"File: {os.path.basename(data_filepath)}")
     print(f"Size: {file_size_gb:.2f} GB ({file_size_bytes:,} bytes)")
     print("\nLoading file schema and sample data...")
     try:
-        first_chunk = pd.read_csv(csv_filepath, nrows=5)
+        if _is_parquet(data_filepath):
+            first_chunk = pd.read_parquet(data_filepath, engine="pyarrow").head(5)
+        else:
+            first_chunk = pd.read_csv(data_filepath, nrows=5)
     except Exception as e:
         print(f"Error reading initial rows: {e}")
         return None
@@ -94,7 +102,12 @@ def inspect_large_csv(csv_filepath, chunk_size=100000, sample_size=10):
     processed_chunks = 0
     try:
         # Use low_memory=False to potentially avoid dtype warnings, but uses more memory
-        chunk_iterator = pd.read_csv(csv_filepath, chunksize=chunk_size, low_memory=False)
+        if _is_parquet(data_filepath):
+            # Parquet: read entire file (much smaller on disk), then chunk in memory
+            _full_df = pd.read_parquet(data_filepath, engine="pyarrow")
+            chunk_iterator = [_full_df[i:i+chunk_size] for i in range(0, len(_full_df), chunk_size)]
+        else:
+            chunk_iterator = pd.read_csv(data_filepath, chunksize=chunk_size, low_memory=False)
         # Wrap with tqdm only if total_chunks is meaningful
         if total_chunks > 1:
              chunk_iterator = tqdm(chunk_iterator, total=total_chunks, desc="Inspecting Chunks")
@@ -220,6 +233,10 @@ def inspect_large_csv(csv_filepath, chunk_size=100000, sample_size=10):
 # =============================================================================
 # Sorting Helper Functions
 # =============================================================================
+# Backward-compatible alias
+inspect_large_csv = inspect_large_file
+
+
 def _sort_using_sqlite(csv_filepath, chunk_size=100000):
     """
     Optimized SQLite sorting with progress reporting and efficient export.
@@ -249,7 +266,11 @@ def _sort_using_sqlite(csv_filepath, chunk_size=100000):
         conn.execute("PRAGMA cache_size = -2000000;") # ~2GB cache
 
         # Get columns and check for 'name'
-        sample_df = pd.read_csv(csv_filepath, nrows=5); columns = sample_df.columns.tolist()
+        if _is_parquet(csv_filepath):
+            sample_df = pd.read_parquet(csv_filepath, engine="pyarrow").head(5)
+        else:
+            sample_df = pd.read_csv(csv_filepath, nrows=5)
+        columns = sample_df.columns.tolist()
         if 'name' not in columns: raise ValueError("Sorting requires 'name' column.")
 
         # Create table
@@ -257,7 +278,12 @@ def _sort_using_sqlite(csv_filepath, chunk_size=100000):
 
         # Import data
         total_imported = 0
-        for chunk in tqdm(pd.read_csv(csv_filepath, chunksize=chunk_size, low_memory=False), desc="Importing to SQLite"):
+        if _is_parquet(csv_filepath):
+            _full = pd.read_parquet(csv_filepath, engine="pyarrow")
+            _chunks = [_full[i:i+chunk_size] for i in range(0, len(_full), chunk_size)]
+        else:
+            _chunks = pd.read_csv(csv_filepath, chunksize=chunk_size, low_memory=False)
+        for chunk in tqdm(_chunks, desc="Importing to SQLite"):
             try: chunk.to_sql("data", conn, if_exists="append", index=False, method='multi', chunksize=10000); total_imported += len(chunk)
             except Exception as import_err: print(f"Error importing chunk: {import_err}. Skipping."); continue
         print(f"Finished importing {total_imported:,} rows.")
@@ -325,7 +351,10 @@ def _sort_using_dask(csv_filepath):
         file_size_mb = os.path.getsize(csv_filepath) / (1024**2); blocksize = '128MB' if file_size_mb < 10000 else '256MB'
         print(f"Using Dask blocksize: {blocksize}")
         # Read CSV
-        dask_df = dd.read_csv(csv_filepath, blocksize=blocksize, assume_missing=True)
+        if _is_parquet(csv_filepath):
+            dask_df = dd.read_parquet(csv_filepath, engine="pyarrow")
+        else:
+            dask_df = dd.read_csv(csv_filepath, blocksize=blocksize, assume_missing=True)
         if 'name' not in dask_df.columns: raise ValueError("Sorting requires 'name' column.")
         # Set index and sort
         print("Setting index and sorting with Dask..."); sorted_dask_df = dask_df.set_index('name', shuffle='tasks').persist()
@@ -349,7 +378,12 @@ def _sort_in_memory(csv_filepath):
     temp_csv = os.path.splitext(csv_filepath)[0] + "_sorted_temp.csv"
     try:
         # Read, sort, write
-        print("Reading entire file..."); df = pd.read_csv(csv_filepath, low_memory=False); print(f"Read {len(df):,} rows.")
+        print("Reading entire file...")
+        if _is_parquet(csv_filepath):
+            df = pd.read_parquet(csv_filepath, engine="pyarrow")
+        else:
+            df = pd.read_csv(csv_filepath, low_memory=False)
+        print(f"Read {len(df):,} rows.")
         if 'name' not in df.columns: raise ValueError("Sorting requires 'name' column.")
         print("Sorting DataFrame..."); df = df.sort_values('name')
         print(f"Writing sorted data to {temp_csv}..."); df.to_csv(temp_csv, index=False, encoding='utf-8')
@@ -710,7 +744,7 @@ def plot_sap_velocity_map(grid_data, extent, output_img='sap_velocity_map.png', 
 # =============================================================================
 # Main GeoTIFF Creation Function (MODIFIED TO CALC EXTENT/RES AFTER DASK AGG)
 # =============================================================================
-def create_sap_velocity_tif(csv_filepath, output_tif='sap_velocity_map.tif',
+def create_sap_velocity_tif(data_filepath, output_tif='sap_velocity_map.tif',
                             chunk_size='128MB', # Dask blocksize
                             manual_resolution=None,
                             use_sparse=True,
@@ -724,7 +758,7 @@ def create_sap_velocity_tif(csv_filepath, output_tif='sap_velocity_map.tif',
     Uses get_valid_block_size for rasterio profile.
     """
     print(f"--- Starting GeoTIFF Creation Process (Dask Parallelized v2.1 - Block Size Fix) ---") # Updated version marker
-    print(f"Input CSV: {csv_filepath}")
+    print(f"Input file: {data_filepath}")
     print(f"Output Target: {output_tif}")
     # ... [rest of initial parameter printing] ...
     print(f"SW_in Threshold (>): {sw_in_threshold}")
@@ -738,8 +772,8 @@ def create_sap_velocity_tif(csv_filepath, output_tif='sap_velocity_map.tif',
     start_total_time = time.time()
 
     # --- File Checks and System Info ---
-    if not os.path.exists(csv_filepath): raise FileNotFoundError(f"Input CSV not found: {csv_filepath}")
-    file_size_gb = os.path.getsize(csv_filepath) / (1024**3)
+    if not os.path.exists(data_filepath): raise FileNotFoundError(f"Input file not found: {data_filepath}")
+    file_size_gb = os.path.getsize(data_filepath) / (1024**3)
     print(f"Input file size: {file_size_gb:.2f} GB")
     try:
         mem_info = psutil.virtual_memory(); available_memory_gb = mem_info.available / (1024**3)
@@ -748,27 +782,31 @@ def create_sap_velocity_tif(csv_filepath, output_tif='sap_velocity_map.tif',
     except Exception as mem_err: print(f"Warning: Could not get system memory info: {mem_err}"); available_memory_gb = 4.0 # Assume low memory
 
     # --- Sorting Step (Optional) ---
-    sorted_filepath = csv_filepath
+    sorted_filepath = data_filepath
     temp_sorted_file_to_delete = None
     temp_dir_to_delete = None # For potential Dask temp dirs
-    first_row = pd.read_csv(csv_filepath, nrows=1); has_name_column = 'name' in first_row.columns
+    if _is_parquet(data_filepath):
+        first_row = pd.read_parquet(data_filepath, engine="pyarrow").head(1)
+    else:
+        first_row = pd.read_csv(data_filepath, nrows=1)
+    has_name_column = 'name' in first_row.columns
     if sorting_method and not has_name_column: print("WARNING: 'name' column not found. Cannot sort."); sorting_method = None
 
     if sorting_method:
         print(f"\n--- Sorting dataset by 'name' using '{sorting_method}' method ---")
-        sort_start_time = time.time(); original_path = csv_filepath
+        sort_start_time = time.time(); original_path = data_filepath
         # Call appropriate sorting function
-        if sorting_method == 'dask': sorted_filepath = _sort_using_dask(csv_filepath)
+        if sorting_method == 'dask': sorted_filepath = _sort_using_dask(data_filepath)
         elif sorting_method == 'sqlite':
              sqlite_chunk_size = 500000 if isinstance(chunk_size, str) and 'MB' in chunk_size else 100000
-             sorted_filepath = _sort_using_sqlite(csv_filepath, chunk_size=sqlite_chunk_size)
+             sorted_filepath = _sort_using_sqlite(data_filepath, chunk_size=sqlite_chunk_size)
         elif sorting_method == 'memory':
-             if file_size_gb < (available_memory_gb * 0.5): sorted_filepath = _sort_in_memory(csv_filepath)
-             else: print("File too large for memory sort. Falling back to Dask sort."); sorted_filepath = _sort_using_dask(csv_filepath)
-        else: print(f"Unknown sorting method '{sorting_method}'. Proceeding unsorted."); sorted_filepath = csv_filepath
+             if file_size_gb < (available_memory_gb * 0.5): sorted_filepath = _sort_in_memory(data_filepath)
+             else: print("File too large for memory sort. Falling back to Dask sort."); sorted_filepath = _sort_using_dask(data_filepath)
+        else: print(f"Unknown sorting method '{sorting_method}'. Proceeding unsorted."); sorted_filepath = data_filepath
         # Handle result of sorting
         if sorted_filepath != original_path: temp_sorted_file_to_delete = sorted_filepath; print(f"Sorting completed in {time.time() - sort_start_time:.2f}s. Using: {sorted_filepath}")
-        elif sorted_filepath == original_path and sorting_method in ['dask', 'sqlite', 'memory']: print(f"Sorting failed/aborted. Using original: {csv_filepath}"); sorting_method = None
+        elif sorted_filepath == original_path and sorting_method in ['dask', 'sqlite', 'memory']: print(f"Sorting failed/aborted. Using original: {data_filepath}"); sorting_method = None
         else: print("Proceeding with original unsorted file.")
 
     # --- Quick Sample Check (Optional, for early warning only) ---
@@ -776,7 +814,10 @@ def create_sap_velocity_tif(csv_filepath, output_tif='sap_velocity_map.tif',
     try:
         # Read a small sample quickly
         sample_dtypes = {'latitude': float, 'longitude': float, 'sw_in': float, 'sap_velocity_cnn_lstm': float}
-        sample_df_check = pd.read_csv(sorted_filepath, nrows=50000, usecols=list(sample_dtypes.keys()), dtype=sample_dtypes, low_memory=False)
+        if _is_parquet(sorted_filepath):
+            sample_df_check = pd.read_parquet(sorted_filepath, engine="pyarrow", columns=list(sample_dtypes.keys())).head(50000)
+        else:
+            sample_df_check = pd.read_csv(sorted_filepath, nrows=50000, usecols=list(sample_dtypes.keys()), dtype=sample_dtypes, low_memory=False)
         # Check for valid data in the sample
         sample_valid_check = sample_df_check.dropna(subset=['sap_velocity_cnn_lstm'])
         sample_daytime_valid_check = sample_valid_check[sample_valid_check['sw_in'] > sw_in_threshold]
@@ -796,9 +837,14 @@ def create_sap_velocity_tif(csv_filepath, output_tif='sap_velocity_map.tif',
         # Define dtypes for Dask read
         print(f"Reading CSV with Dask (blocksize={chunk_size})...")
         dtypes = {'latitude': float, 'longitude': float, 'sw_in': float, 'sap_velocity_cnn_lstm': float}
-        all_cols = pd.read_csv(sorted_filepath, nrows=1).columns; final_dtypes = {col: dtypes[col] for col in dtypes if col in all_cols}
-        # Read only necessary columns with Dask
-        ddf = dd.read_csv(sorted_filepath, blocksize=chunk_size, dtype=final_dtypes, usecols=list(final_dtypes.keys()), assume_missing=True)
+        if _is_parquet(sorted_filepath):
+            all_cols = pd.read_parquet(sorted_filepath, engine="pyarrow").head(1).columns
+            final_dtypes = {col: dtypes[col] for col in dtypes if col in all_cols}
+            ddf = dd.read_parquet(sorted_filepath, engine="pyarrow", columns=list(final_dtypes.keys()))
+        else:
+            all_cols = pd.read_csv(sorted_filepath, nrows=1).columns
+            final_dtypes = {col: dtypes[col] for col in dtypes if col in all_cols}
+            ddf = dd.read_csv(sorted_filepath, blocksize=chunk_size, dtype=final_dtypes, usecols=list(final_dtypes.keys()), assume_missing=True)
 
         # Define Dask operations: filter, dropna, groupby, mean
         print("Filtering/Aggregating with Dask...")
@@ -1015,7 +1061,7 @@ def create_sap_velocity_tif(csv_filepath, output_tif='sap_velocity_map.tif',
 if __name__ == "__main__":
     # --- Configuration ---
     # Use raw string (r"...") or forward slashes for paths, especially on Windows
-    csv_file = r'outputs/prediction/prediction_2015_07_01_02_03_predictions_raw.csv'
+    data_file = r'outputs/prediction/prediction_2015_07_01_02_03_predictions_raw.csv'  # Also accepts .parquet
     output_geotiff = r'sap_velocity_map_global_dask_v4_.tif' # Incremented version
     output_plot_png = r'sap_velocity_map_global_dask_v4.png' # Incremented version
 
@@ -1032,10 +1078,10 @@ if __name__ == "__main__":
 
     # --- Execution ---
     print("===== Starting Script (Dask Parallelized v2.1 - Block Size Fix) =====") # Updated version marker
-    print(f"Input file: {csv_file}")
+    print(f"Input file: {data_file}")
 
-    if not os.path.exists(csv_file):
-        print(f"ERROR: Input CSV file not found at {csv_file}")
+    if not os.path.exists(data_file):
+        print(f"ERROR: Input file not found at {data_file}")
     else:
         try:
             # 1. Inspect the CSV (optional)
@@ -1047,7 +1093,7 @@ if __name__ == "__main__":
             # 2. Create the GeoTIFF (or Tiles) using Dask aggregation
             print("\n===== 2. Creating GeoTIFF (using Dask) =====")
             grid_data_result, extent_result, resolution_result = create_sap_velocity_tif(
-                csv_filepath=csv_file, output_tif=output_geotiff, chunk_size=DASK_BLOCKSIZE,
+                data_filepath=data_file, output_tif=output_geotiff, chunk_size=DASK_BLOCKSIZE,
                 manual_resolution=MANUAL_RESOLUTION, use_sparse=USE_SPARSE_IF_NOT_TILING,
                 create_tiles=ENABLE_TILING, tile_size=TILE_PIXEL_SIZE,
                 sw_in_threshold=SW_IN_DAYTIME_THRESHOLD, sorting_method=SORTING_METHOD,

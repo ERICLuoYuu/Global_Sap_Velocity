@@ -4,8 +4,25 @@ Handles extraction, reading, and preprocessing of ERA5-Land data
 from Google Earth Engine with maintained functionality for derived variables.
 """
 
+import os as _os
+from pathlib import Path as _Path
+# Fix PROJ DB version conflict: set PROJ_LIB before any geo library import
+if "PROJ_LIB" not in _os.environ:
+    import importlib.util as _ilu
+    _spec = _ilu.find_spec("rasterio")
+    if _spec and _spec.origin:
+        _rd = _Path(_spec.origin).parent / "proj_data"
+        if _rd.is_dir():
+            _os.environ["PROJ_LIB"] = str(_rd)
+
 import os
+import logging
 import sys
+
+from src.make_prediction.io_utils import save_df, read_df
+
+logger = logging.getLogger(__name__)
+
 
 
 # Find and set PROJ_LIB path
@@ -58,7 +75,7 @@ def setup_proj():
         if os.path.exists(proj_db):
             os.environ["PROJ_LIB"] = path
             os.environ["PROJ_DATA"] = path  # For newer PROJ versions
-            print(f"PROJ_LIB set to: {path}")
+            logger.info("PROJ_LIB set to: %s", path)
             return True
 
     # If not found, try to find proj.db anywhere in site-packages
@@ -70,12 +87,12 @@ def setup_proj():
                 if "proj.db" in files:
                     os.environ["PROJ_LIB"] = root
                     os.environ["PROJ_DATA"] = root
-                    print(f"PROJ_LIB set to: {root}")
+                    logger.info("PROJ_LIB set to: %s", root)
                     return True
     except Exception:
         pass
 
-    print("WARNING: Could not find proj.db. CRS operations may fail.")
+    logger.warning("Could not find proj.db. CRS operations may fail.")
     return False
 
 
@@ -101,6 +118,7 @@ import rasterio
 import xarray as xr
 from rasterio.windows import from_bounds
 from scipy.spatial import cKDTree
+from rasterio_resample import resample_raster_to_grid
 
 # Try optional libraries
 try:
@@ -143,7 +161,7 @@ def global_worker_init():
         # Re-initialize using the project ID.
         # This reads the credentials from disk/environment variables.
         # It does NOT open a browser or ask for interactive auth.
-        ee.Initialize(project="era5download-447713")
+        ee.Initialize(project="ee-yuluo-2")
     except Exception as e:
         # On Windows, printing might get swallowed depending on the IDE,
         # but it's good to try.
@@ -187,8 +205,8 @@ def _hour_processing_worker(args):
         if df is not None and not df.empty:
             # FIX #7: Save to disk immediately.
             # We use a temporary CSV. Index=False makes it easier to merge later.
-            temp_file_path = hour_temp_dir / f"hour_{hour:02d}_raw.csv"
-            df.to_csv(temp_file_path, index=False)
+            temp_file_path = hour_temp_dir / f"hour_{hour:02d}_raw.parquet"
+            save_df(df, temp_file_path)
 
             print(f"--- Process Success: Hour {hour:02d}:00 (Saved to Temp) ---")
             return {"hour": hour, "file_path": str(temp_file_path), "success": True, "timestamp": hour_start}
@@ -241,8 +259,17 @@ class ERA5LandGEEProcessor:
     accessing data directly from GEE instead of local files.
     """
 
+    # Fix 5.4: Named physical constants (previously magic numbers)
+    MAGNUS_A = 6.1078  # hPa, Tetens formula saturation vapor pressure coefficient
+    MAGNUS_B = 17.269  # dimensionless, Tetens formula exponent numerator
+    MAGNUS_C = 237.3  # degC, Tetens formula exponent denominator
+    PAR_FRACTION = 0.45  # fraction of shortwave radiation that is PAR
+    PPFD_CONVERSION = 4.6  # umol photons per J conversion factor for PAR
+    SOLAR_CONSTANT = 1367.0  # W/m2, total solar irradiance (Gsc)
+    KELVIN_OFFSET = 273.15  # K, offset between Kelvin and Celsius
+
     # Format: (temp_min, temp_max, precip_min, precip_max)
-    # Temperatures in °C, precipitation in mm/year
+    # Temperatures in degC, precipitation in mm/year
 
     def __init__(
         self,
@@ -253,6 +280,7 @@ class ERA5LandGEEProcessor:
         precip_climate_file=None,
         gee_initialize=True,
         time_scale="daily",
+        output_format="parquet",
     ):
         """
         Initialize the ERA5-Land GEE data processor.
@@ -278,6 +306,7 @@ class ERA5LandGEEProcessor:
         self.time_scale = time_scale
         if self.time_scale not in ["hourly", "daily"]:
             raise ValueError("time_scale must be either 'hourly' or 'daily'")
+        self.output_ext = ".parquet" if output_format == "parquet" else ".csv"
         if self.time_scale == "hourly":
             self.GEE_VARIABLE_MAPPING = {
                 "temperature_2m": "temperature_2m",
@@ -368,8 +397,9 @@ class ERA5LandGEEProcessor:
         # Initialize variable datasets
         self.datasets = {}
 
-        # Note: ee_initialized already set above (lines 268-302)
-        # Do NOT reset it here — workers may have pre-initialized sessions.
+        # Fix 1.3: Only initialize GEE if not already initialized by worker or earlier code
+        if not self.ee_initialized and gee_initialize:
+            self.initialize_gee()
 
         # Try to load climate data if files are provided
         if self.temp_climate_file and self.precip_climate_file:
@@ -408,17 +438,47 @@ class ERA5LandGEEProcessor:
             self.client = None
 
     def initialize_gee(self):
-        """Initialize the Google Earth Engine API."""
+        """Initialize the Google Earth Engine API.
+
+        Strategy: read stored credentials from ~/.config/earthengine/credentials
+        and build an OAuth2 Credentials object directly. This avoids gcloud ADC
+        flow which requires interactive browser auth on HPC compute nodes.
+        """
+        import json
+        from pathlib import Path
+
+        # Try multiple credential sources: EE credentials, then gcloud ADC
+        cred_paths = [
+            Path.home() / ".config" / "earthengine" / "credentials",
+            Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
+        ]
+        gee_project = getattr(config, "GEE_PROJECT", "era5download-447713")
         try:
-            # Initialize the Earth Engine API
-            ee.Authenticate()
-            ee.Initialize(project="era5download-447713")
-            # ee.Initialize()
-            self.ee_initialized = True
-            print("Google Earth Engine initialized successfully")
+            cred_data = None
+            for cred_path in cred_paths:
+                if cred_path.exists():
+                    cred_data = json.loads(cred_path.read_text())
+                    break
+            if cred_data and "refresh_token" in cred_data:
+                from google.oauth2.credentials import Credentials
+
+                credentials = Credentials(
+                    token=None,
+                    refresh_token=cred_data["refresh_token"],
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=cred_data["client_id"],
+                    client_secret=cred_data["client_secret"],
+                )
+                ee.Initialize(credentials=credentials, project=gee_project)
+                self.ee_initialized = True
+                print("GEE initialized with stored credentials from", cred_path)
+            else:
+                ee.Initialize(project="ee-yuluo-2")
+                self.ee_initialized = True
+                print("GEE initialized via default credentials")
         except Exception as e:
-            print(f"Failed to initialize Google Earth Engine: {str(e)}")
-            print("You may need to authenticate first using 'earthengine authenticate'")
+            print(f"Failed to initialize GEE: {e}")
+            print("Run 'earthengine authenticate' on the login node first")
             self.ee_initialized = False
 
     def mask_zero_values(self, variables_to_check=None, threshold=1e-10, require_all_zero=True, apply_to_all=True):
@@ -640,7 +700,7 @@ class ERA5LandGEEProcessor:
 
             if df is not None and not df.empty:
                 # Save monthly prediction dataset
-                output_file = output_dir / f"prediction_{year}_{month:02d}_daily.csv"
+                output_file = output_dir / f"prediction_{year}_{month:02d}_daily{self.output_ext}"
                 saved_path = self.save_prediction_dataset(df, output_file)
 
                 print(f"\n{'=' * 60}")
@@ -712,6 +772,12 @@ class ERA5LandGEEProcessor:
 
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
+
+        # Fix 2.1: Month-level checkpoint — skip if monthly file already exists
+        monthly_output = output_dir / f"prediction_{year}_{month:02d}_daily{self.output_ext}"
+        if monthly_output.exists() and monthly_output.stat().st_size > 1000:
+            print(f"Month {year}-{month:02d} already processed ({monthly_output.name}), skipping")
+            return str(monthly_output)
 
         # Temporary directory for chunk files
         temp_chunk_dir = self.temp_dir / f"month_{year}_{month:02d}_chunks"
@@ -828,7 +894,7 @@ class ERA5LandGEEProcessor:
                 print(f"Removed {before_dedup - after_dedup} duplicate rows")
 
             # Save monthly file
-            output_file = output_dir / f"prediction_{year}_{month:02d}_daily.csv"
+            output_file = output_dir / f"prediction_{year}_{month:02d}_daily{self.output_ext}"
             saved_path = self.save_prediction_dataset(monthly_df, output_file)
 
             # Print summary
@@ -974,7 +1040,7 @@ class ERA5LandGEEProcessor:
                 yearly_df = yearly_df.drop_duplicates()
 
                 # Save yearly file
-                output_file = output_dir / f"prediction_{year}_{self.time_scale}.csv"
+                output_file = output_dir / f"prediction_{year}_{self.time_scale}{self.output_ext}"
                 saved_path = self.save_prediction_dataset(yearly_df, output_file)
 
                 print(f"\n✓ Yearly file saved: {output_file}")
@@ -1169,6 +1235,62 @@ class ERA5LandGEEProcessor:
 
         return results
 
+
+    def _download_tile_geotiff(self, image, region_list, scale, band_name=None, timeout=300):
+        """Download a single GEE image tile as GeoTIFF via getDownloadURL.
+
+        Unlike geemap.ee_to_numpy, this guarantees that the returned array
+        dimensions match the requested geographic extent because rasterio
+        reads the GeoTIFF with its embedded affine transform.
+
+        Parameters
+        ----------
+        image : ee.Image
+        region_list : list
+            [lon_min, lat_min, lon_max, lat_max]
+        scale : float
+            Pixel size in metres (at equator for EPSG:4326).
+        band_name : str, optional
+            Band to select before download.
+        timeout : int
+            HTTP timeout in seconds (default 300).
+
+        Returns
+        -------
+        np.ndarray or None
+            2-D array (height, width).  None on failure.
+        """
+        import tempfile
+        import requests
+        import rasterio
+
+        tile_img = image.select(band_name) if band_name else image
+        region = ee.Geometry.Rectangle(region_list, None, False)
+
+        url = tile_img.getDownloadURL({
+            "region": region,
+            "scale": scale,
+            "format": "GEO_TIFF",
+            "crs": "EPSG:4326",
+        })
+
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+                tmp.write(resp.content)
+                tmp_path = tmp.name
+
+            with rasterio.open(tmp_path) as rast:
+                data = rast.read(1)
+                tile_transform = rast.transform
+            return data.astype(np.float32), tile_transform
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+
     def _download_gee_image_tiled(self, image, region, scale, band_name=None, max_tile_size=1024):
         """
         Download a large GEE image by splitting it into smaller tiles.
@@ -1213,6 +1335,19 @@ class ERA5LandGEEProcessor:
 
             print(f"  Region bounds: lon=[{lon_min:.4f}, {lon_max:.4f}], lat=[{lat_min:.4f}, {lat_max:.4f}]")
 
+            # Safeguard: reject bounds outside valid geographic range
+            if lon_min > 180 or lon_max > 180 or lon_min < -180 or lon_max < -180:
+                raise ValueError(
+                    f"Region bounds have invalid longitudes: [{lon_min}, {lon_max}]. "
+                    f"This usually means the input shapefile extends past -180/180. "
+                    f"Clamp your shapefile bounds to [-180, 180] before passing to GEE."
+                )
+            if lat_min > 90 or lat_max > 90 or lat_min < -90 or lat_max < -90:
+                raise ValueError(
+                    f"Region bounds have invalid latitudes: [{lat_min}, {lat_max}]. "
+                    f"Clamp your shapefile bounds to [-90, 90] before passing to GEE."
+                )
+
             # --- 2. Resolution Setup (Correct for EPSG:4326) ---
             deg_per_pixel = scale / METERS_PER_DEGREE
 
@@ -1225,17 +1360,20 @@ class ERA5LandGEEProcessor:
 
             # --- 4. Small Region Bypass (Optimization) ---
             if total_height <= max_tile_size and total_width <= max_tile_size:
-                print("  Small region - downloading directly...")
-                tile_img = image.select(band_name) if band_name else image
-
-                bbox_region = ee.Geometry.Rectangle([lon_min, lat_min, lon_max, lat_max], None, False)
-
-                result = geemap.ee_to_numpy(tile_img, region=bbox_region, scale=scale)
+                print("  Small region - downloading directly via GeoTIFF...")
+                try:
+                    result, _tile_tf = self._download_tile_geotiff(
+                        image, [lon_min, lat_min, lon_max, lat_max], scale, band_name=band_name
+                    )
+                except Exception as e:
+                    print(f"  GeoTIFF download failed ({e}), falling back to geemap")
+                    tile_img = image.select(band_name) if band_name else image
+                    bbox_region = ee.Geometry.Rectangle([lon_min, lat_min, lon_max, lat_max], None, False)
+                    result = geemap.ee_to_numpy(tile_img, region=bbox_region, scale=scale)
 
                 if result is not None:
                     if result.ndim > 2:
                         result = result.squeeze()
-                    # Handle edge cases
                     if result.ndim == 0:
                         result = np.array([[result]])
                     elif result.ndim == 1:
@@ -1243,7 +1381,6 @@ class ERA5LandGEEProcessor:
                             result = result.reshape(1, -1)
                         else:
                             result = result.reshape(-1, 1)
-
                     print(f"  Download complete: {result.shape}")
 
                 return result, {"lon_min": lon_min, "lon_max": lon_max, "lat_min": lat_min, "lat_max": lat_max}
@@ -1278,21 +1415,22 @@ class ERA5LandGEEProcessor:
                     )
 
                     try:
-                        tile_img = image.select(band_name) if band_name else image
+                        tile_result = self._download_tile_geotiff(
+                            image,
+                            [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
+                            scale,
+                            band_name=band_name,
+                        )
 
-                        tile_data = geemap.ee_to_numpy(tile_img, region=tile_region, scale=scale)
-
-                        if tile_data is None:
+                        if tile_result is None:
                             continue
+                        tile_data, tile_tf = tile_result
 
                         # --- 7. Robust Shape Handling ---
                         if tile_data.ndim > 2:
                             tile_data = tile_data.squeeze()
-
-                        # Handle 1x1 pixels becoming scalars
                         if tile_data.ndim == 0:
                             tile_data = np.array([[tile_data]])
-                        # Handle 1xN or Nx1 vectors
                         elif tile_data.ndim == 1:
                             expected_h = row_end - row_start
                             expected_w = col_end - col_start
@@ -1301,14 +1439,23 @@ class ERA5LandGEEProcessor:
                             else:
                                 tile_data = tile_data.reshape(-1, 1)
 
-                        actual_h, actual_w = tile_data.shape
+                        # --- 7b. Transform-based placement (fixes GEE ±1 pixel rounding) ---
+                        # Use the GeoTIFF's actual origin to compute correct output position
+                        actual_col = round((tile_tf.c - lon_min) / deg_per_pixel)
+                        actual_row = round((lat_max - tile_tf.f) / deg_per_pixel)
 
-                        # Calculate safe insertion range (protects against ±1 pixel GEE rounding)
-                        ins_h = min(actual_h, total_height - row_start)
-                        ins_w = min(actual_w, total_width - col_start)
+                        th, tw = tile_data.shape
+                        # Clamp source and destination ranges to valid bounds
+                        out_r0 = max(0, actual_row)
+                        out_c0 = max(0, actual_col)
+                        out_r1 = min(total_height, actual_row + th)
+                        out_c1 = min(total_width, actual_col + tw)
+                        src_r0 = out_r0 - actual_row
+                        src_c0 = out_c0 - actual_col
 
-                        output_array[row_start : row_start + ins_h, col_start : col_start + ins_w] = tile_data[
-                            :ins_h, :ins_w
+                        output_array[out_r0:out_r1, out_c0:out_c1] = tile_data[
+                            src_r0 : src_r0 + (out_r1 - out_r0),
+                            src_c0 : src_c0 + (out_c1 - out_c0),
                         ]
                         successful_tiles += 1
 
@@ -1371,6 +1518,12 @@ class ERA5LandGEEProcessor:
             if use_bounds or n_features > 1000:
                 print(f"Using bounding box due to complexity ({n_features} features)")
                 bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
+                if bounds[0] < -180 or bounds[2] > 180 or bounds[1] < -90 or bounds[3] > 90:
+                    raise ValueError(
+                        f"Shapefile bounds [{bounds[0]:.4f}, {bounds[1]:.4f}, "
+                        f"{bounds[2]:.4f}, {bounds[3]:.4f}] exceed [-180, -90, 180, 90]. "
+                        f"Clamp your shapefile to valid geographic bounds before use."
+                    )
                 ee_geometry = ee.Geometry.Rectangle([bounds[0], bounds[1], bounds[2], bounds[3]], None, False)
                 return ee_geometry
 
@@ -1839,9 +1992,40 @@ class ERA5LandGEEProcessor:
 
     def get_pft_from_gee(self, year, region=None, shapefile=None, scale=None):
         """
-        Get Plant Functional Type (PFT) data from MODIS Land Cover via Google Earth Engine.
-        Uses same storage format as climate data for consistent lookup.
+        Get Plant Functional Type (PFT) data from MODIS Land Cover.
+        Tries local GeoTIFF first, falls back to Google Earth Engine download.
+        Saves GEE download as local GeoTIFF for future reuse.
         """
+        # --- Try local GeoTIFF first ---
+        local_pft_dir = Path(config.RAW_DATA_DIR) / "pft_cache"
+        local_pft_path = local_pft_dir / f"modis_pft_{year}.tif"
+
+        if local_pft_path.exists():
+            print(f"Loading PFT from local cache: {local_pft_path}")
+            try:
+                import rasterio
+                with rasterio.open(local_pft_path) as rast:
+                    pft_array = rast.read(1).astype(float)
+                    pft_transform = rast.transform
+                    height, width = pft_array.shape
+
+                self.pft_raw = {
+                    "data": pft_array,
+                    "transform": pft_transform,
+                    "crs": "EPSG:4326",
+                    "height": height,
+                    "width": width,
+                    "nodata": 255,
+                    "year": year,
+                }
+                valid_data = pft_array[(~np.isnan(pft_array)) & (pft_array != 255)]
+                unique_classes = np.unique(valid_data).astype(int)
+                print(f"  Loaded from cache: {height} x {width}, classes={unique_classes.tolist()}")
+                return self.pft_raw
+            except Exception as e:
+                print(f"  Failed to read local PFT cache ({e}), falling back to GEE download")
+
+        # --- GEE download (original logic) ---
         if not self.ee_initialized:
             self.initialize_gee()
             if not self.ee_initialized:
@@ -1940,6 +2124,29 @@ class ERA5LandGEEProcessor:
             print(f"  Shape: {height} x {width}")
             print(f"  PFT classes present: {unique_classes.tolist()}")
             print(f"  Unique values: {len(unique_classes)}")
+
+            # Save to local cache for future reuse
+            try:
+                import rasterio
+                local_pft_dir = Path(config.RAW_DATA_DIR) / "pft_cache"
+                local_pft_dir.mkdir(parents=True, exist_ok=True)
+                local_pft_path = local_pft_dir / f"modis_pft_{year}.tif"
+                if not local_pft_path.exists():
+                    profile = {
+                        "driver": "GTiff",
+                        "height": height,
+                        "width": width,
+                        "count": 1,
+                        "dtype": "float32",
+                        "crs": "EPSG:4326",
+                        "transform": transform,
+                        "nodata": 255,
+                    }
+                    with rasterio.open(local_pft_path, "w", **profile) as dst:
+                        dst.write(pft_array.astype(np.float32), 1)
+                    print(f"  Saved PFT cache to {local_pft_path}")
+            except Exception as e:
+                print(f"  Warning: Could not save PFT cache ({e})")
 
             return self.pft_raw
 
@@ -2525,8 +2732,11 @@ class ERA5LandGEEProcessor:
             print(f"Image dimensions: {height}x{width}")
 
             # Generate coordinate arrays based on the region bounds and image dimensions
-            lons = np.linspace(lon_min, lon_max, width, endpoint=True)
-            lats = np.linspace(lat_max, lat_min, height, endpoint=True)  # Note: lat_max to lat_min for descending order
+            # Fix 1.1: Use pixel-center coordinates, not pixel-edge
+            pixel_size_lon = (lon_max - lon_min) / width
+            pixel_size_lat = (lat_max - lat_min) / height
+            lons = np.linspace(lon_min + pixel_size_lon / 2, lon_max - pixel_size_lon / 2, width)
+            lats = np.linspace(lat_max - pixel_size_lat / 2, lat_min + pixel_size_lat / 2, height)
 
             # Validate that latitude is in descending order
             lat_needs_flip = False
@@ -2549,14 +2759,33 @@ class ERA5LandGEEProcessor:
             all_arrays = []
             timestamps = []
 
+            # Fix 3.1: Batch-extract all timestamps in a single getInfo() call
+            all_dates = image_list.map(
+                lambda img: ee.Date(ee.Image(img).get("system:time_start")).format("YYYY-MM-dd HH:mm:ss")
+            ).getInfo()
+            all_timestamps = [pd.to_datetime(d, utc=True) if d is not None else None for d in all_dates]
+
             for i in range(collection_size):
                 try:
                     img = ee.Image(image_list.get(i))
-                    time_start = ee.Date(img.get("system:time_start")).format("YYYY-MM-dd HH:mm:ss").getInfo()
-                    current_time = pd.to_datetime(time_start, utc=True)
+                    current_time = all_timestamps[i]
+                    if current_time is None:
+                        print(f"  Skipping image {i}: missing timestamp metadata")
+                        continue
 
-                    # Extract array
-                    img_array = geemap.ee_to_numpy(img.select(gee_var), region=region, scale=scale)
+                    # Fix 2.2: Extract array with retry logic for transient GEE failures
+                    img_array = None
+                    for _attempt in range(3):
+                        try:
+                            img_array = geemap.ee_to_numpy(img.select(gee_var), region=region, scale=scale)
+                            break
+                        except Exception as retry_err:
+                            if _attempt < 2:
+                                _wait = 5 * (3**_attempt)  # 5s, 15s
+                                print(f"  Retry {_attempt + 1}/3 for image {i} after {_wait}s: {retry_err}")
+                                time.sleep(_wait)
+                            else:
+                                raise
 
                     # Handle ERA5-Land NoData values
                     # Common NoData sentinels: 9999, 9.999e20, -9999
@@ -2600,7 +2829,8 @@ class ERA5LandGEEProcessor:
                         print(f"  Unique values: {unique_values}")
 
                         # Try alternative extraction method if constant values detected
-                        temp_file = self.temp_dir / f"{variable}_{time_start.replace(':', '-').replace(' ', '_')}.tif"
+                        time_start_str = current_time.strftime("%Y-%m-%d_%H-%M-%S")
+                        temp_file = self.temp_dir / f"{variable}_{time_start_str}.tif"
                         success = geemap.ee_export_image(
                             img.select(gee_var),
                             filename=str(temp_file),
@@ -2729,7 +2959,13 @@ class ERA5LandGEEProcessor:
             print(f"Extracting region: lon={lon_min}-{lon_max}, lat={lat_min}-{lat_max}")
 
             # Extract the region using sel() method
-            region_ds = ds.sel({lat_var: slice(lat_min, lat_max)}, {lon_var: slice(lon_min, lon_max)})
+            # Fix 1.7 & 1.8: Correct sel() syntax (single dict) and handle descending lat
+            lat_vals = ds[lat_var].values
+            if lat_vals[0] > lat_vals[-1]:  # descending order
+                lat_slice = slice(lat_max, lat_min)
+            else:
+                lat_slice = slice(lat_min, lat_max)
+            region_ds = ds.sel({lat_var: lat_slice, lon_var: slice(lon_min, lon_max)})
 
             # Verify we got some data
             if lat_var in region_ds.dims and lon_var in region_ds.dims:
@@ -2750,15 +2986,83 @@ class ERA5LandGEEProcessor:
             print("Using complete dataset as fallback.")
             return ds
 
+    def _build_forest_mask(self, shapefile_path, lats, lons):
+        """Rasterise a shapefile onto the ERA5 lat/lon grid.
+
+        Returns a boolean ndarray (nlat, nlon) — True inside the
+        shapefile geometry, False outside.  If the shapefile cannot be
+        read, returns an all-True mask (no masking).
+        """
+        import geopandas as gpd
+        import rasterio.features
+        import rasterio.transform
+
+        try:
+            gdf = gpd.read_file(shapefile_path)
+            if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+                gdf = gdf.to_crs("EPSG:4326")
+
+            nlat, nlon = len(lats), len(lons)
+            lat_res = abs(lats[1] - lats[0]) if nlat > 1 else 0.1
+            lon_res = abs(lons[1] - lons[0]) if nlon > 1 else 0.1
+
+            west = float(lons.min()) - lon_res / 2
+            north = float(lats.max()) + lat_res / 2
+
+            transform = rasterio.transform.from_origin(west, north, lon_res, lat_res)
+
+            shapes = [(geom, 1) for geom in gdf.geometry if geom is not None]
+            mask = rasterio.features.rasterize(
+                shapes,
+                out_shape=(nlat, nlon),
+                transform=transform,
+                fill=0,
+                dtype=np.uint8,
+                all_touched=True,
+            )
+            n_inside = int(mask.sum())
+            print(
+                f"  Forest mask: {n_inside} / {nlat * nlon} pixels "
+                f"({100.0 * n_inside / max(nlat * nlon, 1):.1f}%) inside shapefile"
+            )
+            return mask.astype(bool)
+
+        except Exception as e:
+            print(f"  WARNING: Failed to build forest mask ({e}) — skipping mask")
+            import traceback
+
+            traceback.print_exc()
+            return np.ones((len(lats), len(lons)), dtype=bool)
+
+    def _apply_mask_to_ds(self, ds, mask_2d):
+        """Set all data variables to NaN where *mask_2d* is False."""
+        import xarray as xr
+
+        # Determine coordinate names used by this dataset
+        lat_dim = "latitude" if "latitude" in ds.dims else "lat"
+        lon_dim = "longitude" if "longitude" in ds.dims else "lon"
+
+        nan_mask = xr.DataArray(
+            ~mask_2d,
+            dims=[lat_dim, lon_dim],
+            coords={lat_dim: ds[lat_dim], lon_dim: ds[lon_dim]},
+        )
+        for var in ds.data_vars:
+            ds[var] = ds[var].where(~nan_mask)
+        return ds
+
     def load_variable_data(self, variables, year, month, day=None, hour=None, shapefile=None):
         """
         Load and preprocess multiple ERA5-Land variables, potentially clipping to a shapefile.
-        Modified to support hour-specific loading.
+
+        The shapefile is rasterised **once** into a boolean mask, then applied
+        via ``xr.where`` to every loaded dataset — much faster than the previous
+        per-variable ``rioxarray.clip`` approach.
 
         Parameters:
         -----------
         variables : list
-            List of variable names to load (e.g., ['temperature_2m', 'total_precipitation']).
+            List of variable names to load.
         year : int
             Year to load data for.
         month : int
@@ -2768,25 +3072,11 @@ class ERA5LandGEEProcessor:
         hour : int, optional
             Hour to load data for.
         shapefile : str, optional
-            Path to a shapefile for clipping the data. If None, uses default global extent.
-
-        Returns:
-        --------
-        dict
-            Dictionary where keys are variable names and values are the processed xarray.Dataset objects.
+            Path to a shapefile for forest masking. If None, uses default global extent.
         """
-        try:
-            import rioxarray
-        except ImportError:
-            raise ImportError("rioxarray library is required for shapefile masking. Please install it.")
-
-        try:
-            import geopandas as gpd
-        except ImportError:
-            raise ImportError("geopandas library is required for shapefile processing. Please install it.")
+        import gc
 
         if not shapefile:
-            shapefile = None
             raise ValueError("A shapefile path must be provided for region clipping.")
 
         # Clear existing datasets before loading new ones
@@ -2801,145 +3091,46 @@ class ERA5LandGEEProcessor:
             try:
                 if hasattr(ds, "close"):
                     ds.close()
-                del ds  # Attempt to free memory
             except Exception as e:
-                print(f"    Warning: Could not close/delete dataset for {var_name}: {e}")
+                print(f"    Warning: Could not close dataset for {var_name}: {e}")
         self.datasets = {}
-        import gc
+        gc.collect()
 
-        gc.collect()  # Suggest garbage collection
-
-        shapefile_gdf = None
-        shapefile_bounds = None
-
-        # Read shapefile ONCE using geopandas if provided
-        if shapefile is not None and gpd is not None:
-            print(f"Reading shapefile: {shapefile}")
-            try:
-                shapefile_gdf = gpd.read_file(shapefile)
-                # Get bounds (minx, miny, maxx, maxy)
-                bounds = shapefile_gdf.total_bounds
-                shapefile_bounds = {
-                    "lon_min": bounds[0],
-                    "lat_min": bounds[1],
-                    "lon_max": bounds[2],
-                    "lat_max": bounds[3],
-                }
-                print(
-                    f"    Shapefile bounds: lat={shapefile_bounds['lat_min']:.4f} to {shapefile_bounds['lat_max']:.4f}, "
-                    f"lon={shapefile_bounds['lon_min']:.4f} to {shapefile_bounds['lon_max']:.4f}"
-                )
-                print(f"    Shapefile CRS: {shapefile_gdf.crs}")
-            except Exception as e:
-                print(f"ERROR: Could not read or get bounds from shapefile: {e}")
-                print("Proceeding without shapefile clipping, using default region if defined, or global.")
-                shapefile_gdf = None  # Ensure it's None if reading failed
-                shapefile_bounds = None  # Ensure bounds are None
-
-        # Define the region for data loading/extraction
-        # Priority: Shapefile bounds > Default region (if shapefile not used)
-        region_to_extract = None
-        if shapefile_bounds is not None:
-            region_to_extract = shapefile_bounds
-        else:
-            # Use default global region if no shapefile
-            region_to_extract = {
-                "lat_min": config.DEFAULT_LAT_MIN,
-                "lat_max": config.DEFAULT_LAT_MAX,
-                "lon_min": config.DEFAULT_LON_MIN,
-                "lon_max": config.DEFAULT_LON_MAX,
-            }
-            print("Using default global region.")
-        # Load each ERA5 variable
+        # Load each ERA5 variable from GEE
         for var_name in variables:
             var_desc = f"{var_name} for {time_str}"
             print(f"\nProcessing variable: {var_desc}...")
 
-            # 1. Get data from GEE (or other source) - MODIFIED to include hour parameter
             try:
-                ds = self.get_era5land_variable_from_gee(
-                    var_name, year, month, day, hour
-                )  # Pass shapefile path for context if needed by GEE func
+                ds = self.get_era5land_variable_from_gee(var_name, year, month, day, hour)
             except Exception as gee_err:
-                print(f"  ERROR: Failed to load data for {var_name} from GEE source: {gee_err}")
+                print(f"  ERROR: Failed to load data for {var_name} from GEE: {gee_err}")
                 ds = None
 
-            if ds is not None:
-                print(f"  Initial data loaded for {var_name}. Size: {ds.nbytes / 1e6:.2f} MB")
-                print(f"  Initial dimensions: {ds.dims}")
-                print(f"  Coordinates: {list(ds.coords.keys())}")
+            if ds is not None and ds.nbytes > 0:
+                print(f"  Loaded {var_name}. Size: {ds.nbytes / 1e6:.2f} MB")
+                self.datasets[var_name] = ds
+            elif ds is not None:
+                print(f"  Loaded {var_name} but dataset is empty. Skipping.")
+            else:
+                print(f"  Failed to load {var_name}. Skipping.")
 
-                # 3. Apply Shapefile Mask (if shapefile was provided and libraries exist)
-                if shapefile_gdf is not None and rioxarray is not None and ds.nbytes > 0:
-                    print(f"  Applying precise shapefile mask using rioxarray for {var_name}...")
-                    try:
-                        # Ensure Dataset CRS is set (should be done in get_... or extract_region)
-                        if ds.rio.crs is None:
-                            print(f"    CRS is missing for dataset '{var_name}'. Setting to EPSG:4326 (WGS84).")
-                            # The correct way to set CRS inplace
-                            ds.rio.write_crs("EPSG:4326", inplace=True)
-                            # Verify CRS was set
-                            if ds.rio.crs is None:
-                                raise ValueError(f"Failed to set CRS for {var_name}")
-                            else:
-                                print(f"    CRS successfully set to {ds.rio.crs}")
+        # Build forest mask ONCE from shapefile and apply to ALL datasets
+        if shapefile is not None and self.datasets:
+            ref_ds = next(iter(self.datasets.values()))
+            lat_dim = "latitude" if "latitude" in ref_ds.dims else "lat"
+            lon_dim = "longitude" if "longitude" in ref_ds.dims else "lon"
+            lats = ref_ds[lat_dim].values
+            lons = ref_ds[lon_dim].values
 
-                        data_crs = ds.rio.crs
-                        shape_crs = shapefile_gdf.crs
+            # Cache mask so repeated calls in the same run reuse it
+            if not hasattr(self, "_forest_mask") or self._forest_mask is None:
+                print(f"\nBuilding forest mask from {shapefile}...")
+                self._forest_mask = self._build_forest_mask(shapefile, lats, lons)
 
-                        print(f"    Data CRS: {data_crs}, Shapefile CRS: {shape_crs}")
-
-                        # Reproject shapefile CRS if it doesn't match data CRS
-                        if shape_crs != data_crs:
-                            print(f"    Reprojecting shapefile from {shape_crs} to {data_crs}...")
-                            shapefile_gdf = shapefile_gdf.to_crs(data_crs)
-                            print("    Reprojection complete.")
-
-                        # Explicitly check for the data variable name before clipping
-                        data_vars = list(ds.data_vars)
-                        if len(data_vars) == 0:
-                            raise ValueError("Dataset has no data variables to clip")
-
-                        print(f"    Data variables found: {data_vars}")
-
-                        # Perform the clipping using rioxarray
-                        masked_ds = ds.rio.clip(shapefile_gdf.geometry, drop=False, invert=False, all_touched=True)
-
-                        # Check if clipping resulted in an empty dataset
-                        if masked_ds.nbytes == 0 or all(dim == 0 for dim in masked_ds.sizes.values()):
-                            print(
-                                f"    WARNING: Clipping {var_name} resulted in an empty dataset. Shapefile might not overlap the data region."
-                            )
-                            print(f"    Storing the bounding-box extracted data for {var_name} instead of empty mask.")
-                        else:
-                            ds = masked_ds  # Replace original dataset with the masked version
-                            print(f"    Shapefile mask applied successfully. Final size: {ds.nbytes / 1e6:.2f} MB")
-
-                    except Exception as mask_err:
-                        print(f"  ERROR applying shapefile mask with rioxarray for {var_name}: {mask_err}")
-                        print("    Using data only extracted to the shapefile's bounding box (if applicable).")
-                        import traceback
-
-                        traceback.print_exc()  # Print detailed error traceback
-
-                elif shapefile and (rioxarray is None or gpd is None):
-                    print(
-                        f"  Skipping precise shapefile masking for {var_name} because required libraries are missing."
-                    )
-
-                # 4. Store the final dataset
-                if ds is not None and ds.nbytes > 0:
-                    self.datasets[var_name] = ds
-                    print(f"  --> Successfully processed and stored dataset for {var_name}")
-                elif ds is not None and ds.nbytes == 0:
-                    print(
-                        f"  --> Processed {var_name}, but the resulting dataset is empty (likely due to clipping). Not stored."
-                    )
-                else:
-                    print(f"  --> Failed to process or load {var_name}. Not stored.")
-
-            else:  # If ds was None initially
-                print(f"  --> Failed to load initial data for {var_name}. Skipping further processing.")
+            print("Applying forest mask to all loaded datasets...")
+            for var_name in list(self.datasets):
+                self.datasets[var_name] = self._apply_mask_to_ds(self.datasets[var_name], self._forest_mask)
 
         # At the END of load_variable_data, AFTER all ERA5 variables are loaded:
         # ============================================================
@@ -2947,11 +3138,16 @@ class ERA5LandGEEProcessor:
         # ============================================================
         print("\nApplying zero-value mask to ERA5-Land data...")
         self.mask_zero_values(threshold=1e-10)
-        # Load raw static datasets (only once)
-        if not hasattr(self, "_static_raw_loaded") or not self._static_raw_loaded:
-            print("\nLoading raw static datasets...")
+        # Load raw static datasets (reload when year changes for year-dependent PFT)
+        if (
+            not hasattr(self, "_static_raw_loaded")
+            or not self._static_raw_loaded
+            or getattr(self, "_static_year", None) != year
+        ):
+            print(f"\nLoading raw static datasets for year {year}...")
             self.load_static_datasets(year, shapefile=shapefile)
             self._static_raw_loaded = True
+            self._static_year = year
 
         # Load raw LAI data
         self.load_lai_data_raw(year, month, day, shapefile=shapefile)
@@ -3094,28 +3290,55 @@ class ERA5LandGEEProcessor:
                     print("Could not identify u and v component variables")
             except Exception as e:
                 print(f"Error calculating wind speed: {str(e)}")
+                import traceback
+
                 traceback.print_exc()
 
-        # Calculate wind_speed_min/max if min/max components are available
-        # (Parity with CDS: ws_min = sqrt(u_min²+v_min²), ws_max = sqrt(u_max²+v_max²))
-        for stat_suffix, stat_label in [("_min", "min"), ("_max", "max")]:
-            u_key = f"10m_u_component_of_wind{stat_suffix}"
-            v_key = f"10m_v_component_of_wind{stat_suffix}"
-            if u_key in self.datasets and v_key in self.datasets:
-                try:
-                    u_stat = self.datasets[u_key]
-                    v_stat = self.datasets[v_key]
-                    u_var_s = list(u_stat.data_vars)[0]
-                    v_var_s = list(v_stat.data_vars)[0]
-                    ws_stat = np.sqrt(u_stat[u_var_s] ** 2 + v_stat[v_var_s] ** 2)
-                    ws_ds = xr.Dataset(
-                        data_vars={f"wind_speed_{stat_label}": ws_stat},
-                        coords=u_stat.coords,
-                    )
-                    self.datasets[f"wind_speed_{stat_label}"] = ws_ds
-                    print(f"Wind speed {stat_label} calculated successfully")
-                except Exception as e:
-                    print(f"Error calculating wind speed {stat_label}: {e}")
+        # ============================================================
+        # Fix 1.2C: Compute wind speed min/max from u/v component extremes
+        # NOTE: This is an APPROXIMATION. Daily u_min and v_min are temporally
+        # independent (they occur at different hours). sqrt(u_min²+v_min²) gives
+        # a LOWER BOUND that may OVERESTIMATE the true daily minimum wind speed.
+        # Similarly, sqrt(u_max²+v_max²) gives an UPPER BOUND. The training
+        # pipeline computes ws=sqrt(u²+v²) hourly then takes min/max, which is
+        # exact. This approximation is consistent with how other gridded products
+        # handle daily wind speed extremes from component aggregates.
+        # ============================================================
+        if "10m_u_component_of_wind_max" in self.datasets and "10m_v_component_of_wind_max" in self.datasets:
+            print("Calculating wind speed max...")
+            try:
+                u_max_ds = self.datasets["10m_u_component_of_wind_max"]
+                v_max_ds = self.datasets["10m_v_component_of_wind_max"]
+                u_max_var = list(u_max_ds.data_vars)[0]
+                v_max_var = list(v_max_ds.data_vars)[0]
+                ws_max = np.sqrt(u_max_ds[u_max_var].values ** 2 + v_max_ds[v_max_var].values ** 2)
+                ws_max_ds = xr.Dataset(
+                    data_vars={"wind_speed_max": (u_max_ds[u_max_var].dims, ws_max)},
+                    coords=u_max_ds.coords,
+                    attrs={"units": "m s-1", "long_name": "Maximum wind speed at 10m"},
+                )
+                self.datasets["wind_speed_max"] = ws_max_ds
+                print("Wind speed max calculated successfully")
+            except Exception as e:
+                print(f"Error calculating wind speed max: {e}")
+
+        if "10m_u_component_of_wind_min" in self.datasets and "10m_v_component_of_wind_min" in self.datasets:
+            print("Calculating wind speed min...")
+            try:
+                u_min_ds = self.datasets["10m_u_component_of_wind_min"]
+                v_min_ds = self.datasets["10m_v_component_of_wind_min"]
+                u_min_var = list(u_min_ds.data_vars)[0]
+                v_min_var = list(v_min_ds.data_vars)[0]
+                ws_min = np.sqrt(u_min_ds[u_min_var].values ** 2 + v_min_ds[v_min_var].values ** 2)
+                ws_min_ds = xr.Dataset(
+                    data_vars={"wind_speed_min": (u_min_ds[u_min_var].dims, ws_min)},
+                    coords=u_min_ds.coords,
+                    attrs={"units": "m s-1", "long_name": "Minimum wind speed at 10m"},
+                )
+                self.datasets["wind_speed_min"] = ws_min_ds
+                print("Wind speed min calculated successfully")
+            except Exception as e:
+                print(f"Error calculating wind speed min: {e}")
 
         # Calculate VPD if temperature and dewpoint are available
         if "temperature_2m" in self.datasets and "dewpoint_temperature_2m" in self.datasets:
@@ -3157,7 +3380,7 @@ class ERA5LandGEEProcessor:
                             ea = 6.1078 * np.exp((17.269 * td_c) / (237.3 + td_c))
 
                             # Apply validation check: ensure VPD is never negative
-                            # Convert hPa → kPa to match model training units
+                            # Fix 1.4: Convert hPa to kPa (divide by 10) to match training data
                             vpd_slice = np.maximum(es - ea, 0.0) / 10.0
 
                             # Store results and time
@@ -3195,7 +3418,7 @@ class ERA5LandGEEProcessor:
                         ea = 6.1078 * np.exp((17.269 * td_c) / (237.3 + td_c))
 
                         # Apply validation check: ensure VPD is never negative
-                        # Convert hPa → kPa to match model training units
+                        # Fix 1.4: Convert hPa to kPa to match training data
                         vpd = np.maximum(es - ea, 0.0) / 10.0
 
                         # Create a new dataset with the VPD variable
@@ -3208,41 +3431,139 @@ class ERA5LandGEEProcessor:
                         vpd_ds["vpd"].attrs["long_name"] = "Vapor Pressure Deficit"
 
                         self.datasets["vpd"] = vpd_ds
-                        print("VPD calculated successfully using ClimateDataCalculator approach (kPa)")
+                        print("VPD calculated successfully using ClimateDataCalculator approach")
                 else:
                     print("Could not identify temperature variables")
             except Exception as e:
                 print(f"Error calculating VPD: {str(e)}")
+                import traceback
+
                 traceback.print_exc()
 
-        # Calculate VPD min/max if min/max temperature and dewpoint are available
-        # Parity with CDS: vpd_max = vpd(ta_max, td_min), vpd_min = vpd(ta_min, td_max)
-        vpd_cross = [
-            ("temperature_2m_max", "dewpoint_temperature_2m_min", "vpd_max"),
-            ("temperature_2m_min", "dewpoint_temperature_2m_max", "vpd_min"),
-        ]
-        for t_key, td_key, vpd_name in vpd_cross:
-            if t_key in self.datasets and td_key in self.datasets:
-                try:
-                    t_ds_x = self.datasets[t_key]
-                    td_ds_x = self.datasets[td_key]
-                    t_var_x = list(t_ds_x.data_vars)[0]
-                    td_var_x = list(td_ds_x.data_vars)[0]
-                    t_c_x = t_ds_x[t_var_x].values - 273.15
-                    td_c_x = td_ds_x[td_var_x].values - 273.15
-                    td_c_x = np.minimum(td_c_x, t_c_x)
-                    es_x = 6.1078 * np.exp((17.269 * t_c_x) / (237.3 + t_c_x))
-                    ea_x = 6.1078 * np.exp((17.269 * td_c_x) / (237.3 + td_c_x))
-                    vpd_val = np.maximum(es_x - ea_x, 0.0) / 10.0  # kPa
-                    vpd_ds_x = xr.Dataset(
-                        data_vars={vpd_name: (t_ds_x[t_var_x].dims, vpd_val)},
-                        coords=t_ds_x.coords,
+        # ============================================================
+        # Fix 1.2B: Compute VPD min/max from temperature/dewpoint extremes
+        # vpd_max = VPD(ta_max, td_min) — hottest + driest moment
+        # vpd_min = VPD(ta_min, td_max) — coolest + most humid moment
+        # ============================================================
+        if "temperature_2m_max" in self.datasets and "dewpoint_temperature_2m_min" in self.datasets:
+            print("Calculating VPD max (from ta_max, td_min)...")
+            try:
+                t_max_ds = self.datasets["temperature_2m_max"]
+                td_min_ds = self.datasets["dewpoint_temperature_2m_min"]
+                t_max_var = list(t_max_ds.data_vars)[0]
+                td_min_var = list(td_min_ds.data_vars)[0]
+
+                t_max_c = t_max_ds[t_max_var].values - 273.15
+                td_min_c = td_min_ds[td_min_var].values - 273.15
+                td_min_c = np.minimum(td_min_c, t_max_c)  # physical: Td ≤ T
+
+                es = 6.1078 * np.exp((17.269 * t_max_c) / (237.3 + t_max_c))
+                ea = 6.1078 * np.exp((17.269 * td_min_c) / (237.3 + td_min_c))
+                vpd_max_vals = np.maximum(es - ea, 0.0) / 10.0  # hPa → kPa
+
+                vpd_max_ds = xr.Dataset(
+                    data_vars={"vpd_max": (t_max_ds[t_max_var].dims, vpd_max_vals)},
+                    coords=t_max_ds.coords,
+                    attrs={"units": "kPa", "long_name": "Maximum Vapor Pressure Deficit"},
+                )
+                self.datasets["vpd_max"] = vpd_max_ds
+                print("VPD max calculated successfully (kPa)")
+            except Exception as e:
+                print(f"Error calculating VPD max: {e}")
+
+        if "temperature_2m_min" in self.datasets and "dewpoint_temperature_2m_max" in self.datasets:
+            print("Calculating VPD min (from ta_min, td_max)...")
+            try:
+                t_min_ds = self.datasets["temperature_2m_min"]
+                td_max_ds = self.datasets["dewpoint_temperature_2m_max"]
+                t_min_var = list(t_min_ds.data_vars)[0]
+                td_max_var = list(td_max_ds.data_vars)[0]
+
+                t_min_c = t_min_ds[t_min_var].values - 273.15
+                td_max_c = td_max_ds[td_max_var].values - 273.15
+                td_max_c = np.minimum(td_max_c, t_min_c)  # physical: Td ≤ T
+
+                es = 6.1078 * np.exp((17.269 * t_min_c) / (237.3 + t_min_c))
+                ea = 6.1078 * np.exp((17.269 * td_max_c) / (237.3 + td_max_c))
+                vpd_min_vals = np.maximum(es - ea, 0.0) / 10.0  # hPa → kPa
+
+                vpd_min_ds = xr.Dataset(
+                    data_vars={"vpd_min": (t_min_ds[t_min_var].dims, vpd_min_vals)},
+                    coords=t_min_ds.coords,
+                    attrs={"units": "kPa", "long_name": "Minimum Vapor Pressure Deficit"},
+                )
+                self.datasets["vpd_min"] = vpd_min_ds
+                print("VPD min calculated successfully (kPa)")
+            except Exception as e:
+                print(f"Error calculating VPD min: {e}")
+
+        # ============================================================
+        # Fix 1.2E: Rename ta_min/ta_max from Kelvin to Celsius
+        # These are loaded directly from GEE in Kelvin; convert now
+        # ============================================================
+        for ta_var in ["temperature_2m_min", "temperature_2m_max"]:
+            if ta_var in self.datasets:
+                ds = self.datasets[ta_var]
+                dv = list(ds.data_vars)[0]
+                # Idempotency guard: only convert if still in Kelvin
+                if ds[dv].attrs.get("units", "K") != "°C":
+                    ds[dv].values[:] = ds[dv].values - 273.15
+                    ds[dv].attrs["units"] = "°C"
+
+        # ============================================================
+        # Fix 1.2D: Compute day_length from latitude and day of year
+        # Uses CBM model: day_length = f(latitude, declination)
+        # ============================================================
+        if self.datasets:
+            print("Calculating day length...")
+            try:
+                ref_ds = next(iter(self.datasets.values()))
+                ref_var = list(ref_ds.data_vars)[0]
+                lat_name = [d for d in ref_ds.dims if d.lower() in ("latitude", "lat")][0]
+                lon_name = [d for d in ref_ds.dims if d.lower() in ("longitude", "lon")][0]
+                lat_vals = ref_ds[lat_name].values
+                lon_vals = ref_ds[lon_name].values
+
+                if "time" in ref_ds.dims:
+                    times = ref_ds.coords["time"].values
+                    day_length_array = np.zeros((len(times), len(lat_vals), len(lon_vals)), dtype=np.float32)
+                    for t_idx, t in enumerate(times):
+                        ts = pd.Timestamp(t)
+                        doy = ts.dayofyear
+                        days_in_year = 366 if ts.is_leap_year else 365
+                        lat_rad = np.deg2rad(lat_vals)
+                        declination = 0.4093 * np.sin(2 * np.pi * (doy - 81) / days_in_year)
+                        cos_ha = -np.tan(lat_rad) * np.tan(declination)
+                        cos_ha = np.clip(cos_ha, -1, 1)
+                        dl = 2 * np.arccos(cos_ha) * 12 / np.pi  # hours
+                        day_length_array[t_idx, :, :] = dl[:, np.newaxis]  # broadcast to lon
+
+                    dl_ds = xr.Dataset(
+                        data_vars={"day_length": (["time", lat_name, lon_name], day_length_array)},
+                        coords={"time": times, lat_name: lat_vals, lon_name: lon_vals},
+                        attrs={"units": "hours", "long_name": "Day length"},
                     )
-                    vpd_ds_x[vpd_name].attrs["units"] = "kPa"
-                    self.datasets[vpd_name] = vpd_ds_x
-                    print(f"{vpd_name} calculated successfully (kPa)")
-                except Exception as e:
-                    print(f"Error calculating {vpd_name}: {e}")
+                else:
+                    # Single timestep — use Jan 1 as default
+                    doy = 1
+                    lat_rad = np.deg2rad(lat_vals)
+                    declination = 0.4093 * np.sin(2 * np.pi * (doy - 81) / 365)
+                    cos_ha = np.clip(-np.tan(lat_rad) * np.tan(declination), -1, 1)
+                    dl = 2 * np.arccos(cos_ha) * 12 / np.pi
+                    dl_2d = dl[:, np.newaxis] * np.ones((1, len(lon_vals)))
+                    dl_ds = xr.Dataset(
+                        data_vars={"day_length": ([lat_name, lon_name], dl_2d.astype(np.float32))},
+                        coords={lat_name: lat_vals, lon_name: lon_vals},
+                        attrs={"units": "hours", "long_name": "Day length"},
+                    )
+
+                self.datasets["day_length"] = dl_ds
+                print("Day length calculated successfully")
+            except Exception as e:
+                print(f"Error calculating day length: {e}")
+                import traceback
+
+                traceback.print_exc()
 
         # Calculate Precipitation / PET ratio if both are available
         if "total_precipitation" in self.datasets and "potential_evaporation" in self.datasets:
@@ -3267,11 +3588,11 @@ class ERA5LandGEEProcessor:
                     }
 
                     for t_idx in range(len(times)):
-                        precip_slice = np.abs(precip_ds[precip_var].isel(time=t_idx).values)
+                        precip_slice = precip_ds[precip_var].isel(time=t_idx).values
                         pet_slice = pet_ds[pet_var].isel(time=t_idx).values
 
                         # PET from ERA5 is negative (evaporation is loss)
-                        # Both precip and PET use abs() to match CDS convention
+                        # Convert to positive values
                         pet_slice = np.abs(pet_slice)
 
                         # Avoid division by zero
@@ -3297,24 +3618,6 @@ class ERA5LandGEEProcessor:
 
                     self.datasets["precip_pet_ratio"] = precip_pet_ds
                     print("Precipitation/PET ratio calculated successfully")
-
-                    # Also create precip_mm (meters → mm) for parity with CDS output
-                    precip_mm_chunks = []
-                    for t_idx in range(len(times)):
-                        p_slice = np.abs(precip_ds[precip_var].isel(time=t_idx).values) * 1000.0
-                        precip_mm_chunks.append(p_slice)
-                    precip_mm_array = np.stack(precip_mm_chunks)
-                    precip_mm_da = xr.DataArray(
-                        precip_mm_array,
-                        dims=["time", lat_var, lon_var],
-                        coords=chunk_coords,
-                        name="precip_mm",
-                    )
-                    precip_mm_ds = precip_mm_da.to_dataset()
-                    precip_mm_ds["precip_mm"].attrs["units"] = "mm"
-                    precip_mm_ds["precip_mm"].attrs["long_name"] = "Total precipitation"
-                    self.datasets["precip_mm"] = precip_mm_ds
-                    print("Precipitation (mm) calculated successfully")
 
             except Exception as e:
                 print(f"Error calculating precipitation/PET ratio: {str(e)}")
@@ -3501,6 +3804,8 @@ class ERA5LandGEEProcessor:
                             # CONVERT J/m² TO W/m² (NON-ACCUMULATED DATA)
                             # ============================================================
                             if self.time_scale == "daily":
+                                # Fix 1.6: Daily sum J/m2 / 86400s = daily mean W/m2
+                                # This is consistent with training data's sw_in (daily mean irradiance)
                                 dt_seconds = 86400.0
                             elif self.time_scale == "hourly":
                                 dt_seconds = 3600.0
@@ -3555,13 +3860,12 @@ class ERA5LandGEEProcessor:
                                     # Get day of year
                                     timestamp = pd.Timestamp(times[t_idx])
                                     doy = timestamp.dayofyear
-                                    days_in_year = 366.0 if calendar.isleap(timestamp.year) else 365.0
 
                                     # ----- Earth-Sun distance correction (dr) -----
-                                    dr = 1 + 0.033 * np.cos(2 * np.pi * doy / days_in_year)
+                                    dr = 1 + 0.033 * np.cos(2 * np.pi * doy / 365)
 
                                     # ----- Solar declination (Spencer's formula) -----
-                                    day_angle = 2 * np.pi * (doy - 1) / days_in_year
+                                    day_angle = 2 * np.pi * (doy - 1) / 365
                                     declination = (
                                         0.006918
                                         - 0.399912 * np.cos(day_angle)
@@ -3914,45 +4218,6 @@ class ERA5LandGEEProcessor:
                             print(f"  PPFD range: [{valid_ppfd.min():.1f}, {valid_ppfd.max():.1f}] μmol/m²/s")
                         if len(valid_ext) > 0:
                             print(f"  ext_rad range: [{valid_ext.min():.1f}, {valid_ext.max():.1f}] W/m²")
-
-                        # ============================================================
-                        # DAY LENGTH (CBM model — matches CDS compute_day_length)
-                        # ============================================================
-                        if self.time_scale == "daily":
-                            print("Calculating day length using CBM model...")
-                            try:
-                                day_length_array = np.zeros((len(times), num_lats, num_lons), dtype=np.float32)
-
-                                for t_idx in range(len(times)):
-                                    timestamp = pd.Timestamp(times[t_idx])
-                                    doy = timestamp.dayofyear
-                                    year = timestamp.year
-                                    days_in_yr = 366 if calendar.isleap(year) else 365
-
-                                    lat_rad_dl = np.deg2rad(lat_values)
-                                    decl_dl = 0.4093 * np.sin(2.0 * np.pi * (doy - 81) / days_in_yr)
-                                    cos_ha = np.clip(-np.tan(lat_rad_dl) * np.tan(decl_dl), -1, 1)
-                                    dl_hours = 2.0 * np.arccos(cos_ha) * 12.0 / np.pi  # hours
-
-                                    # Broadcast to (lat, lon) — day length only varies with latitude
-                                    day_length_array[t_idx, :, :] = dl_hours[:, np.newaxis]
-
-                                day_length_da = xr.DataArray(
-                                    day_length_array,
-                                    dims=["time", lat_var, lon_var],
-                                    coords=chunk_coords,
-                                    name="day_length",
-                                )
-                                day_length_ds = day_length_da.to_dataset()
-                                day_length_ds["day_length"].attrs["units"] = "hours"
-                                day_length_ds["day_length"].attrs["long_name"] = "Day Length (CBM model)"
-                                self.datasets["day_length"] = day_length_ds
-                                print(
-                                    f"  Day length range: [{day_length_array.min():.1f}, {day_length_array.max():.1f}] hours"
-                                )
-                            except Exception as dl_err:
-                                print(f"Error calculating day length: {dl_err}")
-                                traceback.print_exc()
 
                     else:
                         # ============================================================
@@ -4399,25 +4664,14 @@ class ERA5LandGEEProcessor:
             xmin, ymax = transform * (0, 0)
             xmax, ymin = transform * (width, height)
 
-            # Normalize raster extent longitudes to [-180, 180]
-            xmin_norm = ((xmin + 180.0) % 360.0) - 180.0
-            xmax_norm = ((xmax + 180.0) % 360.0) - 180.0
-
             print(f"    Raster extent: lon=[{xmin:.4f}, {xmax:.4f}], lat=[{ymin:.4f}, {ymax:.4f}]")
-            if xmin_norm != xmin or xmax_norm != xmax:
-                print(f"    Normalised lon: [{xmin_norm:.4f}, {xmax_norm:.4f}]")
             print(
                 f"    Query points: lon=[{lons.min():.4f}, {lons.max():.4f}], lat=[{lats.min():.4f}, {lats.max():.4f}]"
             )
 
-            # Check for overlap (use normalised lon; skip lon check if raster
-            # spans the full globe, i.e. xmin_norm > xmax_norm after wrapping)
-            raster_spans_globe = (xmax - xmin) >= 359.0 or xmin_norm > xmax_norm
-            if not raster_spans_globe and (lons.max() < xmin_norm or lons.min() > xmax_norm):
+            # Check for overlap
+            if lons.max() < xmin or lons.min() > xmax or lats.max() < ymin or lats.min() > ymax:
                 print("    WARNING: No overlap between raster and query points!")
-                return values[0] if single_point else values
-            if lats.max() < ymin or lats.min() > ymax:
-                print("    WARNING: No overlap between raster and query points (latitude)!")
                 return values[0] if single_point else values
 
             # Create a regular grid of pixel center coordinates (SAME AS CLIMATE DATA)
@@ -4430,10 +4684,6 @@ class ERA5LandGEEProcessor:
 
             for r in range(height):
                 _, pixel_lats[r] = transform * (0, r + 0.5)
-
-            # Normalize longitudes to [-180, 180] — GEE may return wrapped
-            # coordinates (e.g. 180–540) for near-global extents
-            pixel_lons = ((pixel_lons + 180.0) % 360.0) - 180.0
 
             # Create full coordinate grids using meshgrid
             lon_grid, lat_grid = np.meshgrid(pixel_lons, pixel_lats)
@@ -4554,7 +4804,7 @@ class ERA5LandGEEProcessor:
                 resampled_temp,
                 dims=["latitude", "longitude"],
                 coords={"latitude": target_lat, "longitude": target_lon},
-                name="annual_mean_temperature",
+                name="mean_annual_temp",
             )
 
             resampled_precip_da = xr.DataArray(
@@ -4637,14 +4887,11 @@ class ERA5LandGEEProcessor:
 
         # ========== ELEVATION ==========
         if self.elevation_raw is not None:
-            print("\n--- Resampling ELEVATION using climate data approach ---")
-            elev_values = self.get_raster_at_location_direct(
-                flat_lons,
-                flat_lats,
-                self.elevation_raw,
-                max_distance=0.05,
+            print("\n--- Resampling ELEVATION using rasterio ---")
+            elev_grid = resample_raster_to_grid(
+                self.elevation_raw, target_lats, target_lons,
+                categorical=False,
             )
-            elev_grid = elev_values.reshape(len(target_lats), len(target_lons))
 
             self.elevation_data = xr.DataArray(
                 elev_grid,
@@ -4657,26 +4904,20 @@ class ERA5LandGEEProcessor:
             resampled["elevation"] = self.elevation_data
 
             valid_elev = elev_grid[~np.isnan(elev_grid)]
-            if len(valid_elev) > 0:
-                print(
-                    f"  RESULT: shape={elev_grid.shape}, range=[{valid_elev.min():.1f}, {valid_elev.max():.1f}] m, "
-                    f"unique={len(np.unique(valid_elev))}"
-                )
-            else:
-                print(f"  RESULT: shape={elev_grid.shape}, all NaN (no valid data)")
+            print(
+                f"  RESULT: shape={elev_grid.shape}, range=[{valid_elev.min():.1f}, {valid_elev.max():.1f}] m, "
+                f"unique={len(np.unique(valid_elev))}"
+            )
         else:
             print("\n--- ELEVATION: Raw data not available, skipping ---")
 
         # ========== PFT ==========
         if self.pft_raw is not None:
-            print("\n--- Resampling PFT using climate data approach ---")
-            pft_values = self.get_raster_at_location_direct(
-                flat_lons,
-                flat_lats,
-                self.pft_raw,
-                max_distance=0.05,
+            print("\n--- Resampling PFT using rasterio (mode) ---")
+            pft_grid = resample_raster_to_grid(
+                self.pft_raw, target_lats, target_lons,
+                categorical=True,
             )
-            pft_grid = pft_values.reshape(len(target_lats), len(target_lons))
 
             self.pft_data = xr.DataArray(
                 pft_grid.astype(int),
@@ -4696,14 +4937,11 @@ class ERA5LandGEEProcessor:
 
         # ========== CANOPY HEIGHT ==========
         if self.canopy_height_raw is not None:
-            print("\n--- Resampling CANOPY HEIGHT using climate data approach ---")
-            ch_values = self.get_raster_at_location_direct(
-                flat_lons,
-                flat_lats,
-                self.canopy_height_raw,
-                max_distance=0.05,
+            print("\n--- Resampling CANOPY HEIGHT using rasterio ---")
+            ch_grid = resample_raster_to_grid(
+                self.canopy_height_raw, target_lats, target_lons,
+                categorical=False,
             )
-            ch_grid = ch_values.reshape(len(target_lats), len(target_lons))
 
             self.canopy_height_data = xr.DataArray(
                 ch_grid,
@@ -4728,7 +4966,7 @@ class ERA5LandGEEProcessor:
 
         # ========== LAI ==========
         if self.lai_raw is not None:
-            print("\n--- Resampling LAI using climate data approach ---")
+            print("\n--- Resampling LAI using rasterio ---")
             lai_data = self.lai_raw["data"]  # Shape: (n_times, height, width)
             lai_times = self.lai_raw["times"]
             n_lai_times = len(lai_times)
@@ -4744,14 +4982,14 @@ class ERA5LandGEEProcessor:
                     "transform": self.lai_raw["transform"],
                     "nodata": self.lai_raw.get("nodata"),
                 }
-
+                
                 if t_idx == 0:
                     print(f"  Processing LAI time slice {t_idx} ({lai_times[t_idx]}):")
-
-                lai_values = self.get_raster_at_location_direct(
-                    flat_lons, flat_lats, lai_slice_dict, max_distance=0.05, default_value=np.nan
+                
+                lai_grid = resample_raster_to_grid(
+                    lai_slice_dict, target_lats, target_lons,
+                    categorical=False,
                 )
-                lai_grid = lai_values.reshape(len(target_lats), len(target_lons))
                 lai_resampled_times.append(lai_grid)
 
                 if t_idx == 0:
@@ -4966,6 +5204,8 @@ class ERA5LandGEEProcessor:
             values = pd.DatetimeIndex(timestamps.values)
             standardized = self.standardize_timestamps(values, use_utc)
             return type(timestamps)(standardized)
+
+        return timestamps  # Return unchanged if not recognized type
 
         return timestamps  # Return unchanged if not recognized type
 
@@ -5491,8 +5731,12 @@ class ERA5LandGEEProcessor:
                         if time_feature_config and isinstance(point_df.index, pd.DatetimeIndex):
                             point_df = self.add_time_features(point_df)
 
-                        # Reset index
-                        point_df = point_df.reset_index()
+                        # Reset index only if timestamp is still in the index
+                        # (add_time_features may have already reset it)
+                        if isinstance(point_df.index, pd.DatetimeIndex):
+                            point_df = point_df.reset_index()
+                        elif "timestamp" not in point_df.columns:
+                            point_df = point_df.reset_index()
                         all_data.append(point_df)
 
                         print(f"  Created DataFrame with {len(point_df)} rows, columns: {point_df.columns.tolist()}")
@@ -5585,30 +5829,29 @@ class ERA5LandGEEProcessor:
                 and self.precip_climate_data is not None
             ):
                 try:
-                    # Use the reference coordinates to create the meshgrid
-                    lon_grid, lat_grid = np.meshgrid(ref_lons, ref_lats)
-                    flat_lons, flat_lats = lon_grid.flatten(), lat_grid.flatten()
-                    print(f"Getting climate data for {len(flat_lons)} grid points...")
-
-                    temps_flat, precips_flat = self.get_climate_at_location_direct(
-                        flat_lons, flat_lats, self.temp_climate_data, self.precip_climate_data
+                    # Resample climate data using rasterio
+                    print(f"Resampling climate data to {len(ref_lats)}x{len(ref_lons)} grid using rasterio...")
+                    temp_grid = resample_raster_to_grid(
+                        self.temp_climate_data, ref_lats, ref_lons,
+                        categorical=False,
                     )
-                    # Reshape back to grid matching reference lat/lon order
-                    temp_grid = temps_flat.reshape(len(ref_lats), len(ref_lons))
-                    precip_grid = precips_flat.reshape(len(ref_lats), len(ref_lons))
+                    precip_grid = resample_raster_to_grid(
+                        self.precip_climate_data, ref_lats, ref_lons,
+                        categorical=False,
+                    )
 
                     # Create DataArrays using reference coordinates
                     temp_grid_da = xr.DataArray(
                         temp_grid,
                         dims=[final_lat_coord_name, final_lon_coord_name],
                         coords={final_lat_coord_name: ref_lats, final_lon_coord_name: ref_lons},
-                        name="annual_mean_temperature",
+                        name="mean_annual_temp",
                     )
                     precip_grid_da = xr.DataArray(
                         precip_grid,
                         dims=[final_lat_coord_name, final_lon_coord_name],
                         coords={final_lat_coord_name: ref_lats, final_lon_coord_name: ref_lons},
-                        name="annual_precipitation",
+                        name="mean_annual_precip",
                     )
                     print("Successfully created climate DataArrays aligned with reference grid.")
 
@@ -5767,8 +6010,8 @@ class ERA5LandGEEProcessor:
                 print("Adding climate data to merged dataset...")
                 try:
                     # Climate DAs were already created using reference coords, should align
-                    merged_ds["annual_mean_temperature"] = temp_grid_da
-                    merged_ds["annual_precipitation"] = precip_grid_da
+                    merged_ds["mean_annual_temp"] = temp_grid_da
+                    merged_ds["mean_annual_precip"] = precip_grid_da
                 except Exception as climate_add_err:
                     print(f"Warning: Error adding climate data after merge: {climate_add_err}")
                     traceback.print_exc()
@@ -5820,18 +6063,12 @@ class ERA5LandGEEProcessor:
                 try:
                     print(f"  Processing {var_name}...")
 
-                    # Create meshgrid from merged dataset coordinates (SAME AS CLIMATE DATA APPROACH)
-                    lon_grid, lat_grid = np.meshgrid(merged_lons, merged_lats)
-                    flat_lons = lon_grid.flatten()
-                    flat_lats = lat_grid.flatten()
-
-                    # Use the same lookup method as climate data
-                    values = self.get_raster_at_location_direct(
-                        flat_lons, flat_lats, raw_data_dict, max_distance=0.05, default_value=default_value
+                    # Resample using rasterio (replaces KD-tree)
+                    values_grid = resample_raster_to_grid(
+                        raw_data_dict, merged_lats, merged_lons,
+                        categorical=is_categorical,
+                        nodata_value=default_value,
                     )
-
-                    # Reshape to grid
-                    values_grid = values.reshape(n_lats, n_lons)
 
                     if is_categorical:
                         values_grid = np.nan_to_num(values_grid, nan=default_value).astype(int)
@@ -5913,26 +6150,19 @@ class ERA5LandGEEProcessor:
 
                     print(f"    LAI has {n_lai_times} time slices")
 
-                    # Create meshgrid from merged dataset coordinates
-                    lon_grid, lat_grid = np.meshgrid(merged_lons, merged_lats)
-                    flat_lons = lon_grid.flatten()
-                    flat_lats = lat_grid.flatten()
-
-                    # Resample each LAI time slice spatially
+                    # Resample each LAI time slice spatially using rasterio
                     lai_resampled_times = []
                     for t_idx in range(n_lai_times):
-                        # Create temporary dict for this time slice
                         lai_slice_dict = {
                             "data": lai_data[t_idx],
                             "transform": lai_raw_dict["transform"],
                             "nodata": lai_raw_dict.get("nodata", np.nan),
                         }
 
-                        # Use same lookup method as climate data
-                        lai_values = self.get_raster_at_location_direct(
-                            flat_lons, flat_lats, lai_slice_dict, max_distance=0.05, default_value=np.nan
+                        lai_grid = resample_raster_to_grid(
+                            lai_slice_dict, merged_lats, merged_lons,
+                            categorical=False,
                         )
-                        lai_grid = lai_values.reshape(n_lats, n_lons)
                         lai_resampled_times.append(lai_grid)
 
                         # Debug first slice
@@ -6099,10 +6329,10 @@ class ERA5LandGEEProcessor:
             final_expected_vars = []
             checked_var = []
             # Add climate variables
-            if "annual_mean_temperature" in merged_ds.data_vars:
-                final_expected_vars.append("annual_mean_temperature")
-            if "annual_precipitation" in merged_ds.data_vars:
-                final_expected_vars.append("annual_precipitation")
+            if "mean_annual_temp" in merged_ds.data_vars:
+                final_expected_vars.append("mean_annual_temp")
+            if "mean_annual_precip" in merged_ds.data_vars:
+                final_expected_vars.append("mean_annual_precip")
 
             # Add static variables that were successfully added
             for static_var in static_vars_added:
@@ -6205,6 +6435,17 @@ class ERA5LandGEEProcessor:
                 # ... (fallback logic as in original code if needed, but should be less necessary) ...
                 return None
 
+
+            # --- 9b. Drop rows with any NaN (ocean / non-forest masked pixels) ---
+            rows_before = len(final_df)
+            feature_cols = [c for c in final_df.columns if c not in [final_time_coord_name, final_lat_coord_name, final_lon_coord_name]]
+            final_df = final_df.dropna(subset=feature_cols, how='any')
+            rows_after = len(final_df)
+            # Drop rows with negative elevation (SRTM no-data sentinel)
+            if "elevation" in final_df.columns:
+                final_df = final_df[final_df["elevation"] >= 0]
+            print(f'Dropped {rows_before - rows_after} NaN rows ({100*(rows_before - rows_after)/rows_before:.1f}%). Remaining: {rows_after} rows.')
+
             # --- 10. Add Time Features (if configured) ---
             time_feature_config = getattr(config, "TIME_FEATURES", True)
 
@@ -6289,6 +6530,16 @@ class ERA5LandGEEProcessor:
                 print(
                     f"PFT encoding complete. Created {len(target_pft_classes)} columns: {[f'{v}' for v in target_pft_classes.values()]}"
                 )
+            # --- 12b. Remove non-forest rows (PFT sum != 1) ---
+            pft_cols = ['ENF', 'EBF', 'DNF', 'DBF', 'MF', 'WSA', 'SAV', 'WET']
+            existing_pft = [c for c in pft_cols if c in final_df.columns]
+            if existing_pft:
+                pft_sum = final_df[existing_pft].sum(axis=1)
+                rows_before_pft = len(final_df)
+                final_df = final_df[pft_sum == 1]
+                rows_after_pft = len(final_df)
+                print(f'PFT filter: dropped {rows_before_pft - rows_after_pft} non-forest rows (PFT sum != 1). Remaining: {rows_after_pft} rows.')
+
             # --- 13. Final Checks and Return ---
             end_grid_proc_time = time.time()
             print(f"\nFinished creating grid dataset in {end_grid_proc_time - start_grid_proc_time:.2f} seconds.")
@@ -6312,33 +6563,8 @@ class ERA5LandGEEProcessor:
             else:
                 print("\nNo NaN values found in the final DataFrame.")
 
-            # Drop rows where key ERA5 variables are all-NaN (ocean / missing)
-            # Matches CDS _process_daily() dropna strategy
-            dropna_cols = [c for c in ["ta", "sw_in", "volumetric_soil_water_layer_1"] if c in final_df.columns]
-            if dropna_cols:
-                before_drop = len(final_df)
-                final_df.dropna(subset=dropna_cols, inplace=True)
-                dropped = before_drop - len(final_df)
-                if dropped > 0:
-                    print(f"Dropped {dropped} NaN rows (ocean/missing) using subset={dropna_cols}")
-
-            # Filter to forest-only rows (PFT sum >= 1)
-            # Non-forest cells (all PFT one-hot == 0) are outside the model's
-            # training domain (SAPFLUXNET sites are all forest) and produce
-            # unreliable predictions.
-            pft_one_hot_cols = [
-                c for c in ["ENF", "EBF", "DNF", "DBF", "MF", "WSA", "SAV", "WET"] if c in final_df.columns
-            ]
-            if pft_one_hot_cols:
-                pft_sum = final_df[pft_one_hot_cols].sum(axis=1)
-                before_pft = len(final_df)
-                final_df = final_df[pft_sum >= 1].copy()
-                pft_dropped = before_pft - len(final_df)
-                if pft_dropped > 0:
-                    print(f"Dropped {pft_dropped} non-forest rows (PFT sum==0, {pft_dropped / before_pft * 100:.1f}%)")
-
             print(f"\nCreated prediction dataset with {len(final_df)} rows and {len(final_df.columns)} columns.")
-            print(f"Final columns: {final_df.columns.tolist()}")
+            print(f"Final columns: {final_df.columns.tolist()}")  # Print final columns for verification
 
             # For grid, return the single combined DataFrame
             return final_df
@@ -6360,7 +6586,7 @@ class ERA5LandGEEProcessor:
             Path(s) to the saved file(s)
         """
         if output_path is None:
-            output_path = config.PREDICTION_DIR / f"prediction_dataset_{int(time.time())}.csv"
+            output_path = config.PREDICTION_DIR / f"prediction_dataset_{int(time.time())}{self.output_ext}"
 
         output_path = Path(output_path)
         output_path.parent.mkdir(exist_ok=True, parents=True)
@@ -6369,14 +6595,14 @@ class ERA5LandGEEProcessor:
             # Multiple DataFrames (points)
             saved_paths = []
             for i, single_df in enumerate(df):
+                single_df = single_df.copy()  # avoid mutating caller's data
                 name = single_df.get("name", f"point_{i}").iloc[0] if "name" in single_df.columns else f"point_{i}"
                 file_path = output_path.parent / f"{output_path.stem}_{name}{output_path.suffix}"
-                single_df["ta"] = single_df["ta"] - 273.15  # Convert to Celsius
-                single_df["td"] = single_df["td"] - 273.15  # Convert to Celsius
-                for temp_col in ["ta_min", "ta_max", "soil_temperature_level_1"]:
-                    if temp_col in single_df.columns:
-                        single_df[temp_col] = single_df[temp_col] - 273.15
-                single_df.to_csv(file_path, index_label="timestamp")
+                if "ta" in single_df.columns:
+                    single_df["ta"] = single_df["ta"] - 273.15  # Convert to Celsius
+                if "td" in single_df.columns:
+                    single_df["td"] = single_df["td"] - 273.15  # Convert to Celsius
+                save_df(single_df, file_path)
                 print(f"Saved dataset to {file_path}")
                 saved_paths.append(str(file_path))
 
@@ -6402,14 +6628,7 @@ class ERA5LandGEEProcessor:
                 print(
                     f"Warning: 'td' column missing in the combined DataFrame. Cannot convert units for {output_path.name}"
                 )
-
-            # Convert all temperature columns from K → °C (parity with CDS script)
-            for temp_col in ["ta_min", "ta_max", "soil_temperature_level_1"]:
-                if temp_col in df_to_save.columns:
-                    print(f"Converting '{temp_col}' K -> C for {output_path.name}...")
-                    df_to_save[temp_col] = df_to_save[temp_col] - 273.15
-
-            df_to_save.to_csv(output_path, index_label="timestamp")
+            save_df(df_to_save, output_path)
             print(f"Saved dataset to {output_path}")
             return str(output_path)
 
@@ -6475,7 +6694,7 @@ class ERA5LandGEEProcessor:
                 output_dir.mkdir(exist_ok=True, parents=True)
 
                 # Save daily prediction dataset
-                output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}.csv"
+                output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}{self.output_ext}"
                 self.save_prediction_dataset(df, output_file)
 
                 print(f"Saved prediction dataset for {year}-{month:02d}-{day:02d} to {output_file}")
@@ -6551,7 +6770,7 @@ class ERA5LandGEEProcessor:
             # We use a generator to keep memory usage low during concatenation
             def frame_generator(files):
                 for f in files:
-                    yield pd.read_csv(f)
+                    yield read_df(f)
 
             combined_df = pd.concat(frame_generator(temp_files), ignore_index=True)
 
@@ -6576,7 +6795,7 @@ class ERA5LandGEEProcessor:
             output_dir = Path(output_dir)
             output_dir.mkdir(exist_ok=True, parents=True)
 
-            output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}.csv"
+            output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}{self.output_ext}"
 
             # Use our standard save utility (handles Kelvin to Celsius conversion)
             self.save_prediction_dataset(combined_df, output_file)
@@ -6710,7 +6929,10 @@ class ERA5LandGEEProcessor:
         dataframes = []
         for file_path in file_paths:
             try:
-                df = pd.read_csv(file_path, parse_dates=["timestamp"], index_col="timestamp")
+                df = read_df(file_path)
+                if "timestamp" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    df = df.set_index("timestamp")
                 dataframes.append(df)
                 print(f"Read file: {file_path} with {len(df)} rows")
             except Exception as e:
@@ -6743,15 +6965,15 @@ class ERA5LandGEEProcessor:
             if len(parts) >= 3:
                 year = parts[1]
                 month = parts[2]
-                output_file = config.PREDICTION_DIR / f"era5land_gee_prediction_{year}_{month}.csv"
+                output_file = config.PREDICTION_DIR / f"era5land_gee_prediction_{year}_{month}{self.output_ext}"
             else:
-                output_file = config.PREDICTION_DIR / "era5land_gee_prediction_merged.csv"
+                output_file = config.PREDICTION_DIR / f"era5land_gee_prediction_merged{self.output_ext}"
 
         output_file = Path(output_file)
         output_file.parent.mkdir(exist_ok=True, parents=True)
 
         # Save merged dataset
-        merged_df.to_csv(output_file)
+        save_df(merged_df, output_file)
         print(f"Saved merged dataset with {len(merged_df)} rows to {output_file}")
 
         return str(output_file)
@@ -6929,6 +7151,13 @@ Examples:
     parser.add_argument(
         "--monthly-output", action="store_true", help="Explicitly save monthly files (default behavior)"
     )
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        choices=["parquet", "csv"],
+        default="parquet",
+        help="Output data format (default: parquet)",
+    )
 
     # Region options
     parser.add_argument("--shapefile", type=str, default=None, help="Path to shapefile for region definition")
@@ -6996,14 +7225,9 @@ Examples:
     # INITIALIZE PROCESSOR
     # ============================================================
     try:
-        processor = ERA5LandGEEProcessor(time_scale=args.time_scale)
+        processor = ERA5LandGEEProcessor(time_scale=args.time_scale, output_format=args.output_format)
 
-        output_dir = Path(args.output).resolve() if args.output else config.PREDICTION_DIR
-
-        # Validate year range (match CDS script)
-        for y in years:
-            if not 1950 <= y <= 2100:
-                raise ValueError(f"Year must be 1950-2100, got {y}")
+        output_dir = Path(args.output) if args.output else config.PREDICTION_DIR
 
         # ============================================================
         # SINGLE DAY PROCESSING
@@ -7106,13 +7330,40 @@ Examples:
 
 
 if __name__ == "__main__":
+    import json
+    from pathlib import Path
+
     import ee
 
+    cred_paths = [
+        Path.home() / ".config" / "earthengine" / "credentials",
+        Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
+    ]
+    gee_project = "era5download-447713"
     try:
-        ee.Initialize(project="era5download-447713")
+        cred_data = None
+        for cred_path in cred_paths:
+            if cred_path.exists():
+                cred_data = json.loads(cred_path.read_text())
+                break
+        if cred_data and "refresh_token" in cred_data:
+            from google.oauth2.credentials import Credentials
+
+            credentials = Credentials(
+                token=None,
+                refresh_token=cred_data["refresh_token"],
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=cred_data["client_id"],
+                client_secret=cred_data["client_secret"],
+            )
+            ee.Initialize(credentials=credentials, project=gee_project)
+        else:
+            ee.Initialize(project="ee-yuluo-2")
         print("GEE Initialized successfully.")
     except Exception as e:
-        print(f"GEE Initialization failed ({e}). Triggering Authentication...")
-        ee.Authenticate()
-        ee.Initialize(project="era5download-447713")
+        print(f"GEE Initialization failed: {e}")
+        print("Run 'earthengine authenticate' on the login node first, then resubmit.")
+        import sys
+
+        sys.exit(1)
     main()

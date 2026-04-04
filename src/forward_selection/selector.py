@@ -70,7 +70,8 @@ def run_forward_selection(
 
     logger.info("Data loaded: X=%s, scoring=%s", x_all.shape, config.scoring.value)
 
-    # 2. Apply log1p transform to target
+    # 2. Apply log1p transform to target (keep original for metrics)
+    y_orig = y.copy()
     y = np.log1p(y)
 
     # 3. Build feature groups (column indices)
@@ -154,6 +155,7 @@ def run_forward_selection(
         cv_splits,
         estimator,
         config.n_jobs_sfs,
+        y_orig=y_orig,
     )
     pooled_elapsed = time.time() - t1
     logger.info("Pooled metrics completed in %.1f minutes", pooled_elapsed / 60)
@@ -177,12 +179,20 @@ def _compute_pooled_metrics(
     cv_splits: list,
     estimator: Any,
     n_jobs: int,
+    y_orig: np.ndarray | None = None,
 ) -> dict[int, dict[str, float]]:
     """Compute true pooled R2 and RMSE for each SFS step.
 
     Uses cross_val_predict to collect OOF predictions across all folds,
-    then computes metrics on the concatenated result — matching the
-    training script's pooled evaluation.
+    then computes metrics on the ORIGINAL scale (after expm1 back-transform)
+    to match the training script's pooled evaluation.
+
+    Parameters
+    ----------
+    y_orig : array, optional
+        Original-scale target (before log1p). If provided, metrics are
+        computed on the original scale. Otherwise, metrics are on the
+        log1p scale.
     """
     from sklearn.base import clone
     from sklearn.metrics import mean_squared_error, r2_score
@@ -202,8 +212,14 @@ def _compute_pooled_metrics(
             n_jobs=n_jobs,
         )
 
-        pr2 = float(r2_score(y, y_pred_oof))
-        prmse = float(np.sqrt(mean_squared_error(y, y_pred_oof)))
+        # Compute on original scale if y_orig provided (matches training script)
+        if y_orig is not None:
+            y_pred_orig = np.expm1(y_pred_oof)
+            pr2 = float(r2_score(y_orig, y_pred_orig))
+            prmse = float(np.sqrt(mean_squared_error(y_orig, y_pred_orig)))
+        else:
+            pr2 = float(r2_score(y, y_pred_oof))
+            prmse = float(np.sqrt(mean_squared_error(y, y_pred_oof)))
         pooled[step] = {"pooled_r2": pr2, "pooled_rmse": prmse}
 
         logger.info(

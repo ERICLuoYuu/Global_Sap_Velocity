@@ -274,9 +274,7 @@ def load_and_cache_features(
     spatial_groups, _stats = create_spatial_groups(
         lat=latitudes,
         lon=longitudes,
-        method="grid",
-        lat_grid_size=grid_size,
-        lon_grid_size=grid_size,
+        method="default",
     )
     site_to_group = dict(zip(site_ids, spatial_groups))
     site_to_pft = {sid: site_info_dict[sid]["pft"] for sid in site_ids}

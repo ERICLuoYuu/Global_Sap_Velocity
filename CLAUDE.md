@@ -94,7 +94,7 @@ python src/hyperparameter_optimization/test_hyperparameter_tuning_DL_spatial_str
 
 ```bash
 python src/make_prediction/process_era5land_gee_opt_fix.py   # ERA5 retrieval → D:/Temp/era5land_extracted/
-python src/make_prediction/predict_sap_velocity_sequantial.py
+python src/make_prediction/predict_sap_velocity_sequential.py
 python src/make_prediction/prediction_visualization.py
 python src/make_prediction/sap_velocity_by_climatezone_forest.py
 ```

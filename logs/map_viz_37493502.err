@@ -1,0 +1,168 @@
+2026-03-14 10:39:30 [INFO] === Prediction Visualization Pipeline ===
+2026-03-14 10:39:30 [INFO] Run ID   : viz_2015_07_daily
+2026-03-14 10:39:30 [INFO] Input    : outputs/outputs/prediction/prediction_2015_07_daily*xgb*.csv
+2026-03-14 10:39:30 [INFO] Output   : /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily
+2026-03-14 10:39:30 [INFO] Column   : sap_velocity_xgb
+2026-03-14 10:39:30 [INFO] Resolution: 0.1000°
+2026-03-14 10:39:30 [INFO] SW_in thr: 0.0
+2026-03-14 10:39:30 [INFO] Found 1 CSV file(s).
+2026-03-14 10:39:30 [INFO] --- Processing prediction_2015_07_daily_predictions_xgb_default_daily_without_coordinates ---
+2026-03-14 10:39:30 [INFO] Single-pass rasterization of prediction_2015_07_daily_predictions_xgb_default_daily_without_coordinates.csv …
+Reading CSV: 0it [00:00, ?it/s]Reading CSV: 1it [00:02,  2.52s/it]Reading CSV: 2it [00:04,  2.30s/it]Reading CSV: 3it [00:05,  1.71s/it]Reading CSV: 4it [00:07,  1.75s/it]Reading CSV: 5it [00:08,  1.49s/it]Reading CSV: 6it [00:09,  1.33s/it]Reading CSV: 7it [00:10,  1.22s/it]Reading CSV: 8it [00:11,  1.16s/it]Reading CSV: 9it [00:12,  1.12s/it]Reading CSV: 10it [00:13,  1.11s/it]Reading CSV: 11it [00:14,  1.07s/it]Reading CSV: 12it [00:16,  1.20s/it]Reading CSV: 13it [00:18,  1.55s/it]Reading CSV: 14it [00:19,  1.39s/it]Reading CSV: 15it [00:20,  1.27s/it]Reading CSV: 16it [00:21,  1.24s/it]Reading CSV: 17it [00:22,  1.18s/it]Reading CSV: 18it [00:24,  1.24s/it]Reading CSV: 19it [00:25,  1.21s/it]Reading CSV: 20it [00:26,  1.17s/it]Reading CSV: 21it [00:27,  1.12s/it]Reading CSV: 22it [00:29,  1.51s/it]Reading CSV: 23it [00:30,  1.36s/it]Reading CSV: 24it [00:32,  1.54s/it]Reading CSV: 25it [00:36,  2.08s/it]Reading CSV: 26it [00:37,  1.79s/it]Reading CSV: 27it [00:38,  1.70s/it]Reading CSV: 28it [00:39,  1.52s/it]Reading CSV: 29it [00:40,  1.42s/it]Reading CSV: 30it [00:41,  1.29s/it]Reading CSV: 31it [00:44,  1.78s/it]Reading CSV: 32it [00:47,  1.92s/it]Reading CSV: 33it [00:52,  2.90s/it]Reading CSV: 34it [00:55,  2.97s/it]Reading CSV: 35it [00:56,  2.38s/it]Reading CSV: 36it [00:57,  1.97s/it]Reading CSV: 37it [00:58,  1.69s/it]Reading CSV: 38it [01:02,  2.38s/it]Reading CSV: 39it [01:06,  2.96s/it]Reading CSV: 40it [01:09,  2.91s/it]Reading CSV: 40it [01:09,  1.74s/it]
+2026-03-14 10:40:39 [INFO] Rasterized 2015-07-01 00:00:00+00:00 → sap_velocity_2015-07-01_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:40 [INFO] Rasterized 2015-07-02 00:00:00+00:00 → sap_velocity_2015-07-02_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:40 [INFO] Rasterized 2015-07-03 00:00:00+00:00 → sap_velocity_2015-07-03_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:40 [INFO] Rasterized 2015-07-04 00:00:00+00:00 → sap_velocity_2015-07-04_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:41 [INFO] Rasterized 2015-07-05 00:00:00+00:00 → sap_velocity_2015-07-05_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:41 [INFO] Rasterized 2015-07-06 00:00:00+00:00 → sap_velocity_2015-07-06_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:41 [INFO] Rasterized 2015-07-07 00:00:00+00:00 → sap_velocity_2015-07-07_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:41 [INFO] Rasterized 2015-07-08 00:00:00+00:00 → sap_velocity_2015-07-08_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:41 [INFO] Rasterized 2015-07-09 00:00:00+00:00 → sap_velocity_2015-07-09_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:42 [INFO] Rasterized 2015-07-10 00:00:00+00:00 → sap_velocity_2015-07-10_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:42 [INFO] Rasterized 2015-07-11 00:00:00+00:00 → sap_velocity_2015-07-11_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:42 [INFO] Rasterized 2015-07-12 00:00:00+00:00 → sap_velocity_2015-07-12_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:42 [INFO] Rasterized 2015-07-13 00:00:00+00:00 → sap_velocity_2015-07-13_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:42 [INFO] Rasterized 2015-07-14 00:00:00+00:00 → sap_velocity_2015-07-14_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:43 [INFO] Rasterized 2015-07-15 00:00:00+00:00 → sap_velocity_2015-07-15_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:43 [INFO] Rasterized 2015-07-16 00:00:00+00:00 → sap_velocity_2015-07-16_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:43 [INFO] Rasterized 2015-07-17 00:00:00+00:00 → sap_velocity_2015-07-17_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:43 [INFO] Rasterized 2015-07-18 00:00:00+00:00 → sap_velocity_2015-07-18_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:44 [INFO] Rasterized 2015-07-19 00:00:00+00:00 → sap_velocity_2015-07-19_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:44 [INFO] Rasterized 2015-07-20 00:00:00+00:00 → sap_velocity_2015-07-20_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:44 [INFO] Rasterized 2015-07-21 00:00:00+00:00 → sap_velocity_2015-07-21_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:44 [INFO] Rasterized 2015-07-22 00:00:00+00:00 → sap_velocity_2015-07-22_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:44 [INFO] Rasterized 2015-07-23 00:00:00+00:00 → sap_velocity_2015-07-23_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:45 [INFO] Rasterized 2015-07-24 00:00:00+00:00 → sap_velocity_2015-07-24_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:45 [INFO] Rasterized 2015-07-25 00:00:00+00:00 → sap_velocity_2015-07-25_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:45 [INFO] Rasterized 2015-07-26 00:00:00+00:00 → sap_velocity_2015-07-26_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:45 [INFO] Rasterized 2015-07-27 00:00:00+00:00 → sap_velocity_2015-07-27_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:45 [INFO] Rasterized 2015-07-28 00:00:00+00:00 → sap_velocity_2015-07-28_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:46 [INFO] Rasterized 2015-07-29 00:00:00+00:00 → sap_velocity_2015-07-29_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:46 [INFO] Rasterized 2015-07-30 00:00:00+00:00 → sap_velocity_2015-07-30_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:46 [INFO] Rasterized 2015-07-31 00:00:00+00:00 → sap_velocity_2015-07-31_00-00-00.tif (641274 pixels)
+2026-03-14 10:40:46 [INFO] Single-pass complete: 31 timestamps, 76.5s.
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:47 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-01_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:47 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-02_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:47 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-03_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:48 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-04_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:48 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-05_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:49 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-06_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:49 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-07_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:49 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-08_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:50 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-09_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:50 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-10_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:51 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-11_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:51 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-12_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:51 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-13_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:52 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-14_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:52 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-15_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:53 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-16_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:53 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-17_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:53 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-18_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:54 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-19_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:54 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-20_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:55 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-21_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:55 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-22_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:55 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-23_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:56 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-24_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:56 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-25_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:56 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-26_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:57 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-27_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:57 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-28_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:58 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-29_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:58 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-30_00-00-00.png
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:40:58 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/sap_velocity_2015-07-31_00-00-00.png
+2026-03-14 10:40:58 [INFO] Generated 31 per-timestamp GeoTIFFs.
+2026-03-14 10:40:58 [INFO] Computing composites from 31 GeoTIFFs …
+Streaming composites:   0%|          | 0/31 [00:00<?, ?it/s]Streaming composites:   3%|▎         | 1/31 [00:00<00:05,  5.68it/s]Streaming composites:   6%|▋         | 2/31 [00:00<00:04,  6.23it/s]Streaming composites:  10%|▉         | 3/31 [00:00<00:04,  6.28it/s]Streaming composites:  13%|█▎        | 4/31 [00:00<00:04,  6.41it/s]Streaming composites:  16%|█▌        | 5/31 [00:00<00:04,  6.41it/s]Streaming composites:  19%|█▉        | 6/31 [00:00<00:03,  6.47it/s]Streaming composites:  23%|██▎       | 7/31 [00:01<00:03,  6.45it/s]Streaming composites:  26%|██▌       | 8/31 [00:01<00:03,  6.62it/s]Streaming composites:  29%|██▉       | 9/31 [00:01<00:03,  6.53it/s]Streaming composites:  32%|███▏      | 10/31 [00:01<00:03,  6.56it/s]Streaming composites:  35%|███▌      | 11/31 [00:01<00:03,  6.52it/s]Streaming composites:  39%|███▊      | 12/31 [00:01<00:02,  6.53it/s]Streaming composites:  42%|████▏     | 13/31 [00:02<00:02,  6.47it/s]Streaming composites:  45%|████▌     | 14/31 [00:02<00:02,  6.52it/s]Streaming composites:  48%|████▊     | 15/31 [00:02<00:02,  6.46it/s]Streaming composites:  52%|█████▏    | 16/31 [00:02<00:02,  6.50it/s]Streaming composites:  55%|█████▍    | 17/31 [00:02<00:02,  6.48it/s]Streaming composites:  58%|█████▊    | 18/31 [00:02<00:01,  6.51it/s]Streaming composites:  61%|██████▏   | 19/31 [00:02<00:01,  6.46it/s]Streaming composites:  65%|██████▍   | 20/31 [00:03<00:01,  6.52it/s]Streaming composites:  68%|██████▊   | 21/31 [00:03<00:01,  6.46it/s]Streaming composites:  71%|███████   | 22/31 [00:03<00:01,  6.50it/s]Streaming composites:  74%|███████▍  | 23/31 [00:03<00:01,  6.47it/s]Streaming composites:  77%|███████▋  | 24/31 [00:03<00:01,  6.51it/s]Streaming composites:  81%|████████  | 25/31 [00:03<00:00,  6.47it/s]Streaming composites:  84%|████████▍ | 26/31 [00:04<00:00,  6.53it/s]Streaming composites:  87%|████████▋ | 27/31 [00:04<00:00,  6.47it/s]Streaming composites:  90%|█████████ | 28/31 [00:04<00:00,  6.51it/s]Streaming composites:  94%|█████████▎| 29/31 [00:04<00:00,  6.48it/s]Streaming composites:  97%|█████████▋| 30/31 [00:04<00:00,  6.51it/s]Streaming composites: 100%|██████████| 31/31 [00:04<00:00,  6.47it/s]Streaming composites: 100%|██████████| 31/31 [00:04<00:00,  6.47it/s]
+2026-03-14 10:41:03 [INFO] Wrote /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_mean.tif
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:41:04 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_mean.png
+2026-03-14 10:41:04 [INFO] Computing median (requires full stack)…
+/scratch/tmp/yluo2/gsv-wt/map-viz/src/make_prediction/prediction_visualization_hpc.py:766: RuntimeWarning: All-NaN slice encountered
+  composite = np.nanmedian(stack, axis=0).astype(np.float32)
+2026-03-14 10:41:10 [INFO] Wrote /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_median.tif
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:41:10 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_median.png
+2026-03-14 10:41:10 [INFO] Wrote /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_max.tif
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:41:11 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_max.png
+2026-03-14 10:41:11 [INFO] Wrote /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_min.tif
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:41:11 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_min.png
+2026-03-14 10:41:11 [INFO] Wrote /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_std.tif
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:41:12 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_std.png
+2026-03-14 10:41:12 [INFO] Wrote /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_count.tif
+/scratch/tmp/yluo2/gsv/.venv/lib64/python3.9/site-packages/cartopy/mpl/feature_artist.py:144: UserWarning: facecolor will have no effect as it has been defined as "never".
+  warnings.warn('facecolor will have no effect as it has been '
+2026-03-14 10:41:12 [INFO] Saved PNG: /scratch/tmp/yluo2/gsv-wt/map-viz/outputs/maps/viz_2015_07_daily/composites/sap_velocity_composite_count.png
+2026-03-14 10:41:12 [INFO] Composite generation done in 13.7s.
+2026-03-14 10:41:12 [INFO] === Pipeline complete in 102.6s ===

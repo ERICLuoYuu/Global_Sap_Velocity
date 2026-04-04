@@ -724,7 +724,7 @@ All seeds: 42. Verified by running identical configs twice and confirming identi
 
 ### 12.1 Overview
 
-Two scripts: `process_era5land_gee_opt_fix.py` (ERA5 retrieval + feature derivation) → `predict_sap_velocity_sequantial.py` (model application).
+Two scripts: `process_era5land_gee_opt_fix.py` (ERA5 retrieval + feature derivation) → `predict_sap_velocity_sequential.py` (model application).
 
 ### 12.2 ERA5-Land Retrieval
 
@@ -890,7 +890,7 @@ python src/hyperparameter_optimization/test_hyperparameter_tuning_ML_spatial_str
 
 # 6. Global prediction
 python src/make_prediction/process_era5land_gee_opt_fix.py
-python src/make_prediction/predict_sap_velocity_sequantial.py
+python src/make_prediction/predict_sap_velocity_sequential.py
 
 # 7. Visualise
 python src/make_prediction/prediction_visualization.py
@@ -967,7 +967,7 @@ python src/make_prediction/sap_velocity_by_climatezone_forest.py
 | 4 Merge             | `notebooks/merge_gap_filled_hourly_orginal.py`                           | QC sap + env + all features | `outputs/processed_data/sapwood/merged/merged_data.csv`      |
 | 5 Train             | `src/hyperparameter_optimization/test_*.py`                              | merged_data.csv             | `outputs/models/` + `outputs/scalers/`                       |
 | 5b SHAP             | (integrated in training scripts)                                         | final model + X_test        | `outputs/plots/hyperparameter_optimization/`                 |
-| 6 Predict           | `process_era5land_gee_opt_fix.py` + `predict_sap_velocity_sequantial.py` | Gridded ERA5 + models       | `data/predictions/*.csv`                                     |
+| 6 Predict           | `process_era5land_gee_opt_fix.py` + `predict_sap_velocity_sequential.py` | Gridded ERA5 + models       | `data/predictions/*.csv`                                     |
 | 7 Visualise         | `prediction_visualization*.py`                                           | Prediction CSVs             | `outputs/maps/*.tif` + `*.png`                               |
 
 ### Detailed Mermaid Diagram
@@ -1033,7 +1033,7 @@ flowchart TD
 
     subgraph PREDICT ["6 - Global Prediction"]
         ERA5_PROC["ERA5LandGEEProcessor"]
-        PRED_SCR["predict_sap_velocity_sequantial.py"]
+        PRED_SCR["predict_sap_velocity_sequential.py"]
     end
     ERA5_GRID --> ERA5_PROC --> PRED_SCR
     MODELS --> PRED_SCR

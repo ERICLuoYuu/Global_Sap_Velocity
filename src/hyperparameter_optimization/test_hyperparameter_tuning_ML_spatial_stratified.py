@@ -2724,6 +2724,134 @@ def add_sap_flow_features(df: pd.DataFrame, verbose: bool = False) -> pd.DataFra
     return df
 
 
+
+def apply_feature_engineering(df, groups, time_scale='daily', verbose=False):
+    """
+    Apply selected feature engineering groups to a per-site DataFrame.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Site data with original columns (already has TIMESTAMP index).
+    groups : list of str
+        Feature group names to apply.
+    time_scale : str
+        'daily' or 'hourly' — adapts rolling window sizes.
+    verbose : bool
+
+    Returns
+    -------
+    (df, new_feature_names) : tuple
+    """
+    df = df.copy()
+    new_features = []
+
+    # ── interactions ────────────────────────────────────────────────
+    if 'interactions' in groups:
+        if 'vpd' in df.columns and 'sw_in' in df.columns:
+            df['vpd_x_sw_in'] = df['vpd'] * df['sw_in']
+            new_features.append('vpd_x_sw_in')
+        if 'vpd' in df.columns:
+            df['vpd_squared'] = df['vpd'] ** 2
+            new_features.append('vpd_squared')
+        if 'ta' in df.columns and 'vpd' in df.columns:
+            df['ta_x_vpd'] = df['ta'] * df['vpd']
+            new_features.append('ta_x_vpd')
+        if 'canopy_height' in df.columns and 'vpd' in df.columns:
+            df['height_x_vpd'] = df['canopy_height'] * df['vpd']
+            new_features.append('height_x_vpd')
+        if 'ws' in df.columns and 'vpd' in df.columns:
+            df['wind_x_vpd'] = df['ws'] * df['vpd']
+            new_features.append('wind_x_vpd')
+        if 'vpd' in df.columns and 'prcip/PET' in df.columns:
+            df['demand_x_supply'] = df['vpd'] * df['prcip/PET']
+            new_features.append('demand_x_supply')
+
+    # ── lags_1d ─────────────────────────────────────────────────────
+    if 'lags_1d' in groups:
+        for col_name in ['ta', 'vpd', 'sw_in', 'precip']:
+            if col_name in df.columns:
+                feat = f'{col_name}_lag1d'
+                df[feat] = df[col_name].shift(1)
+                new_features.append(feat)
+
+    # ── rolling statistics ──────────────────────────────────────────
+    rolling_groups = {
+        'rolling_3d':  3,
+        'rolling_7d':  7,
+        'rolling_14d': 14,
+    }
+    for grp, window in rolling_groups.items():
+        if grp in groups:
+            for col_name in ['ta', 'vpd', 'sw_in']:
+                if col_name in df.columns:
+                    mn = f'{col_name}_roll{window}d_mean'
+                    sd = f'{col_name}_roll{window}d_std'
+                    df[mn] = df[col_name].rolling(window, min_periods=1).mean()
+                    df[sd] = df[col_name].rolling(window, min_periods=2).std()
+                    new_features.extend([mn, sd])
+
+    # ── physics ─────────────────────────────────────────────────────
+    if 'physics' in groups:
+        if 'sw_in' in df.columns and 'ext_rad' in df.columns:
+            df['clear_sky_index'] = (df['sw_in'] / (df['ext_rad'] + 1)).clip(0, 1)
+            new_features.append('clear_sky_index')
+        if 'ta' in df.columns:
+            df['gdd'] = (df['ta'] - 5).clip(lower=0)
+            new_features.append('gdd')
+        if 'sw_in' in df.columns and 'LAI' in df.columns:
+            df['absorbed_radiation'] = df['sw_in'] * (1 - np.exp(-0.5 * df['LAI']))
+            new_features.append('absorbed_radiation')
+
+    # ── precip_memory ───────────────────────────────────────────────
+    if 'precip_memory' in groups:
+        if 'precip' in df.columns:
+            df['precip_sum_3d'] = df['precip'].rolling(3, min_periods=1).sum()
+            df['precip_sum_7d'] = df['precip'].rolling(7, min_periods=1).sum()
+            rain_events = df['precip'] > 0.5
+            no_rain = ~rain_events
+            df['days_since_rain'] = no_rain.groupby(
+                rain_events.cumsum()
+            ).cumcount().astype(np.float32)
+            new_features.extend(['precip_sum_3d', 'precip_sum_7d', 'days_since_rain'])
+
+    # ── indicators ──────────────────────────────────────────────────
+    if 'indicators' in groups:
+        if 'vpd' in df.columns:
+            df['vpd_high'] = (df['vpd'] > 2.5).astype(np.float32)
+            new_features.append('vpd_high')
+        swc_col = next(
+            (c for c in df.columns
+             if any(x in c.lower() for x in ['volumetric_soil_water', 'swc', 'sm_'])),
+            None,
+        )
+        if swc_col:
+            sm_min, sm_max = df[swc_col].quantile([0.05, 0.95])
+            df['soil_moisture_rel'] = (
+                (df[swc_col] - sm_min) / (sm_max - sm_min + 0.01)
+            ).clip(0, 1)
+            df['soil_dry'] = (df['soil_moisture_rel'] < 0.3).astype(np.float32)
+            new_features.extend(['soil_moisture_rel', 'soil_dry'])
+
+    # ── static_enrich ───────────────────────────────────────────────
+    if 'static_enrich' in groups:
+        for col_name in ['stand_age', 'slope', 'mean_annual_temp', 'precip_seasonality']:
+            if col_name in df.columns:
+                new_features.append(col_name)
+
+    # Drop NaNs introduced by lag/rolling (first few rows)
+    if any(g in groups for g in ['lags_1d', 'rolling_3d', 'rolling_7d', 'rolling_14d', 'precip_memory']):
+        before = len(df)
+        df.dropna(subset=[f for f in new_features if f in df.columns], inplace=True)
+        if verbose:
+            logging.info(f"  Feature engineering dropped {before - len(df)} NaN rows")
+
+    if verbose:
+        logging.info(f"  Feature engineering added {len(new_features)} features: {new_features}")
+
+    return df, new_features
+
+
 def setup_logging(logger_name, log_dir=None):
     """Set up basic logging configuration"""
     logger = logging.getLogger(logger_name)
@@ -2992,6 +3120,13 @@ def parse_args():
     parser.add_argument('--TRANSFORM_METHOD', type=str, default='log1p',
                         choices=['log1p', 'sqrt', 'box-cox', 'yeo-johnson', 'none'],
                         help='Target transformation method: log1p, sqrt, box-cox, yeo-johnson, or none')
+    parser.add_argument("--grid_size", type=float, default=0.05,
+                        help="Grid cell size in degrees for spatial grouping (default: 0.05)")
+    parser.add_argument("--r2_method", type=str, default="mean",
+                        choices=["mean", "pooled", "both"],
+                        help="R2 reporting: mean (per-fold average), pooled (concatenated OOF), or both")
+    parser.add_argument('--feature_groups', nargs='*', default=[],
+                        help='Feature engineering groups: interactions lags_1d rolling_3d rolling_7d rolling_14d physics precip_memory indicators static_enrich')
     return parser.parse_args()
 
 
@@ -3021,10 +3156,13 @@ def main(run_id="default"):
     SPLIT_TYPE = args.SPLIT_TYPE
     BALANCED = args.BALANCED
     additional_features = args.additional_features
+    feature_groups = args.feature_groups
     TIME_SCALE = args.TIME_SCALE
     SHAP_SAMPLE_SIZE = args.SHAP_SAMPLE_SIZE
     IS_TRANSFORM = args.IS_TRANSFORM
     TRANSFORM_METHOD = args.TRANSFORM_METHOD if IS_TRANSFORM else 'none'
+    GRID_SIZE = args.grid_size
+    R2_METHOD = args.r2_method
     
     # Initialize target transformer
     target_transformer = TargetTransformer(method=TRANSFORM_METHOD)
@@ -3068,7 +3206,7 @@ def main(run_id="default"):
     
     base_features = [
         TARGET_COL, 
-        'sw_in', ''
+        'sw_in',
         'ws', 
         'precip', 
         'ta', 'ta_max', 'ta_min',
@@ -3083,6 +3221,11 @@ def main(run_id="default"):
         
     ]
     
+    # Exclude daily-aggregated features not available in hourly data
+    DAILY_ONLY_COLS = {"day_length", "ta_max", "ta_min", "vpd_max", "vpd_min"}
+    if TIME_SCALE == "hourly":
+        base_features = [f for f in base_features if f not in DAILY_ONLY_COLS]
+        logging.info(f"Hourly mode: excluded {DAILY_ONLY_COLS} from base_features")
     used_cols = list(set(base_features + additional_features))
     logging.info(f"Using columns: {used_cols}")
     
@@ -3133,6 +3276,8 @@ def main(run_id="default"):
             
             df['latitude'] = latitude
             df['longitude'] = longitude
+            # Add engineered features (only used if listed in additional_features)
+            df = add_sap_flow_features(df, verbose=False)
             
             pft_value = df[pft_col].mode()[0] 
             print(pft_value)
@@ -3140,6 +3285,17 @@ def main(run_id="default"):
             df.set_index('solar_TIMESTAMP', inplace=True)
             df.sort_index(inplace=True)  # Ensure chronological order
             df = add_time_features(df, datetime_column=None)
+
+            # Apply feature engineering groups (if any requested)
+            engineered_names = []
+            if feature_groups:
+                df, engineered_names = apply_feature_engineering(
+                    df, feature_groups, TIME_SCALE, verbose=True
+                )
+                # Extend used_cols with engineered feature names (once)
+                for fname in engineered_names:
+                    if fname not in used_cols:
+                        used_cols.append(fname)
             
             if TIME_SCALE == 'hourly':
                 time_features = ['Day sin', 'Year sin']
@@ -3240,11 +3396,15 @@ def main(run_id="default"):
     
     logging.info("\nCreating spatial groups...")
     
+    logging.info(f"Grid size: {GRID_SIZE} degrees, R2 method: {R2_METHOD}")
+
     if IS_STRATIFIED:
         spatial_groups, group_stats = create_spatial_groups(
             lat=latitudes,
             lon=longitudes,
             method=spatial_split_method,
+            lat_grid_size=GRID_SIZE,
+            lon_grid_size=GRID_SIZE,
         )
     else:
         spatial_groups, group_stats = create_spatial_groups(
@@ -3254,6 +3414,8 @@ def main(run_id="default"):
             n_groups=n_groups,
             method=spatial_split_method,
             balanced=BALANCED,
+            lat_grid_size=GRID_SIZE,
+            lon_grid_size=GRID_SIZE,
         )
     
     logging.info(f"Spatial groups assigned: {np.unique(spatial_groups)}")
@@ -3650,9 +3812,19 @@ def main(run_id="default"):
         mean_rmse = np.mean(all_test_rmse_scores)
         std_rmse = np.std(all_test_rmse_scores)
         
+        # Pooled R2: single R2 from all concatenated OOF predictions
+        arr_act = np.array(all_actuals)
+        arr_pred = np.array(all_predictions)
+        finite = np.isfinite(arr_act) & np.isfinite(arr_pred)
+        pooled_r2 = r2_score(arr_act[finite], arr_pred[finite])
+        pooled_rmse = np.sqrt(mean_squared_error(arr_act[finite], arr_pred[finite]))
+
         logging.info("\n=== OVERALL SPATIAL CROSS-VALIDATION RESULTS ===")
-        logging.info(f"Test R² Score: {mean_r2:.4f} ± {std_r2:.4f}")
-        logging.info(f"Test RMSE: {mean_rmse:.4f} ± {std_rmse:.4f}")
+        logging.info(f"R2 method: {R2_METHOD}")
+        logging.info(f"Mean-fold R²: {mean_r2:.4f} ± {std_r2:.4f}")
+        logging.info(f"Pooled R²:    {pooled_r2:.4f}")
+        logging.info(f"Mean-fold RMSE: {mean_rmse:.4f} ± {std_rmse:.4f}")
+        logging.info(f"Pooled RMSE:    {pooled_rmse:.4f}")
 
         plt.figure(figsize=(8, 8))
         plt.scatter(all_actuals, all_predictions, alpha=0.5, s=20)
@@ -3983,11 +4155,15 @@ def main(run_id="default"):
         'best_cv_score': float(best_cv_score),
          'cv_results': {
            'mean_r2': float(mean_r2),
+           'pooled_r2': float(pooled_r2),
    
           'std_r2': float(std_r2),
            'mean_rmse': float(mean_rmse),
+           'pooled_rmse': float(pooled_rmse),
            'std_rmse': float(std_rmse),
            'n_folds': n_groups,
+           'grid_size': GRID_SIZE,
+           'r2_method': R2_METHOD,
        },
         'preprocessing': {
             'target_transform': TRANSFORM_METHOD if IS_TRANSFORM else None,

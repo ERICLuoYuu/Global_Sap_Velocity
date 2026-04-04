@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --partition=zen2-128C-496G
-#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=128
-#SBATCH --mem=480G --time=12:00:00
+#SBATCH --partition=zen4
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=192
+#SBATCH --mem=750G --time=2-00:00:00
 #SBATCH --job-name=ffs_neg_rmse
 #SBATCH --output=/scratch/tmp/yluo2/gsv/outputs/forward_selection/slurm_ffs_neg_rmse_%j.out
 
@@ -20,7 +20,7 @@ python -m src.forward_selection.run_selection \
     --scoring neg_rmse \
     --cache_path "$CACHE" \
     --output_dir "$OUT" \
-    --n_jobs_sfs 32 \
+    --n_jobs_sfs 48 \
     --n_jobs_xgb 4
 
 echo "End: $(date '+%Y-%m-%d %H:%M:%S')"

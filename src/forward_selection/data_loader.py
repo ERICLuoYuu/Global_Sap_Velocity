@@ -81,6 +81,7 @@ def load_and_cache_features(
     time_scale: str = "daily",
     is_only_day: bool = False,
     grid_size: float = 0.05,
+    spatial_method: str = "default",
 ) -> dict[str, Any]:
     """Load all site CSVs, compute every feature, and save to .npz cache.
 
@@ -274,7 +275,9 @@ def load_and_cache_features(
     spatial_groups, _stats = create_spatial_groups(
         lat=latitudes,
         lon=longitudes,
-        method="default",
+        method=spatial_method,
+        lat_grid_size=grid_size,
+        lon_grid_size=grid_size,
     )
     site_to_group = dict(zip(site_ids, spatial_groups))
     site_to_pft = {sid: site_info_dict[sid]["pft"] for sid in site_ids}

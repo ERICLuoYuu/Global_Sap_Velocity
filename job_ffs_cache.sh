@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=normal
+#SBATCH --partition=zen4
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=16
 #SBATCH --mem=128G --time=01:00:00
 #SBATCH --job-name=ffs_cache

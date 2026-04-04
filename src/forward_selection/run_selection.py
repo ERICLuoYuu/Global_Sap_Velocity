@@ -118,6 +118,19 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=42,
     )
+    parser.add_argument(
+        "--spatial_method",
+        type=str,
+        default="default",
+        choices=["default", "grid"],
+        help="Spatial grouping method: 'default' (each site = own group) or 'grid'.",
+    )
+    parser.add_argument(
+        "--grid_size",
+        type=float,
+        default=0.05,
+        help="Grid cell size in degrees (only used when --spatial_method=grid).",
+    )
     return parser.parse_args()
 
 
@@ -144,6 +157,8 @@ def _cmd_build_cache(args: argparse.Namespace) -> None:
         data_dir=data_dir,
         cache_path=cache_path,
         time_scale=args.time_scale,
+        spatial_method=args.spatial_method,
+        grid_size=args.grid_size,
     )
     logger.info("Cache build complete.")
 

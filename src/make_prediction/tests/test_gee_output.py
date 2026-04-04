@@ -8,7 +8,7 @@ internal consistency, derived variable formulas, PFT encoding,
 spatial/temporal coverage, and cross-day consistency.
 
 Usage:
-    python test_gee_output.py [path_to_csv]
+    python test_gee_output.py [path_to_csv_or_parquet]
 
 Exit code 0 = all pass, 1 = failures found.
 """
@@ -21,6 +21,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from src.make_prediction.io_utils import read_df
 
 # ── Counters ──────────────────────────────────────────────────────────
 PASS_COUNT = 0
@@ -51,7 +53,7 @@ def warn(name: str, detail: str) -> None:
 CHUNK_SIZE = 1_000_000
 
 # Default path — override via CLI arg
-DEFAULT_CSV = Path("/scratch/tmp/yluo2/gsv-wt/map-viz/outputs/predictions/2020_daily/prediction_2020_01_daily.csv")
+DEFAULT_FILE = Path("/scratch/tmp/yluo2/gsv-wt/map-viz/outputs/predictions/2020_daily/prediction_2020_01_daily.parquet")
 
 # ALL processed variables that MUST be present in output
 EXPECTED_COLUMNS = [
@@ -180,22 +182,26 @@ FOREST_REGIONS = {
 # MAIN
 # =====================================================================
 def main():
-    csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CSV
+    data_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_FILE
 
     print("=" * 72)
     print("GEE OUTPUT VALIDATION — COMPREHENSIVE TEST SUITE (CHUNKED)")
     print("=" * 72)
-    print("File: %s" % csv_path)
+    print("File: %s" % data_path)
 
-    if not csv_path.exists():
+    if not data_path.exists():
         print("FATAL: File not found.")
         sys.exit(1)
 
-    fsize_gb = csv_path.stat().st_size / 1e9
+    fsize_gb = data_path.stat().st_size / 1e9
     print("Size: %.2f GB" % fsize_gb)
 
     # ─── 0. READ HEADER ONLY ─────────────────────────────────────────
-    header_df = pd.read_csv(csv_path, nrows=0)
+    _is_pq = data_path.suffix.lower() in {'.parquet', '.pq'}
+    if _is_pq:
+        header_df = pd.read_parquet(data_path, engine="pyarrow").head(0)
+    else:
+        header_df = pd.read_csv(data_path, nrows=0)
     raw_columns = list(header_df.columns)
     print("Raw columns (%d): %s" % (len(raw_columns), raw_columns))
 
@@ -320,7 +326,11 @@ def main():
 
     # ── Iterate chunks ────────────────────────────────────────────────
     chunk_num = 0
-    reader = pd.read_csv(csv_path, chunksize=CHUNK_SIZE, low_memory=False)
+    if _is_pq:
+        _full = pd.read_parquet(data_path, engine="pyarrow")
+        reader = [_full.iloc[i:i+CHUNK_SIZE] for i in range(0, len(_full), CHUNK_SIZE)]
+    else:
+        reader = pd.read_csv(data_path, chunksize=CHUNK_SIZE, low_memory=False)
 
     for chunk in reader:
         chunk_num += 1

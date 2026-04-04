@@ -3052,7 +3052,7 @@ def main(run_id="default"):
     model_dir = paths.models_root / MODEL_TYPE / run_id
     os.makedirs(str(model_dir), exist_ok=True)
     #data_dir = paths.merged_data_root / TIME_SCALE
-    data_dir = paths.merged_daytime_only_dir / TIME_SCALE
+    data_dir = Path('/scratch/tmp/yluo2/Global_Sap_Velocity/outputs/processed_data/sapwood/merged_daytime_only/daily') / TIME_SCALE
 
     # --- Data Loading and Processing ---
     data_list = sorted(list(data_dir.glob(f'*{TIME_SCALE}.csv')))
@@ -3070,7 +3070,6 @@ def main(run_id="default"):
         TARGET_COL, 
         'sw_in', ''
         'ws', 
-        'precip', 
         'ta', 'ta_max', 'ta_min',
         'vpd', 'vpd_max', 'vpd_min',
         'ext_rad', 'ppfd_in',

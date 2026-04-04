@@ -4,9 +4,22 @@ Handles extraction, reading, and preprocessing of ERA5-Land data
 from Google Earth Engine with maintained functionality for derived variables.
 """
 
+import os as _os
+from pathlib import Path as _Path
+# Fix PROJ DB version conflict: set PROJ_LIB before any geo library import
+if "PROJ_LIB" not in _os.environ:
+    import importlib.util as _ilu
+    _spec = _ilu.find_spec("rasterio")
+    if _spec and _spec.origin:
+        _rd = _Path(_spec.origin).parent / "proj_data"
+        if _rd.is_dir():
+            _os.environ["PROJ_LIB"] = str(_rd)
+
 import os
 import logging
 import sys
+
+from src.make_prediction.io_utils import save_df, read_df
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +118,7 @@ import rasterio
 import xarray as xr
 from rasterio.windows import from_bounds
 from scipy.spatial import cKDTree
+from rasterio_resample import resample_raster_to_grid
 
 # Try optional libraries
 try:
@@ -191,8 +205,8 @@ def _hour_processing_worker(args):
         if df is not None and not df.empty:
             # FIX #7: Save to disk immediately.
             # We use a temporary CSV. Index=False makes it easier to merge later.
-            temp_file_path = hour_temp_dir / f"hour_{hour:02d}_raw.csv"
-            df.to_csv(temp_file_path, index=False)
+            temp_file_path = hour_temp_dir / f"hour_{hour:02d}_raw.parquet"
+            save_df(df, temp_file_path)
 
             print(f"--- Process Success: Hour {hour:02d}:00 (Saved to Temp) ---")
             return {"hour": hour, "file_path": str(temp_file_path), "success": True, "timestamp": hour_start}
@@ -266,6 +280,7 @@ class ERA5LandGEEProcessor:
         precip_climate_file=None,
         gee_initialize=True,
         time_scale="daily",
+        output_format="parquet",
     ):
         """
         Initialize the ERA5-Land GEE data processor.
@@ -291,6 +306,7 @@ class ERA5LandGEEProcessor:
         self.time_scale = time_scale
         if self.time_scale not in ["hourly", "daily"]:
             raise ValueError("time_scale must be either 'hourly' or 'daily'")
+        self.output_ext = ".parquet" if output_format == "parquet" else ".csv"
         if self.time_scale == "hourly":
             self.GEE_VARIABLE_MAPPING = {
                 "temperature_2m": "temperature_2m",
@@ -684,7 +700,7 @@ class ERA5LandGEEProcessor:
 
             if df is not None and not df.empty:
                 # Save monthly prediction dataset
-                output_file = output_dir / f"prediction_{year}_{month:02d}_daily.csv"
+                output_file = output_dir / f"prediction_{year}_{month:02d}_daily{self.output_ext}"
                 saved_path = self.save_prediction_dataset(df, output_file)
 
                 print(f"\n{'=' * 60}")
@@ -758,7 +774,7 @@ class ERA5LandGEEProcessor:
         output_dir.mkdir(exist_ok=True, parents=True)
 
         # Fix 2.1: Month-level checkpoint — skip if monthly file already exists
-        monthly_output = output_dir / f"prediction_{year}_{month:02d}_daily.csv"
+        monthly_output = output_dir / f"prediction_{year}_{month:02d}_daily{self.output_ext}"
         if monthly_output.exists() and monthly_output.stat().st_size > 1000:
             print(f"Month {year}-{month:02d} already processed ({monthly_output.name}), skipping")
             return str(monthly_output)
@@ -878,7 +894,7 @@ class ERA5LandGEEProcessor:
                 print(f"Removed {before_dedup - after_dedup} duplicate rows")
 
             # Save monthly file
-            output_file = output_dir / f"prediction_{year}_{month:02d}_daily.csv"
+            output_file = output_dir / f"prediction_{year}_{month:02d}_daily{self.output_ext}"
             saved_path = self.save_prediction_dataset(monthly_df, output_file)
 
             # Print summary
@@ -1024,7 +1040,7 @@ class ERA5LandGEEProcessor:
                 yearly_df = yearly_df.drop_duplicates()
 
                 # Save yearly file
-                output_file = output_dir / f"prediction_{year}_{self.time_scale}.csv"
+                output_file = output_dir / f"prediction_{year}_{self.time_scale}{self.output_ext}"
                 saved_path = self.save_prediction_dataset(yearly_df, output_file)
 
                 print(f"\n✓ Yearly file saved: {output_file}")
@@ -1267,9 +1283,10 @@ class ERA5LandGEEProcessor:
                 tmp.write(resp.content)
                 tmp_path = tmp.name
 
-            with rasterio.open(tmp_path) as src:
-                data = src.read(1)
-            return data.astype(np.float32)
+            with rasterio.open(tmp_path) as rast:
+                data = rast.read(1)
+                tile_transform = rast.transform
+            return data.astype(np.float32), tile_transform
         finally:
             if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -1345,7 +1362,7 @@ class ERA5LandGEEProcessor:
             if total_height <= max_tile_size and total_width <= max_tile_size:
                 print("  Small region - downloading directly via GeoTIFF...")
                 try:
-                    result = self._download_tile_geotiff(
+                    result, _tile_tf = self._download_tile_geotiff(
                         image, [lon_min, lat_min, lon_max, lat_max], scale, band_name=band_name
                     )
                 except Exception as e:
@@ -1398,15 +1415,16 @@ class ERA5LandGEEProcessor:
                     )
 
                     try:
-                        tile_data = self._download_tile_geotiff(
+                        tile_result = self._download_tile_geotiff(
                             image,
                             [tile_lon_min, tile_lat_min, tile_lon_max, tile_lat_max],
                             scale,
                             band_name=band_name,
                         )
 
-                        if tile_data is None:
+                        if tile_result is None:
                             continue
+                        tile_data, tile_tf = tile_result
 
                         # --- 7. Robust Shape Handling ---
                         if tile_data.ndim > 2:
@@ -1421,14 +1439,23 @@ class ERA5LandGEEProcessor:
                             else:
                                 tile_data = tile_data.reshape(-1, 1)
 
-                        actual_h, actual_w = tile_data.shape
+                        # --- 7b. Transform-based placement (fixes GEE ±1 pixel rounding) ---
+                        # Use the GeoTIFF's actual origin to compute correct output position
+                        actual_col = round((tile_tf.c - lon_min) / deg_per_pixel)
+                        actual_row = round((lat_max - tile_tf.f) / deg_per_pixel)
 
-                        # Calculate safe insertion range (protects against ±1 pixel GEE rounding)
-                        ins_h = min(actual_h, total_height - row_start)
-                        ins_w = min(actual_w, total_width - col_start)
+                        th, tw = tile_data.shape
+                        # Clamp source and destination ranges to valid bounds
+                        out_r0 = max(0, actual_row)
+                        out_c0 = max(0, actual_col)
+                        out_r1 = min(total_height, actual_row + th)
+                        out_c1 = min(total_width, actual_col + tw)
+                        src_r0 = out_r0 - actual_row
+                        src_c0 = out_c0 - actual_col
 
-                        output_array[row_start : row_start + ins_h, col_start : col_start + ins_w] = tile_data[
-                            :ins_h, :ins_w
+                        output_array[out_r0:out_r1, out_c0:out_c1] = tile_data[
+                            src_r0 : src_r0 + (out_r1 - out_r0),
+                            src_c0 : src_c0 + (out_c1 - out_c0),
                         ]
                         successful_tiles += 1
 
@@ -1965,9 +1992,40 @@ class ERA5LandGEEProcessor:
 
     def get_pft_from_gee(self, year, region=None, shapefile=None, scale=None):
         """
-        Get Plant Functional Type (PFT) data from MODIS Land Cover via Google Earth Engine.
-        Uses same storage format as climate data for consistent lookup.
+        Get Plant Functional Type (PFT) data from MODIS Land Cover.
+        Tries local GeoTIFF first, falls back to Google Earth Engine download.
+        Saves GEE download as local GeoTIFF for future reuse.
         """
+        # --- Try local GeoTIFF first ---
+        local_pft_dir = Path(config.RAW_DATA_DIR) / "pft_cache"
+        local_pft_path = local_pft_dir / f"modis_pft_{year}.tif"
+
+        if local_pft_path.exists():
+            print(f"Loading PFT from local cache: {local_pft_path}")
+            try:
+                import rasterio
+                with rasterio.open(local_pft_path) as rast:
+                    pft_array = rast.read(1).astype(float)
+                    pft_transform = rast.transform
+                    height, width = pft_array.shape
+
+                self.pft_raw = {
+                    "data": pft_array,
+                    "transform": pft_transform,
+                    "crs": "EPSG:4326",
+                    "height": height,
+                    "width": width,
+                    "nodata": 255,
+                    "year": year,
+                }
+                valid_data = pft_array[(~np.isnan(pft_array)) & (pft_array != 255)]
+                unique_classes = np.unique(valid_data).astype(int)
+                print(f"  Loaded from cache: {height} x {width}, classes={unique_classes.tolist()}")
+                return self.pft_raw
+            except Exception as e:
+                print(f"  Failed to read local PFT cache ({e}), falling back to GEE download")
+
+        # --- GEE download (original logic) ---
         if not self.ee_initialized:
             self.initialize_gee()
             if not self.ee_initialized:
@@ -2066,6 +2124,29 @@ class ERA5LandGEEProcessor:
             print(f"  Shape: {height} x {width}")
             print(f"  PFT classes present: {unique_classes.tolist()}")
             print(f"  Unique values: {len(unique_classes)}")
+
+            # Save to local cache for future reuse
+            try:
+                import rasterio
+                local_pft_dir = Path(config.RAW_DATA_DIR) / "pft_cache"
+                local_pft_dir.mkdir(parents=True, exist_ok=True)
+                local_pft_path = local_pft_dir / f"modis_pft_{year}.tif"
+                if not local_pft_path.exists():
+                    profile = {
+                        "driver": "GTiff",
+                        "height": height,
+                        "width": width,
+                        "count": 1,
+                        "dtype": "float32",
+                        "crs": "EPSG:4326",
+                        "transform": transform,
+                        "nodata": 255,
+                    }
+                    with rasterio.open(local_pft_path, "w", **profile) as dst:
+                        dst.write(pft_array.astype(np.float32), 1)
+                    print(f"  Saved PFT cache to {local_pft_path}")
+            except Exception as e:
+                print(f"  Warning: Could not save PFT cache ({e})")
 
             return self.pft_raw
 
@@ -4806,14 +4887,11 @@ class ERA5LandGEEProcessor:
 
         # ========== ELEVATION ==========
         if self.elevation_raw is not None:
-            print("\n--- Resampling ELEVATION using climate data approach ---")
-            elev_values = self.get_raster_at_location_direct(
-                flat_lons,
-                flat_lats,
-                self.elevation_raw,
-                max_distance=0.05,
+            print("\n--- Resampling ELEVATION using rasterio ---")
+            elev_grid = resample_raster_to_grid(
+                self.elevation_raw, target_lats, target_lons,
+                categorical=False,
             )
-            elev_grid = elev_values.reshape(len(target_lats), len(target_lons))
 
             self.elevation_data = xr.DataArray(
                 elev_grid,
@@ -4835,14 +4913,11 @@ class ERA5LandGEEProcessor:
 
         # ========== PFT ==========
         if self.pft_raw is not None:
-            print("\n--- Resampling PFT using climate data approach ---")
-            pft_values = self.get_raster_at_location_direct(
-                flat_lons,
-                flat_lats,
-                self.pft_raw,
-                max_distance=0.05,
+            print("\n--- Resampling PFT using rasterio (mode) ---")
+            pft_grid = resample_raster_to_grid(
+                self.pft_raw, target_lats, target_lons,
+                categorical=True,
             )
-            pft_grid = pft_values.reshape(len(target_lats), len(target_lons))
 
             self.pft_data = xr.DataArray(
                 pft_grid.astype(int),
@@ -4862,14 +4937,11 @@ class ERA5LandGEEProcessor:
 
         # ========== CANOPY HEIGHT ==========
         if self.canopy_height_raw is not None:
-            print("\n--- Resampling CANOPY HEIGHT using climate data approach ---")
-            ch_values = self.get_raster_at_location_direct(
-                flat_lons,
-                flat_lats,
-                self.canopy_height_raw,
-                max_distance=0.05,
+            print("\n--- Resampling CANOPY HEIGHT using rasterio ---")
+            ch_grid = resample_raster_to_grid(
+                self.canopy_height_raw, target_lats, target_lons,
+                categorical=False,
             )
-            ch_grid = ch_values.reshape(len(target_lats), len(target_lons))
 
             self.canopy_height_data = xr.DataArray(
                 ch_grid,
@@ -4894,7 +4966,7 @@ class ERA5LandGEEProcessor:
 
         # ========== LAI ==========
         if self.lai_raw is not None:
-            print("\n--- Resampling LAI using climate data approach ---")
+            print("\n--- Resampling LAI using rasterio ---")
             lai_data = self.lai_raw["data"]  # Shape: (n_times, height, width)
             lai_times = self.lai_raw["times"]
             n_lai_times = len(lai_times)
@@ -4910,14 +4982,14 @@ class ERA5LandGEEProcessor:
                     "transform": self.lai_raw["transform"],
                     "nodata": self.lai_raw.get("nodata"),
                 }
-
+                
                 if t_idx == 0:
                     print(f"  Processing LAI time slice {t_idx} ({lai_times[t_idx]}):")
-
-                lai_values = self.get_raster_at_location_direct(
-                    flat_lons, flat_lats, lai_slice_dict, max_distance=0.05, default_value=np.nan
+                
+                lai_grid = resample_raster_to_grid(
+                    lai_slice_dict, target_lats, target_lons,
+                    categorical=False,
                 )
-                lai_grid = lai_values.reshape(len(target_lats), len(target_lons))
                 lai_resampled_times.append(lai_grid)
 
                 if t_idx == 0:
@@ -5659,8 +5731,12 @@ class ERA5LandGEEProcessor:
                         if time_feature_config and isinstance(point_df.index, pd.DatetimeIndex):
                             point_df = self.add_time_features(point_df)
 
-                        # Reset index
-                        point_df = point_df.reset_index()
+                        # Reset index only if timestamp is still in the index
+                        # (add_time_features may have already reset it)
+                        if isinstance(point_df.index, pd.DatetimeIndex):
+                            point_df = point_df.reset_index()
+                        elif "timestamp" not in point_df.columns:
+                            point_df = point_df.reset_index()
                         all_data.append(point_df)
 
                         print(f"  Created DataFrame with {len(point_df)} rows, columns: {point_df.columns.tolist()}")
@@ -5753,17 +5829,16 @@ class ERA5LandGEEProcessor:
                 and self.precip_climate_data is not None
             ):
                 try:
-                    # Use the reference coordinates to create the meshgrid
-                    lon_grid, lat_grid = np.meshgrid(ref_lons, ref_lats)
-                    flat_lons, flat_lats = lon_grid.flatten(), lat_grid.flatten()
-                    print(f"Getting climate data for {len(flat_lons)} grid points...")
-
-                    temps_flat, precips_flat = self.get_climate_at_location_direct(
-                        flat_lons, flat_lats, self.temp_climate_data, self.precip_climate_data
+                    # Resample climate data using rasterio
+                    print(f"Resampling climate data to {len(ref_lats)}x{len(ref_lons)} grid using rasterio...")
+                    temp_grid = resample_raster_to_grid(
+                        self.temp_climate_data, ref_lats, ref_lons,
+                        categorical=False,
                     )
-                    # Reshape back to grid matching reference lat/lon order
-                    temp_grid = temps_flat.reshape(len(ref_lats), len(ref_lons))
-                    precip_grid = precips_flat.reshape(len(ref_lats), len(ref_lons))
+                    precip_grid = resample_raster_to_grid(
+                        self.precip_climate_data, ref_lats, ref_lons,
+                        categorical=False,
+                    )
 
                     # Create DataArrays using reference coordinates
                     temp_grid_da = xr.DataArray(
@@ -5988,18 +6063,12 @@ class ERA5LandGEEProcessor:
                 try:
                     print(f"  Processing {var_name}...")
 
-                    # Create meshgrid from merged dataset coordinates (SAME AS CLIMATE DATA APPROACH)
-                    lon_grid, lat_grid = np.meshgrid(merged_lons, merged_lats)
-                    flat_lons = lon_grid.flatten()
-                    flat_lats = lat_grid.flatten()
-
-                    # Use the same lookup method as climate data
-                    values = self.get_raster_at_location_direct(
-                        flat_lons, flat_lats, raw_data_dict, max_distance=0.05, default_value=default_value
+                    # Resample using rasterio (replaces KD-tree)
+                    values_grid = resample_raster_to_grid(
+                        raw_data_dict, merged_lats, merged_lons,
+                        categorical=is_categorical,
+                        nodata_value=default_value,
                     )
-
-                    # Reshape to grid
-                    values_grid = values.reshape(n_lats, n_lons)
 
                     if is_categorical:
                         values_grid = np.nan_to_num(values_grid, nan=default_value).astype(int)
@@ -6081,26 +6150,19 @@ class ERA5LandGEEProcessor:
 
                     print(f"    LAI has {n_lai_times} time slices")
 
-                    # Create meshgrid from merged dataset coordinates
-                    lon_grid, lat_grid = np.meshgrid(merged_lons, merged_lats)
-                    flat_lons = lon_grid.flatten()
-                    flat_lats = lat_grid.flatten()
-
-                    # Resample each LAI time slice spatially
+                    # Resample each LAI time slice spatially using rasterio
                     lai_resampled_times = []
                     for t_idx in range(n_lai_times):
-                        # Create temporary dict for this time slice
                         lai_slice_dict = {
                             "data": lai_data[t_idx],
                             "transform": lai_raw_dict["transform"],
                             "nodata": lai_raw_dict.get("nodata", np.nan),
                         }
 
-                        # Use same lookup method as climate data
-                        lai_values = self.get_raster_at_location_direct(
-                            flat_lons, flat_lats, lai_slice_dict, max_distance=0.05, default_value=np.nan
+                        lai_grid = resample_raster_to_grid(
+                            lai_slice_dict, merged_lats, merged_lons,
+                            categorical=False,
                         )
-                        lai_grid = lai_values.reshape(n_lats, n_lons)
                         lai_resampled_times.append(lai_grid)
 
                         # Debug first slice
@@ -6524,7 +6586,7 @@ class ERA5LandGEEProcessor:
             Path(s) to the saved file(s)
         """
         if output_path is None:
-            output_path = config.PREDICTION_DIR / f"prediction_dataset_{int(time.time())}.csv"
+            output_path = config.PREDICTION_DIR / f"prediction_dataset_{int(time.time())}{self.output_ext}"
 
         output_path = Path(output_path)
         output_path.parent.mkdir(exist_ok=True, parents=True)
@@ -6540,7 +6602,7 @@ class ERA5LandGEEProcessor:
                     single_df["ta"] = single_df["ta"] - 273.15  # Convert to Celsius
                 if "td" in single_df.columns:
                     single_df["td"] = single_df["td"] - 273.15  # Convert to Celsius
-                single_df.to_csv(file_path, index=False)
+                save_df(single_df, file_path)
                 print(f"Saved dataset to {file_path}")
                 saved_paths.append(str(file_path))
 
@@ -6566,7 +6628,7 @@ class ERA5LandGEEProcessor:
                 print(
                     f"Warning: 'td' column missing in the combined DataFrame. Cannot convert units for {output_path.name}"
                 )
-            df_to_save.to_csv(output_path, index=False)
+            save_df(df_to_save, output_path)
             print(f"Saved dataset to {output_path}")
             return str(output_path)
 
@@ -6632,7 +6694,7 @@ class ERA5LandGEEProcessor:
                 output_dir.mkdir(exist_ok=True, parents=True)
 
                 # Save daily prediction dataset
-                output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}.csv"
+                output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}{self.output_ext}"
                 self.save_prediction_dataset(df, output_file)
 
                 print(f"Saved prediction dataset for {year}-{month:02d}-{day:02d} to {output_file}")
@@ -6708,7 +6770,7 @@ class ERA5LandGEEProcessor:
             # We use a generator to keep memory usage low during concatenation
             def frame_generator(files):
                 for f in files:
-                    yield pd.read_csv(f)
+                    yield read_df(f)
 
             combined_df = pd.concat(frame_generator(temp_files), ignore_index=True)
 
@@ -6733,7 +6795,7 @@ class ERA5LandGEEProcessor:
             output_dir = Path(output_dir)
             output_dir.mkdir(exist_ok=True, parents=True)
 
-            output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}.csv"
+            output_file = output_dir / f"prediction_{year}_{month:02d}_{day:02d}{self.output_ext}"
 
             # Use our standard save utility (handles Kelvin to Celsius conversion)
             self.save_prediction_dataset(combined_df, output_file)
@@ -6867,7 +6929,10 @@ class ERA5LandGEEProcessor:
         dataframes = []
         for file_path in file_paths:
             try:
-                df = pd.read_csv(file_path, parse_dates=["timestamp"], index_col="timestamp")
+                df = read_df(file_path)
+                if "timestamp" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    df = df.set_index("timestamp")
                 dataframes.append(df)
                 print(f"Read file: {file_path} with {len(df)} rows")
             except Exception as e:
@@ -6900,15 +6965,15 @@ class ERA5LandGEEProcessor:
             if len(parts) >= 3:
                 year = parts[1]
                 month = parts[2]
-                output_file = config.PREDICTION_DIR / f"era5land_gee_prediction_{year}_{month}.csv"
+                output_file = config.PREDICTION_DIR / f"era5land_gee_prediction_{year}_{month}{self.output_ext}"
             else:
-                output_file = config.PREDICTION_DIR / "era5land_gee_prediction_merged.csv"
+                output_file = config.PREDICTION_DIR / f"era5land_gee_prediction_merged{self.output_ext}"
 
         output_file = Path(output_file)
         output_file.parent.mkdir(exist_ok=True, parents=True)
 
         # Save merged dataset
-        merged_df.to_csv(output_file)
+        save_df(merged_df, output_file)
         print(f"Saved merged dataset with {len(merged_df)} rows to {output_file}")
 
         return str(output_file)
@@ -7086,6 +7151,13 @@ Examples:
     parser.add_argument(
         "--monthly-output", action="store_true", help="Explicitly save monthly files (default behavior)"
     )
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        choices=["parquet", "csv"],
+        default="parquet",
+        help="Output data format (default: parquet)",
+    )
 
     # Region options
     parser.add_argument("--shapefile", type=str, default=None, help="Path to shapefile for region definition")
@@ -7153,7 +7225,7 @@ Examples:
     # INITIALIZE PROCESSOR
     # ============================================================
     try:
-        processor = ERA5LandGEEProcessor(time_scale=args.time_scale)
+        processor = ERA5LandGEEProcessor(time_scale=args.time_scale, output_format=args.output_format)
 
         output_dir = Path(args.output) if args.output else config.PREDICTION_DIR
 

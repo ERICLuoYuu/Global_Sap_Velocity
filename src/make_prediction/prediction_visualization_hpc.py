@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 # Canonical timestamp column candidates (tried in order)
 _TIMESTAMP_CANDIDATES = [
-    "timestamp", "timestamp.1", "date", "datetime", "time",
+    "timestamp", "date", "datetime", "time",
     "Date", "Timestamp", "TIMESTAMP",
 ]
 
@@ -448,7 +448,7 @@ def rasterize_timestamp(
     timestamp_value: str,
     output_tif: str,
     value_column: str = "sap_velocity_cnn_lstm",
-    timestamp_col: str = "timestamp.1",
+    timestamp_col: str = "timestamp",
     sw_in_threshold: float = 15.0,
     resolution: float = 0.1,
     lat_range: Optional[Tuple[float, float]] = None,
@@ -1111,7 +1111,7 @@ def run_batch(
             f"file_glob '{file_glob}' contains unsafe path components."
         )
     pattern = os.path.join(input_dir, file_glob)
-    pred_files = sorted(globmod.glob(pattern))
+    pred_files = sorted(globmod.glob(pattern, recursive=True))
     # Filter to only CSV and Parquet files
     pred_files = [f for f in pred_files if f.endswith((".csv", ".parquet"))]
     if not pred_files:
@@ -1228,8 +1228,13 @@ def build_parser() -> argparse.ArgumentParser:
              "(timestamp.1, date, datetime, etc.).",
     )
     parser.add_argument(
-        "--csv-glob", default="*predictions*.csv",
-        help="Glob pattern to select CSV files within --input-dir.",
+        "--file-glob", default="*predictions*.*",
+        help="Glob pattern to select input files within --input-dir. "
+             "Supports **/ for recursive matching (e.g. '**/*.parquet').",
+    )
+    parser.add_argument(
+        "--csv-glob", dest="file_glob", default=None,
+        help=argparse.SUPPRESS,  # backward-compat alias
     )
     parser.add_argument(
         "--sw-threshold", type=float, default=15.0,
@@ -1315,7 +1320,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         time_scale=args.time_scale,
         hourly_agg=args.hourly_agg,
         hourly_maps=args.hourly_maps,
-        file_glob=args.csv_glob,
+        file_glob=args.file_glob,
         sw_in_threshold=args.sw_threshold,
         resolution=args.resolution,
         lat_range=lat_range,

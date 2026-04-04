@@ -38,6 +38,7 @@ import rasterio
 import rasterio.features
 import rasterio.transform
 import xarray as xr
+from rasterio_resample import resample_raster_to_grid
 
 # ---------------------------------------------------------------------------
 # Local config (same module used by predict_sap_velocity_sequantial.py)
@@ -152,7 +153,7 @@ def _cds_client():
     """
     import cdsapi  # imported here so the rest of the module loads without cdsapi
 
-    return cdsapi.Client()
+    return cdsapi.Client(retry_max=60, sleep_max=120)
 
 
 def _download_with_retry(client, dataset: str, request: dict, target: Path) -> Path:
@@ -173,6 +174,7 @@ def _download_with_retry(client, dataset: str, request: dict, target: Path) -> P
                 or "connection" in msg
                 or "server" in msg
                 or "503" in msg
+                or "retry" in msg
             )
             if retryable and attempt < MAX_RETRIES:
                 logger.warning("Retryable error (%s). Sleeping %.0fs before retry.", exc, backoff)
@@ -743,29 +745,20 @@ def _read_raster_to_era5_grid(
     raster_path: Path,
     era5_lats: np.ndarray,
     era5_lons: np.ndarray,
+    categorical: bool = False,
 ) -> np.ndarray:
-    """Read a GeoTIFF and resample it onto the ERA5-Land grid (nearest)."""
-    with rasterio.open(raster_path) as src:
-        data = src.read(1)
-        transform = src.transform
-        nodata = src.nodata
+    """Read a GeoTIFF and resample it onto the ERA5-Land grid.
 
-    rows, cols = data.shape
-    # Build pixel-centre coordinates from the transform
-    src_lons = transform.c + (np.arange(cols) + 0.5) * transform.a
-    src_lats = transform.f + (np.arange(rows) + 0.5) * transform.e
-
-    # Nearest-neighbour resampling
-    lat_idx = np.searchsorted(-src_lats, -era5_lats)  # descending → negate
-    lon_idx = np.searchsorted(src_lons, era5_lons)
-
-    lat_idx = np.clip(lat_idx, 0, rows - 1)
-    lon_idx = np.clip(lon_idx, 0, cols - 1)
-
-    out = data[np.ix_(lat_idx, lon_idx)].astype(np.float32)
-    if nodata is not None:
-        out[out == nodata] = np.nan
-    return out
+    Uses rasterio.warp.reproject via resample_raster_to_grid:
+      - categorical=True  → Resampling.mode  (majority vote, for PFT)
+      - categorical=False → Resampling.nearest (default, for continuous vars)
+    """
+    return resample_raster_to_grid(
+        source=raster_path,
+        target_lats=era5_lats,
+        target_lons=era5_lons,
+        categorical=categorical,
+    )
 
 
 
@@ -957,14 +950,20 @@ def _download_static_from_gee(
             logger.error("All %s tiles failed — returning zeros", label)
             return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
 
-        # Resample to exact ERA5 grid
-        from scipy.ndimage import zoom
+        # Resample tiled output to exact ERA5 grid via rasterio
+        from rasterio.transform import from_bounds as _from_bounds
         nlat, nlon = len(era5_lats), len(era5_lons)
         if output_array.shape != (nlat, nlon):
-            zoom_h = nlat / max(output_array.shape[0], 1)
-            zoom_w = nlon / max(output_array.shape[1], 1)
-            output_array = zoom(output_array, (zoom_h, zoom_w), order=0)
-            output_array = output_array[:nlat, :nlon]
+            src_transform = _from_bounds(
+                min_lon, min_lat, max_lon, max_lat,
+                output_array.shape[1], output_array.shape[0],
+            )
+            output_array = resample_raster_to_grid(
+                source={"data": output_array, "transform": src_transform},
+                target_lats=era5_lats,
+                target_lons=era5_lons,
+                categorical=False,
+            )
 
         valid = output_array[~np.isnan(output_array)]
         coverage = len(valid) / output_array.size * 100
@@ -1145,14 +1144,20 @@ def _download_pft_from_gee(
             logger.error("All PFT tiles failed — returning zeros")
             return np.zeros((len(era5_lats), len(era5_lons)), dtype=np.float32)
 
-        # Resample tiled output to exact ERA5 grid using nearest-neighbor
-        from scipy.ndimage import zoom
+        # Resample tiled output to exact ERA5 grid via rasterio (mode for categorical)
+        from rasterio.transform import from_bounds as _from_bounds
         nlat, nlon = len(era5_lats), len(era5_lons)
         if output_array.shape != (nlat, nlon):
-            zoom_h = nlat / max(output_array.shape[0], 1)
-            zoom_w = nlon / max(output_array.shape[1], 1)
-            output_array = zoom(output_array, (zoom_h, zoom_w), order=0)
-            output_array = output_array[:nlat, :nlon]
+            src_transform = _from_bounds(
+                min_lon, min_lat, max_lon, max_lat,
+                output_array.shape[1], output_array.shape[0],
+            )
+            output_array = resample_raster_to_grid(
+                source={"data": output_array, "transform": src_transform},
+                target_lats=era5_lats,
+                target_lons=era5_lons,
+                categorical=True,
+            )
 
         valid = output_array[~np.isnan(output_array) & (output_array > 0)]
         unique_classes = np.unique(valid).astype(int) if len(valid) > 0 else []
@@ -1221,7 +1226,7 @@ def load_static_datasets(
     for p in pft_candidates:
         if p.exists():
             logger.info("Loading PFT from %s", p)
-            static["pft"] = _read_raster_to_era5_grid(p, era5_lats, era5_lons)
+            static["pft"] = _read_raster_to_era5_grid(p, era5_lats, era5_lons, categorical=True)
             break
     if "pft" not in static:
         # Download from GEE: MODIS MCD12Q1 LC_Type1

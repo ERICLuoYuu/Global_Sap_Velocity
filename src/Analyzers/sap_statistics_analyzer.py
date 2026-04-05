@@ -251,6 +251,23 @@ class SapFlowStatisticsAnalyzer:
                 if species.nunique() > 5:
                     stats['species_list'] += f'... (+{species.nunique() - 5} more)'
         
+        # Sapwood area estimability: trees missing pl_sapw_area but having
+        # pl_dbh, pl_bark_thick, and pl_sapw_depth (annular ring formula)
+        has_no_sapw = (
+            plant_md['pl_sapw_area'].isna()
+            if 'pl_sapw_area' in plant_md.columns
+            else pd.Series(True, index=plant_md.index)
+        )
+        has_dbh = plant_md['pl_dbh'].notna() if 'pl_dbh' in plant_md.columns else pd.Series(False, index=plant_md.index)
+        has_bark = plant_md['pl_bark_thick'].notna() if 'pl_bark_thick' in plant_md.columns else pd.Series(False, index=plant_md.index)
+        has_depth = plant_md['pl_sapw_depth'].notna() if 'pl_sapw_depth' in plant_md.columns else pd.Series(False, index=plant_md.index)
+        
+        estimable = has_no_sapw & has_dbh & has_bark & has_depth
+        stats['sapw_area_estimable_trees'] = int(estimable.sum())
+        stats['sapw_area_estimable'] = estimable.sum() > 0
+        stats['sapw_area_total_trees'] = len(plant_md)
+        stats['sapw_area_missing_trees'] = int(has_no_sapw.sum())
+        
         return stats
     
     def load_env_data(self, site_id: str) -> Optional[pd.DataFrame]:
@@ -747,6 +764,8 @@ class SapFlowStatisticsAnalyzer:
                 'height_mean', 'height_median', 'height_min', 'height_max',
                 'age_mean', 'age_median', 'age_min', 'age_max',
                 'sapw_depth_mean', 'sapw_depth_median',
+                'sapw_area_estimable', 'sapw_area_estimable_trees',
+                'sapw_area_missing_trees', 'sapw_area_total_trees',
                 'n_species', 'species_list'
             ]
         else:
@@ -866,6 +885,22 @@ class SapFlowStatisticsAnalyzer:
                         'max_site_mean': age_data.max(),
                     }
             
+            # Sapwood area estimability summary
+            if 'sapw_area_estimable' in valid_df.columns:
+                estimable_sites = valid_df[
+                    (valid_df['sapw_area_estimable'] == True)
+                    & (valid_df.get('sapw_area_n', pd.Series(dtype=float)).isna() | (valid_df.get('sapw_area_n', pd.Series(dtype=float)) == 0))
+                ]
+                # Sites that have no recorded sapwood area but could estimate it
+                sites_no_sapw = valid_df[valid_df.get('sapw_area_n', pd.Series(dtype=float)).isna() | (valid_df.get('sapw_area_n', pd.Series(dtype=float)) == 0)]
+                summary['sapw_area_estimability'] = {
+                    'sites_with_recorded_sapw_area': int((valid_df.get('sapw_area_n', pd.Series(dtype=float)).fillna(0) > 0).sum()),
+                    'sites_missing_sapw_area': len(sites_no_sapw),
+                    'sites_estimable_from_dbh_bark_depth': len(estimable_sites),
+                    'estimable_site_ids': estimable_sites['site_id'].tolist() if len(estimable_sites) <= 50 else estimable_sites['site_id'].tolist()[:50],
+                    'total_estimable_trees': int(valid_df['sapw_area_estimable_trees'].sum()) if 'sapw_area_estimable_trees' in valid_df.columns else 0,
+                }
+
             # Biome distribution
             if 'biome' in valid_df.columns:
                 biome_data = valid_df['biome'].dropna()

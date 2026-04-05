@@ -5444,6 +5444,55 @@ def main(run_id="default"):
 
         traceback.print_exc()
 
+    # === AOA Reference Generation (M7) ===
+    try:
+        from src.aoa.prepare import build_aoa_reference
+
+        # 1. Derive fold labels from CV splitter
+        fold_labels = np.full(len(X_all_records), -1, dtype=int)
+        for fold_idx, (_, test_idx) in enumerate(
+            outer_cv.split(X_all_records, y_all_stratified, groups_all_records)
+        ):
+            fold_labels[test_idx] = fold_idx
+        assert (fold_labels >= 0).all(), "Some samples not assigned to any fold"
+
+        # 2. Load SHAP importance (already saved above)
+        shap_csv_path = plot_dir / "shap_feature_importance.csv"
+        shap_df = pd.read_csv(shap_csv_path)
+        shap_importances = shap_df.set_index("feature")["importance"].reindex(
+            final_feature_names
+        ).values
+        assert not np.any(np.isnan(shap_importances)), \
+            f"SHAP features do not match final_feature_names: {final_feature_names}"
+
+        # 3. Build AOA reference
+        aoa_ref_path = build_aoa_reference(
+            X_train=X_all_records,
+            fold_labels=fold_labels,
+            shap_importances=shap_importances,
+            feature_names=final_feature_names,
+            output_dir=model_dir,
+            run_id=run_id,
+            d_bar_method="full",
+        )
+        logging.info(f"AOA reference saved to {aoa_ref_path}")
+
+        # 4. Save backups for future backfill
+        np.savez(
+            model_dir / f"FINAL_cv_folds_{run_id}.npz",
+            fold_labels=fold_labels,
+            spatial_groups=groups_all_records,
+            site_ids=site_ids_all_records,
+            pfts=pfts_all_records,
+        )
+        pd.DataFrame(X_all_records, columns=final_feature_names).to_parquet(
+            model_dir / f"FINAL_X_train_{run_id}.parquet", index=False,
+        )
+        logging.info("AOA backups (cv_folds, X_train) saved")
+    except Exception as e:
+        logging.error(f"AOA reference generation failed: {e}")
+        logging.info("Model training completed successfully - AOA step failed separately")
+
     logging.info("\n" + "=" * 60)
     logging.info("=== ALL PROCESSING COMPLETE ===")
     logging.info("=" * 60)

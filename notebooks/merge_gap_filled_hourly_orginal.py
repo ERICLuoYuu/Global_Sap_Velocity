@@ -309,6 +309,43 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
                     except Exception as soil_e:
                         print(f"Error calculating soil hydraulics for {location_type}: {soil_e}")
 
+                # --- 3. AGGREGATE PLANT METADATA TO SITE LEVEL ---
+                site_plant_meta = {}
+                plant_md_file = paths.raw_csv_dir / f"{location_type}_plant_md.csv"
+                if plant_md_file.exists():
+                    try:
+                        pmd = pd.read_csv(plant_md_file)
+                        pmd = pmd.replace("NA", np.nan)
+
+                        site_plant_meta["site_n_trees"] = len(pmd)
+
+                        # DBH statistics
+                        dbh = pd.to_numeric(pmd.get("pl_dbh"), errors="coerce").dropna()
+                        site_plant_meta["site_mean_dbh"] = dbh.mean() if len(dbh) > 0 else np.nan
+                        site_plant_meta["site_std_dbh"] = dbh.std() if len(dbh) > 1 else np.nan
+
+                        # Species / genus diversity
+                        species = pmd.get("pl_species", pd.Series(dtype=str)).dropna()
+                        site_plant_meta["site_n_species"] = species.nunique() if len(species) > 0 else np.nan
+                        genera = species.str.split().str[0]
+                        site_plant_meta["site_n_genera"] = genera.nunique() if len(genera) > 0 else np.nan
+                        if len(genera) > 0:
+                            dominant_genus = genera.value_counts().index[0]
+                            site_plant_meta["site_frac_dominant_genus"] = genera.value_counts().iloc[0] / len(genera)
+                            site_plant_meta["site_dominant_genus"] = dominant_genus
+                        else:
+                            site_plant_meta["site_frac_dominant_genus"] = np.nan
+                            site_plant_meta["site_dominant_genus"] = np.nan
+
+                        # Dominant sensing method
+                        sens = pmd.get("pl_sens_meth", pd.Series(dtype=str)).dropna()
+                        if len(sens) > 0:
+                            site_plant_meta["site_dominant_sens_meth"] = sens.value_counts().index[0]
+                        else:
+                            site_plant_meta["site_dominant_sens_meth"] = np.nan
+                    except Exception as pmd_e:
+                        print(f"  Warning: plant_md aggregation failed for {location_type}: {pmd_e}")
+
                 site_biome_mapping[location_type] = biome_type
                 all_pft_types.add(igbp_type)
 
@@ -442,6 +479,9 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
                 target_df["soil_theta_wp"] = theta_wp
                 target_df["soil_theta_fc"] = theta_fc
                 target_df["soil_theta_sat"] = theta_sat
+                # Site-aggregated plant metadata
+                for pm_key, pm_val in site_plant_meta.items():
+                    target_df[pm_key] = pm_val
                 return target_df
 
             df_hourly = add_static_vars(df_hourly)
@@ -547,7 +587,7 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
                 df_hourly_for_daily = df_hourly
 
             # Define Static columns that should NOT be summed/min/maxed (just take first)
-            static_prefixes = ["soil_", "biome", "pft", "site_name", "solar_TIMESTAMP"]
+            static_prefixes = ["soil_", "biome", "pft", "site_name", "site_", "solar_TIMESTAMP"]
             static_exact = [
                 "latitude",
                 "longitude",

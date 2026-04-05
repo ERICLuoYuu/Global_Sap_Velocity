@@ -11,7 +11,6 @@ parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 from path_config import PathConfig, get_default_paths
-from src.cross_validation.timeseries_split import GroupedTimeSeriesSplit
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, ParameterGrid, ParameterSampler

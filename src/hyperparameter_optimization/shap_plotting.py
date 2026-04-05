@@ -5,6 +5,8 @@ Extracted from test_hyperparameter_tuning_ML_spatial_stratified.py. Contains
 all PFT grouping, SHAP aggregation, and SHAP visualization functions.
 """
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 

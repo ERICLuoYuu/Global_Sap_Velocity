@@ -5,12 +5,14 @@ Loads saved model artifacts (model, scaler, transformer, config, context bundle)
 and runs the full 13-step SHAP analysis independently of training.
 
 Usage:
-    python -m src.hyperparameter_optimization.run_shap_analysis_ml \
-        --model_dir outputs/models/xgb/my_run_id \
-        --run_id my_run_id \
+    python -m src.hyperparameter_optimization.run_shap_analysis_ml \\
+        --model_dir outputs/models/xgb/my_run_id \\
+        --run_id my_run_id \\
         --model_type xgb \
         --shap_sample_size 50000
 """
+
+from __future__ import annotations
 
 import argparse
 import json

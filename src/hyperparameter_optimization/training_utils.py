@@ -5,6 +5,8 @@ Extracted from test_hyperparameter_tuning_ML_spatial_stratified.py for reuse
 across training, prediction, and standalone SHAP analysis scripts.
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
 import warnings

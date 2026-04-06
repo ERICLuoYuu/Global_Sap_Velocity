@@ -311,4 +311,10 @@ def parse_args():
         default=[],
         help="Feature engineering groups: interactions lags_1d rolling_3d rolling_7d rolling_14d physics precip_memory indicators static_enrich",
     )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=None,
+        help="Override data directory path (e.g. for growing-season-filtered data)",
+    )
     return parser.parse_args()

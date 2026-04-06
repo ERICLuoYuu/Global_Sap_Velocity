@@ -108,14 +108,12 @@ def load_artifacts(model_dir: Path, run_id: str, model_type: str):
         with open(site_info_path) as f:
             site_info_dict = json.load(f)
 
-    # Load scaler
+    # Load scaler (saved with joblib.dump in training)
     scaler_path = model_dir / f"FINAL_scaler_{run_id}_feature.pkl"
     scaler = None
     if scaler_path.exists():
-        import pickle
-
-        with open(scaler_path, "rb") as f:
-            scaler = pickle.load(f)
+        logging.info(f"Loading scaler from: {scaler_path}")
+        scaler = joblib.load(scaler_path)
 
     # Load target transformer (config nests under "preprocessing")
     transformer = None
@@ -146,6 +144,7 @@ def run_shap_analysis(
     y_all_records = context["y_all_records"]
     site_ids_all_records = context["site_ids"]
     timestamps_all = context["timestamps"]
+    groups_all_records = context["groups"] if "groups" in context.files else None
     pfts_all_records = context["pfts"]
 
     # Extract config values (nested under data_info in training config)
@@ -323,7 +322,9 @@ def run_shap_analysis(
                 pft_labels_series = temp_X_pft.idxmax(axis=1)
                 plot_df = pd.DataFrame({"PFT": pft_labels_series.values, "SHAP": y_val})
                 order = plot_df.groupby("PFT")["SHAP"].median().sort_values().index
-                sns.boxplot(data=plot_df, x="PFT", y="SHAP", ax=ax, palette="Set2", order=order)
+                sns.boxplot(
+                    data=plot_df, x="PFT", y="SHAP", hue="PFT", ax=ax, palette="Set2", order=order, legend=False
+                )
                 ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
                 ax.set_title(f"Effect of {feature}", fontsize=12, fontweight="bold")
                 ax.set_ylabel(get_shap_label(), fontsize=10)

@@ -364,7 +364,17 @@ def plot_shap_by_pft_violin(
 
         feature_data = df_plot[df_plot["Feature"] == feature]
 
-        sns.violinplot(data=feature_data, x="PFT", y="SHAP Value", palette=palette, ax=ax, inner="box", cut=0)
+        sns.violinplot(
+            data=feature_data,
+            x="PFT",
+            y="SHAP Value",
+            hue="PFT",
+            palette=palette,
+            ax=ax,
+            inner="box",
+            cut=0,
+            legend=False,
+        )
 
         ax.axhline(0, color="red", linestyle="--", linewidth=1, alpha=0.7)
 

@@ -84,6 +84,94 @@ def get_weighted_soil_props(soil_row, depths=["0_5", "5_15", "15_30", "30_60", "
     return {p: weighted_sums[p] / total_thickness for p in properties}
 
 
+def filter_growing_season_by_sapflow(
+    df_daily: pd.DataFrame,
+    sap_col: str = "sap_velocity",
+    smooth_window: int = 14,
+    amplitude_threshold: float = 0.3,
+    sap_pct_threshold: float = 0.20,
+) -> tuple:
+    """
+    Filter daily data to growing-season rows using sap velocity amplitude.
+
+    Algorithm (operates on full time series, no per-year loops):
+      1. Smooth sap_velocity with a centered rolling mean (14-day default),
+         computed only on non-NaN observations to avoid bias from multi-year gaps.
+      2. Compute robust relative amplitude = (q95 - q05) / median of smoothed
+         series (insensitive to single-year anomalies).
+      3. If amplitude < 0.3 → site is evergreen-like → keep ALL rows.
+      4. Else → threshold = 20% of smoothed 95th percentile
+               → keep rows where smoothed > threshold.
+
+    Assumes daily-frequency rows in calendar order. Hourly DataFrames must be
+    aggregated to daily before calling this function.
+
+    Parameters
+    ----------
+    df_daily : pd.DataFrame
+        Daily-aggregated data with a sap_velocity column.
+    sap_col : str
+        Column name for sap velocity (default ``'sap_velocity'``).
+    smooth_window : int
+        Rolling-mean window in days (default 14).
+    amplitude_threshold : float
+        Robust relative amplitude below which the site is treated as evergreen (default 0.3).
+    sap_pct_threshold : float
+        Fraction of the smoothed 95th percentile used as the activity threshold (default 0.20).
+
+    Returns
+    -------
+    (filtered_df, stats) : tuple[pd.DataFrame, dict]
+    """
+    stats = {}
+    stats["n_before"] = len(df_daily)
+
+    if sap_col not in df_daily.columns or df_daily[sap_col].dropna().empty:
+        stats["rel_amplitude"] = np.nan
+        stats["is_evergreen"] = True
+        stats["threshold_value"] = np.nan
+        stats["n_after"] = len(df_daily)
+        stats["pct_retained"] = 100.0
+        return df_daily, stats
+
+    # Smooth only on non-NaN observations to avoid bias from multi-year data gaps
+    # (resample("D") pads gaps with NaN rows; rolling across those distorts edge values)
+    sap_valid = df_daily[sap_col].dropna()
+    smoothed_valid = sap_valid.rolling(smooth_window, center=True, min_periods=1).mean()
+    smoothed = smoothed_valid.reindex(df_daily.index)
+    smoothed = smoothed.clip(lower=0)  # guard against negative artifacts from edge effects
+
+    # Robust amplitude: (q95 - q05) / median — insensitive to single-year anomalies
+    smooth_median = smoothed.median()
+    q95 = smoothed.quantile(0.95)
+    q05 = smoothed.quantile(0.05)
+    if smooth_median > 0:
+        rel_amplitude = (q95 - q05) / smooth_median
+    elif q95 > 0:
+        # Zero median but non-zero peaks → clearly seasonal (e.g. deciduous with long winter)
+        rel_amplitude = float("inf")
+    else:
+        rel_amplitude = 0.0  # truly no signal
+    stats["rel_amplitude"] = rel_amplitude
+
+    if rel_amplitude < amplitude_threshold:
+        stats["is_evergreen"] = True
+        stats["threshold_value"] = np.nan
+        stats["n_after"] = len(df_daily)
+        stats["pct_retained"] = 100.0
+        return df_daily, stats
+
+    threshold = sap_pct_threshold * q95
+    mask = smoothed > threshold
+    filtered = df_daily.loc[mask]
+
+    stats["is_evergreen"] = False
+    stats["threshold_value"] = threshold
+    stats["n_after"] = len(filtered)
+    stats["pct_retained"] = 100.0 * len(filtered) / len(df_daily) if len(df_daily) > 0 else 0.0
+    return filtered, stats
+
+
 def calculate_daytime_mask(timestamps, lat, lon, elevation=0, elevation_threshold=0):
     """
     Calculate a boolean mask indicating daytime based on solar elevation.
@@ -131,7 +219,7 @@ def load_stand_age_map(base_path):
     return {}
 
 
-def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=False):
+def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=False, growing_season_only=False):
     """
     Merge sap flow and environmental data for all sites.
 
@@ -141,11 +229,23 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
         plant_level: If True, output one row per tree per timestamp (long format)
                      instead of site-averaged sap velocity. Joins plant_md.csv
                      to add tree metadata (pl_dbh, pl_species, pl_sens_meth, etc.).
+        growing_season_only: If True, apply sap-flow-based growing season filter
+                             after daily aggregation to remove dormant periods.
     """
+    # Collect per-site growing season stats
+    gs_stats_list = []
+
     if daytime_only:
         print("\n" + "=" * 60)
         print("DAYTIME-ONLY MODE ENABLED")
         print("Nighttime data will be filtered out before daily aggregation")
+        print("=" * 60 + "\n")
+
+    if growing_season_only:
+        print("\n" + "=" * 60)
+        print("GROWING-SEASON-ONLY MODE ENABLED")
+        print("Dormant-period rows will be removed after daily aggregation")
+        print("using sap-velocity amplitude gate + 20% of q95 threshold")
         print("=" * 60 + "\n")
 
     if plant_level:
@@ -670,10 +770,36 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
                 precip_PET = np.clip(precip / pet, 0, 10)
                 df_daily["prcip/PET"] = precip_PET
 
+            # --- GROWING SEASON FILTER (daily level) ---
+            if growing_season_only:
+                if plant_level and "pl_code" in df_daily.columns:
+                    # Filter per-tree to avoid mixing sap signals across trees
+                    filtered_parts = []
+                    for pl_code, grp in df_daily.groupby("pl_code"):
+                        filt, st = filter_growing_season_by_sapflow(grp)
+                        filtered_parts.append(filt)
+                        st["site"] = f"{location_type}_{pl_code}"
+                        gs_stats_list.append(st)
+                        print(
+                            f"  GS filter {location_type}/{pl_code}: kept {st['pct_retained']:.1f}% "
+                            f"({'evergreen' if st['is_evergreen'] else 'seasonal'})"
+                        )
+                    df_daily = pd.concat(filtered_parts, ignore_index=True)
+                else:
+                    df_daily, gs_stats = filter_growing_season_by_sapflow(df_daily)
+                    gs_stats["site"] = location_type
+                    gs_stats_list.append(gs_stats)
+                    print(
+                        f"  GS filter {location_type}: kept {gs_stats['pct_retained']:.1f}% "
+                        f"({'evergreen' if gs_stats['is_evergreen'] else 'seasonal'})"
+                    )
+
             # --- SAVE DAILY ---
             df_daily.to_csv(daily_out_dir / f"{location_type}_daily.csv", index=False)
 
             # --- COLLECT FOR BIOME MERGING ---
+            # Note: hourly output retains full-year data even with --growing-season-only.
+            # Only daily output (the model-training input) is filtered.
             if biome_type not in biome_merged_hourly:
                 biome_merged_hourly[biome_type] = []
                 biome_merged_daily[biome_type] = []
@@ -741,6 +867,15 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
             output_base_dir / "site_biome_mapping.csv", index=False
         )
 
+        # Save growing season filter statistics
+        if growing_season_only and gs_stats_list:
+            gs_df = pd.DataFrame(gs_stats_list)
+            gs_df.to_csv(output_base_dir / "growing_season_stats.csv", index=False)
+            print(f"\nGrowing season stats saved ({len(gs_df)} sites)")
+            n_evergreen = gs_df["is_evergreen"].sum()
+            print(f"  Evergreen/low-variation: {n_evergreen}, Seasonal: {len(gs_df) - n_evergreen}")
+            print(f"  Mean retention: {gs_df['pct_retained'].mean():.1f}%")
+
         print(f"Processing complete. Data saved to {output_base_dir}")
         return daily_all
 
@@ -763,6 +898,12 @@ def main():
         help="Output one row per tree per timestamp (long format) instead of site-averaged. "
         "Joins plant_md.csv to add tree metadata (pl_dbh, pl_species, pl_sens_meth, etc.).",
     )
+    parser.add_argument(
+        "--growing-season-only",
+        action="store_true",
+        help="Apply sap-flow-based growing season filter after daily aggregation. "
+        "Removes dormant-period rows using amplitude gate + 20% of q95 threshold.",
+    )
     args = parser.parse_args()
     # Defines the base directory for output
     if args.output_dir:
@@ -770,7 +911,16 @@ def main():
     else:
         output_base_dir = paths.merged_data_root
 
-    merge_sap_env_data_site(output_base_dir, daytime_only=args.daytime_only, plant_level=args.plant_level)
+    # Auto-append growing_season/ subdirectory when filter is active
+    if args.growing_season_only:
+        output_base_dir = output_base_dir / "growing_season"
+
+    merge_sap_env_data_site(
+        output_base_dir,
+        daytime_only=args.daytime_only,
+        plant_level=args.plant_level,
+        growing_season_only=args.growing_season_only,
+    )
 
 
 if __name__ == "__main__":

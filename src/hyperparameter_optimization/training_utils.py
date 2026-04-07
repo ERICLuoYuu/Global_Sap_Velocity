@@ -284,7 +284,12 @@ def parse_args():
     parser.add_argument("--BALANCED", type=bool, default=False, help="Whether to balance the spatial groups")
     parser.add_argument("--SPLIT_TYPE", type=str, default="spatial_stratified", help="Type of data splitting strategy")
     parser.add_argument("--IS_ONLY_DAY", type=bool, default=False, help="Whether to use only day data")
-    parser.add_argument("--additional_features", nargs="*", default=[], help="List of features")
+    parser.add_argument(
+        "--selected_features",
+        type=str,
+        required=True,
+        help="Path to JSON file with feature names. Training uses exactly these features.",
+    )
     parser.add_argument("--TIME_SCALE", type=str, default="daily", help="Time scale of the data: hourly or daily")
     parser.add_argument("--SHAP_SAMPLE_SIZE", type=int, default=50000, help="Sample size for SHAP analysis")
     parser.add_argument("--IS_TRANSFORM", type=bool, default=True, help="Whether to apply target transformation")

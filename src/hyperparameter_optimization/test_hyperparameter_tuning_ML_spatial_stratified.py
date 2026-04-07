@@ -23,45 +23,50 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 # Import the randomization control module first
-from src.hyperparameter_optimization.plot_fold_distribution import FoldDistributionAnalyzer
+from src.hyperparameter_optimization.plot_fold_distribution import FoldDistributionAnalyzer  # noqa: E402
 
 # Import the time series windowing modules
-from src.hyperparameter_optimization.timeseries_processor1 import TimeSeriesSegmenter
-from src.utils.random_control import deterministic, set_seed
+from src.hyperparameter_optimization.timeseries_processor1 import TimeSeriesSegmenter  # noqa: E402
+from src.utils.random_control import deterministic, set_seed  # noqa: E402
 
 # Set the master seed at the very beginning
 set_seed(42)
 
 # Now import all other dependencies
-import json
+import json  # noqa: E402
 
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import tensorflow as tf
-from matplotlib.colors import ListedColormap
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import tensorflow as tf  # noqa: E402
+from matplotlib.colors import ListedColormap  # noqa: E402
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score  # noqa: E402
 
 # Import StratifiedGroupKFold and GroupKFold for spatial stratified cross-validation
-from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
+from sklearn.model_selection import GroupKFold, StratifiedGroupKFold  # noqa: E402
 
-from path_config import PathConfig
+from path_config import PathConfig  # noqa: E402
 
 # Apply additional determinism settings
 tf.random.set_seed(42)
 np.random.seed(42)
 
 # Import the hyperparameter optimizer
-from src.hyperparameter_optimization.feature_engineering import add_sap_flow_features, apply_feature_engineering
-from src.hyperparameter_optimization.hyper_tuner import MLOptimizer
+from src.hyperparameter_optimization.feature_engineering import (  # noqa: E402
+    add_sap_flow_features,
+    apply_feature_engineering,
+)
+from src.hyperparameter_optimization.hyper_tuner import MLOptimizer  # noqa: E402
 
 # Constants and helpers imported from shap_constants.py
+from src.hyperparameter_optimization.shap_constants import PFT_COLUMNS  # noqa: E402
+
 # SHAP plotting functions imported from shap_plotting.py
-from src.hyperparameter_optimization.shap_plotting import (
+from src.hyperparameter_optimization.shap_plotting import (  # noqa: E402
     generate_windowed_feature_names,
 )
-from src.hyperparameter_optimization.target_transformer import TargetTransformer
-from src.hyperparameter_optimization.training_utils import (
+from src.hyperparameter_optimization.target_transformer import TargetTransformer  # noqa: E402
+from src.hyperparameter_optimization.training_utils import (  # noqa: E402
     add_time_features,
     convert_windows_to_numpy,
     create_spatial_groups,
@@ -96,10 +101,8 @@ def main(run_id="default"):
     spatial_split_method = args.spatial_split_method
     SPLIT_TYPE = args.SPLIT_TYPE
     BALANCED = args.BALANCED
-    additional_features = args.additional_features
     feature_groups = args.feature_groups
     TIME_SCALE = args.TIME_SCALE
-    SHAP_SAMPLE_SIZE = args.SHAP_SAMPLE_SIZE
     IS_TRANSFORM = args.IS_TRANSFORM
     TRANSFORM_METHOD = args.TRANSFORM_METHOD if IS_TRANSFORM else "none"
     GRID_SIZE = args.grid_size
@@ -152,36 +155,24 @@ def main(run_id="default"):
     site_data_dict = {}
     site_info_dict = {}
 
-    base_features = [
-        TARGET_COL,
-        "sw_in",
-        "ws",
-        "precip",
-        "ta",
-        "ta_max",
-        "ta_min",
-        "vpd",
-        "vpd_max",
-        "vpd_min",
-        "ext_rad",
-        "ppfd_in",
-        "pft",
-        "canopy_height",
-        "elevation",
-        "LAI",
-        "prcip/PET",
-        "volumetric_soil_water_layer_1",
-        "soil_temperature_level_1",
-        "day_length",
-    ]
-
-    # Exclude daily-aggregated features not available in hourly data
-    DAILY_ONLY_COLS = {"day_length", "ta_max", "ta_min", "vpd_max", "vpd_min"}
-    if TIME_SCALE == "hourly":
-        base_features = [f for f in base_features if f not in DAILY_ONLY_COLS]
-        logging.info(f"Hourly mode: excluded {DAILY_ONLY_COLS} from base_features")
-    used_cols = list(set(base_features + additional_features))
-    logging.info(f"Using columns: {used_cols}")
+    # Load selected features from JSON — single source of truth
+    with open(args.selected_features) as _sf:
+        _sf_data = json.load(_sf)
+    _sf_list = _sf_data.get("selected_features", _sf_data) if isinstance(_sf_data, dict) else _sf_data
+    if not isinstance(_sf_list, list):
+        raise ValueError(
+            f"selected_features JSON must contain a list or a dict with 'selected_features' key. "
+            f"Got: {type(_sf_list).__name__}"
+        )
+    if "pft" in _sf_list:
+        raise ValueError(
+            f"selected_features JSON contains raw 'pft' column. Use individual PFT names instead: {PFT_COLUMNS}"
+        )
+    used_cols = sorted(_sf_list)
+    # Ensure TARGET_COL is included
+    if TARGET_COL not in used_cols:
+        used_cols = [TARGET_COL] + used_cols
+    logging.info(f"Loaded {len(used_cols)} features from {args.selected_features}: {used_cols}")
 
     all_possible_pft_types = PFT_COLUMNS
     max_sap = 0
@@ -232,68 +223,42 @@ def main(run_id="default"):
 
             df["latitude"] = latitude
             df["longitude"] = longitude
-            # Add engineered features (only used if listed in additional_features)
+            # Add engineered features (only used if listed in selected_features)
             df = add_sap_flow_features(df, verbose=False)
 
             pft_value = df[pft_col].mode()[0]
-            print(pft_value)
+            logging.debug(f"PFT value: {pft_value}")
 
             df.set_index("solar_TIMESTAMP", inplace=True)
             df.sort_index(inplace=True)  # Ensure chronological order
             df = add_time_features(df, datetime_column=None)
 
             # Apply feature engineering groups (if any requested)
-            engineered_names = []
             if feature_groups:
-                df, engineered_names = apply_feature_engineering(df, feature_groups, TIME_SCALE, verbose=True)
-                # Extend used_cols with engineered feature names (once)
-                for fname in engineered_names:
-                    if fname not in used_cols:
-                        used_cols.append(fname)
+                df, _ = apply_feature_engineering(df, feature_groups, TIME_SCALE, verbose=True)
 
-            if TIME_SCALE == "hourly":
-                time_features = ["Day sin", "Year sin"]
-            elif TIME_SCALE == "daily":
-                time_features = ["Year sin"]
+            # Create PFT one-hot columns if requested in selected_features
+            requested_pft = [c for c in used_cols if c in PFT_COLUMNS]
+            if requested_pft and pft_col and pft_col in df.columns:
+                pft_cat = pd.Categorical(df[pft_col], categories=PFT_COLUMNS)
+                pft_dummies = pd.get_dummies(pft_cat).astype(int)
+                pft_dummies.index = df.index
+                for col in pft_dummies.columns:
+                    df[col] = pft_dummies[col]
 
-            feature_cols = used_cols + time_features
-            logging.info(f"Successfully added time features for site {site_id}, time features: {time_features}")
-
-            missing_cols = [col for col in feature_cols if col not in df.columns]
+            missing_cols = [col for col in used_cols if col not in df.columns]
             if missing_cols:
                 logging.warning(f"Warning: Missing columns: {missing_cols} in {data_file.name}: skipping.")
                 continue
 
-            df = df[feature_cols].copy()
-            print(df.describe())
-
-            if "pft" in used_cols:
-                if "pft" in df.columns:
-                    orig_cols = [col for col in feature_cols if col != "pft"]
-                    pft_cat = pd.Categorical(df["pft"], categories=all_possible_pft_types)
-                    pft_df = pd.get_dummies(pft_cat)
-                    pft_df.index = df.index
-                    df = df[orig_cols].join(pft_df)
-                else:
-                    logging.warning(f"Warning: Missing pft column in {data_file.name}")
-                    continue
+            df = df[used_cols].copy()
 
             final_feature_names = [col for col in df.columns.tolist() if col != TARGET_COL]
             logging.info(f"Captured the final feature order: {final_feature_names}")
             logging.info(f"Total number of features before windowing: {len(final_feature_names)}")
 
-            print(f"\n=== DEBUG for {site_id} ===")
-            print("DataFrame dtypes:")
-            print(df.dtypes)
-            print("\nNon-numeric columns:")
             non_numeric = df.select_dtypes(exclude=[np.number]).columns.tolist()
-            print(non_numeric)
-
-            if non_numeric:
-                print("\nSample values from non-numeric columns:")
-                for col in non_numeric:
-                    print(f"{col}: {df[col].head()}")
-                    print(f"  Unique values: {df[col].unique()[:10]}")
+            logging.debug(f"Site {site_id}: {len(non_numeric)} non-numeric columns: {non_numeric}")
 
             df = df.astype(np.float32)
             df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -373,7 +338,7 @@ def main(run_id="default"):
 
     logging.info(f"Spatial groups assigned: {np.unique(spatial_groups)}")
 
-    site_to_group = {site_id: group for site_id, group in zip(site_ids, spatial_groups)}
+    site_to_group = {site_id: group for site_id, group in zip(site_ids, spatial_groups, strict=False)}
     site_to_pft = {site_id: site_info_dict[site_id]["pft"] for site_id in site_ids}
 
     # Plot spatial grouping
@@ -391,7 +356,7 @@ def main(run_id="default"):
         longitudes, latitudes, c=spatial_groups, s=100, edgecolor="k", cmap=color_map, transform=ccrs.PlateCarree()
     )
 
-    cbar = plt.colorbar(scatter, ax=ax, label="Spatial Group", shrink=0.8)
+    plt.colorbar(scatter, ax=ax, label="Spatial Group", shrink=0.8)
 
     ax.set_extent(
         [min(longitudes) - 5, max(longitudes) + 5, min(latitudes) - 5, max(latitudes) + 5], crs=ccrs.PlateCarree()
@@ -606,8 +571,8 @@ def main(run_id="default"):
 
         try:
             sw_in_base_index = final_feature_names.index("sw_in")
-        except ValueError:
-            raise ValueError("'sw_in' not found in the final feature list!")
+        except ValueError as e:
+            raise ValueError("'sw_in' not found in the final feature list!") from e
 
         num_features = len(final_feature_names)
         SW_IN_INDEX = ((INPUT_WIDTH - 1) * num_features) + sw_in_base_index

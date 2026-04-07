@@ -291,9 +291,10 @@ def apply_feature_engineering(df, groups, time_scale="daily", verbose=False):
             swc_col = f"volumetric_soil_water_layer_{_layer}"
             if swc_col in df.columns:
                 _vsw = df[swc_col]
+                _vsw_mean = _vsw.mean()
                 _vsw_std = _vsw.std()
                 feat = f"swc_layer{_layer}_norm"
-                df[feat] = _vsw / _vsw_std if _vsw_std > 1e-10 else 0.0
+                df[feat] = (_vsw - _vsw_mean) / _vsw_std if _vsw_std > 1e-10 else 0.0
                 new_features.append(feat)
             st_col = f"soil_temperature_level_{_layer}"
             if st_col in df.columns:
@@ -316,7 +317,7 @@ def apply_feature_engineering(df, groups, time_scale="daily", verbose=False):
 
     # ── et0 (FAO-56 Penman-Monteith) ──────────────────────────────
     if "et0" in groups:
-        _et0_cols = ["ta", "ta_max", "ta_min", "rh", "ws", "sw_in", "ext_rad", "surface_pressure", "elevation"]
+        _et0_cols = ["ta", "ta_max", "ta_min", "rh", "ws", "sw_in", "ext_rad", "elevation"]
         if all(c in df.columns for c in _et0_cols):
             _T = df["ta"]
             _Tmax, _Tmin = df["ta_max"], df["ta_min"]
@@ -390,12 +391,52 @@ def apply_feature_engineering(df, groups, time_scale="daily", verbose=False):
             df["cwd"] = _cwd_vals
             new_features.append("cwd")
 
-    # Drop NaNs introduced by lag/rolling (first few rows)
-    if any(g in groups for g in ["lags_1d", "rolling_3d", "rolling_7d", "rolling_14d", "precip_memory"]):
-        before = len(df)
-        df.dropna(subset=[f for f in new_features if f in df.columns], inplace=True)
-        if verbose:
-            logging.info(f"  Feature engineering dropped {before - len(df)} NaN rows")
+    # ── tree_metadata (driver analysis — plant-level features) ─────
+    if "tree_metadata" in groups:
+        for _col in ["pl_dbh"]:
+            if _col in df.columns and not df[_col].isna().all():
+                new_features.append(_col)
+
+        if "pl_sens_meth" in df.columns:
+            _all_meths = ["HD", "CHP", "HR", "TSHB", "CHD", "HPTM", "HFD", "SHB"]
+            for _m in _all_meths:
+                df[f"meth_{_m}"] = (df["pl_sens_meth"] == _m).astype(np.float32)
+            new_features.extend([f"meth_{_m}" for _m in _all_meths])
+
+        if "pl_species" in df.columns:
+            _all_genera = [
+                "Pinus",
+                "Acer",
+                "Eucalyptus",
+                "Picea",
+                "Populus",
+                "Fagus",
+                "Abies",
+                "Quercus",
+                "Olea",
+                "Larix",
+                "Juniperus",
+                "Acacia",
+                "Malus",
+                "Betula",
+                "Fraxinus",
+                "Nothofagus",
+                "Tectona",
+                "Elaeis",
+                "Hevea",
+                "Dicorynia",
+                "Mangifera",
+                "Vitellaria",
+            ]
+            _genus_series = (
+                df["pl_species"]
+                .fillna("Unknown")
+                .apply(lambda x: x.split()[0] if isinstance(x, str) and " " in x else str(x))
+            )
+            for _g in _all_genera:
+                df[f"genus_{_g}"] = (_genus_series == _g).astype(np.float32)
+            df["genus_Other"] = (~_genus_series.isin(_all_genera)).astype(np.float32)
+            new_features.extend([f"genus_{_g}" for _g in _all_genera] + ["genus_Other"])
 
     if verbose:
         logging.info(f"  Feature engineering added {len(new_features)} features: {new_features}")

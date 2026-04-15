@@ -1,4 +1,6 @@
 import argparse
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +11,20 @@ import pvlib
 from path_config import get_default_paths
 
 paths = get_default_paths()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _git_short_sha() -> str:
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL
+        )
+        return sha.decode().strip()
+    except Exception:
+        return "unknown"
 
 
 def calculate_soil_hydraulics(sand, clay, organic_matter, coarse_fragments_vol_percent):
@@ -219,7 +235,14 @@ def load_stand_age_map(base_path):
     return {}
 
 
-def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=False, growing_season_only=False):
+def merge_sap_env_data_site(
+    output_base_dir,
+    daytime_only=False,
+    plant_level=False,
+    growing_season_only=False,
+    apply_flo2019_correction_flag=False,
+    apply_treatment_filter_flag=False,
+):
     """
     Merge sap flow and environmental data for all sites.
 
@@ -231,9 +254,21 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
                      to add tree metadata (pl_dbh, pl_species, pl_sens_meth, etc.).
         growing_season_only: If True, apply sap-flow-based growing season filter
                              after daily aggregation to remove dormant periods.
+        apply_flo2019_correction_flag: If True, multiply SFD of non-calibrated
+                             HD/CHD plants by Flo et al. 2019 multipliers
+                             (HD ×1.6804, CHD ×1.6373). Default False reproduces
+                             the existing pipeline byte-for-byte.
+        apply_treatment_filter_flag: If True, drop plants whose treatment label
+                             classifies as predictor-target decoupling
+                             (irrigation, drought, throughfall exclusion, root
+                             trenching, elevated CO2, shade). Default False
+                             reproduces the existing pipeline byte-for-byte.
     """
+
     # Collect per-site growing season stats
     gs_stats_list = []
+    correction_audit_records: list[dict] = []
+    sites_retained = 0
 
     if daytime_only:
         print("\n" + "=" * 60)
@@ -461,9 +496,48 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
             # solar_TIMESTAMP comes from sap side (canonical); drop env duplicate to avoid merge conflict
             env_data.drop(columns=["solar_TIMESTAMP"], errors="ignore", inplace=True)
 
+            # --- TREATMENT FILTER + FLO 2019 CALIBRATION (opt-in, default OFF) ---
+            # Filter FIRST (fewer plants → cheaper calibration), calibrate SECOND
+            # so the audit log only contains plants that survive into training.
+            if apply_treatment_filter_flag or apply_flo2019_correction_flag:
+                from src.Analyzers.calibration_corrector import (  # noqa: PLC0415
+                    apply_flo2019_correction,
+                )
+                from src.Analyzers.treatment_filter import filter_by_treatment  # noqa: PLC0415
+
+                _plant_md_path = paths.raw_csv_dir / f"{location_type}_plant_md.csv"
+                _stand_md_path = paths.raw_csv_dir / f"{location_type}_stand_md.csv"
+                _plant_md_df = pd.read_csv(_plant_md_path).replace("NA", np.nan) if _plant_md_path.exists() else None
+                _stand_md_df = pd.read_csv(_stand_md_path).replace("NA", np.nan) if _stand_md_path.exists() else None
+
+                if apply_treatment_filter_flag:
+                    sap_data, _tf_report = filter_by_treatment(
+                        sap_data, _plant_md_df, _stand_md_df, site_code=location_type
+                    )
+                    if _tf_report["dropped"]:
+                        print(
+                            f"  [TREATMENT FILTER] {location_type}: dropped "
+                            f"{len(_tf_report['dropped'])} plant(s) "
+                            f"({sorted(_tf_report['dropped'])})"
+                        )
+
+                if apply_flo2019_correction_flag:
+                    sap_data, _audit = apply_flo2019_correction(sap_data, _plant_md_df)
+                    for _rec in _audit:
+                        _rec["site"] = location_type
+                        correction_audit_records.append(_rec)
+
             col_names = [
                 col for col in sap_data.columns if col not in ["solar_TIMESTAMP", "TIMESTAMP", "TIMESTAMP_LOCAL"]
             ]
+
+            # Empty-source guard: if treatment filter removed every plant for this
+            # site, skip cleanly so the rest of the loop doesn't crash on an empty
+            # frame. Distinguish the two causes for log readability.
+            if not col_names:
+                _cause = "TREATMENT FILTER" if apply_treatment_filter_flag else "EMPTY SOURCE"
+                print(f"  [{_cause}] {location_type}: no plant columns remain, skipping site")
+                continue
 
             if plant_level:
                 # --- PLANT-LEVEL: melt wide → long (one row per tree per timestamp) ---
@@ -593,31 +667,29 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
             df_hourly = pd.merge_asof(df_hourly, lai_data, on="TIMESTAMP", by="site_name", direction="nearest")
             df_hourly = pd.merge_asof(df_hourly, era5_data, on="TIMESTAMP", by="site_name", direction="nearest")
 
-            # --- NORMALIZE VOLUMETRIC SOIL WATER BY SITE STD ---
-            if "volumetric_soil_water_layer_1" in df_hourly.columns:
-                vsw = df_hourly["volumetric_soil_water_layer_1"]
-                # use Z-score: (x - mean) / std
-                vsw_std = vsw.std()
-                vsw_mean = vsw.mean()
-                # vsw = (vsw - vsw_mean)
-                if vsw_std > 1e-10:  # Avoid division by zero
-                    df_hourly["volumetric_soil_water_layer_1"] = vsw / vsw_std
-                else:
-                    # If std is ~0 (constant values), set normalized to 0
-                    df_hourly["volumetric_soil_water_layer_1"] = 0.0
-                    print(f"  Warning: {location_type} has near-zero std for volumetric_soil_water_layer_1")
-
-            # --- NORMALIZE DEEPER SOIL WATER LAYERS (same approach as layer 1) ---
-            for _layer in [2, 3, 4]:
+            # --- VOLUMETRIC SOIL WATER NORMALIZATION ---
+            # Three representations per layer:
+            #   *_raw  — original m³/m³ (for physics: REW, ψ_soil)
+            #   (main) — x / σ  variance-normalised (backward-compat ML feature)
+            #   *_zscore — (x − μ) / σ  proper z-score
+            for _layer in [1, 2, 3, 4]:
                 _col = f"volumetric_soil_water_layer_{_layer}"
-                if _col in df_hourly.columns:
-                    _vsw = df_hourly[_col]
-                    _vsw_std = _vsw.std()
-                    if _vsw_std > 1e-10:
-                        df_hourly[_col] = _vsw / _vsw_std
-                    else:
-                        df_hourly[_col] = 0.0
-                        print(f"  Warning: {location_type} has near-zero std for {_col}")
+                if _col not in df_hourly.columns:
+                    continue
+                _vsw = df_hourly[_col]
+                _vsw_mean = _vsw.mean()
+                _vsw_std = _vsw.std()
+
+                # Always store raw values for physics-based features
+                df_hourly[f"{_col}_raw"] = _vsw
+
+                if _vsw_std > 1e-10:
+                    df_hourly[_col] = _vsw / _vsw_std  # x/σ
+                    df_hourly[f"{_col}_zscore"] = (_vsw - _vsw_mean) / _vsw_std
+                else:
+                    df_hourly[_col] = 0.0
+                    df_hourly[f"{_col}_zscore"] = 0.0
+                    print(f"  Warning: {location_type} has near-zero std for {_col}")
 
             # --- CALCULATE DAY LENGTH ---
             # Day length in hours based on latitude, elevation, and date (astronomical calculation)
@@ -806,6 +878,7 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
 
             biome_merged_hourly[biome_type].append(df_hourly)
             biome_merged_daily[biome_type].append(df_daily)
+            sites_retained += 1
 
             count += 1
             if count % 10 == 0:
@@ -876,6 +949,46 @@ def merge_sap_env_data_site(output_base_dir, daytime_only=False, plant_level=Fal
             print(f"  Evergreen/low-variation: {n_evergreen}, Seasonal: {len(gs_df) - n_evergreen}")
             print(f"  Mean retention: {gs_df['pct_retained'].mean():.1f}%")
 
+        # --- AUDIT + MANIFEST for opt-in preprocessing ---
+        if apply_flo2019_correction_flag or apply_treatment_filter_flag:
+            import json  # noqa: PLC0415
+
+            from src.Analyzers.calibration_corrector import (  # noqa: PLC0415
+                FLO2019_CHD_MULTIPLIER,
+                FLO2019_HD_MULTIPLIER,
+            )
+
+            if apply_flo2019_correction_flag and correction_audit_records:
+                audit_df = pd.DataFrame(correction_audit_records)
+                audit_csv = output_base_dir / "flo2019_calibration_audit.csv"
+                audit_df.to_csv(audit_csv, index=False)
+                print(
+                    f"\nFlo 2019 calibration audit saved ({len(audit_df)} corrections "
+                    f"across {audit_df['site'].nunique()} sites): {audit_csv.name}"
+                )
+
+            manifest = {
+                "generated_at_utc": _now_iso(),
+                "git_short_sha": _git_short_sha(),
+                "n_sites_retained": int(sites_retained),
+                "options": {
+                    "daytime_only": bool(daytime_only),
+                    "plant_level": bool(plant_level),
+                    "growing_season_only": bool(growing_season_only),
+                    "apply_flo2019_correction": bool(apply_flo2019_correction_flag),
+                    "apply_treatment_filter": bool(apply_treatment_filter_flag),
+                },
+                "flo2019_multipliers": {
+                    "HD": FLO2019_HD_MULTIPLIER,
+                    "CHD": FLO2019_CHD_MULTIPLIER,
+                },
+                "n_calibration_corrections": len(correction_audit_records),
+            }
+            manifest_path = output_base_dir / "MANIFEST.json"
+            with open(manifest_path, "w", encoding="utf-8") as _f:
+                json.dump(manifest, _f, indent=2)
+            print(f"Wrote {manifest_path.name} ({sites_retained} sites retained)")
+
         print(f"Processing complete. Data saved to {output_base_dir}")
         return daily_all
 
@@ -902,7 +1015,22 @@ def main():
         "--growing-season-only",
         action="store_true",
         help="Apply sap-flow-based growing season filter after daily aggregation. "
-        "Removes dormant-period rows using amplitude gate + 20% of q95 threshold.",
+        "Removes dormant-period rows using amplitude gate + 20%% of q95 threshold.",
+    )
+    parser.add_argument(
+        "--apply-flo2019-correction",
+        action="store_true",
+        help="Multiply SFD of non-calibrated HD/CHD plants by Flo et al. 2019 "
+        "Table 1 multipliers (HD x1.6804, CHD x1.6373). Default OFF reproduces "
+        "the existing pipeline byte-for-byte.",
+    )
+    parser.add_argument(
+        "--apply-treatment-filter",
+        action="store_true",
+        help="Drop plants whose pl_treatment / st_treatment label classifies as "
+        "predictor-target decoupling (irrigation, drought, throughfall exclusion, "
+        "root trenching, elevated CO2, shade). Default OFF reproduces the "
+        "existing pipeline byte-for-byte.",
     )
     args = parser.parse_args()
     # Defines the base directory for output
@@ -920,6 +1048,8 @@ def main():
         daytime_only=args.daytime_only,
         plant_level=args.plant_level,
         growing_season_only=args.growing_season_only,
+        apply_flo2019_correction_flag=args.apply_flo2019_correction,
+        apply_treatment_filter_flag=args.apply_treatment_filter,
     )
 
 

@@ -1,5 +1,8 @@
 # Per-Site SM→Sap-Flow XGBoost+SHAP Implementation Plan
 
+**Revisions**
+- **r1 (2026-04-21):** Applied 5 review fixes — M1 end-to-end test now uses 200-row synthetic CSV; M2 dry-run uses `sbatch` instead of `srun --pty`; M3 `main()` gracefully handles missing `site_biome_mapping.csv`; J1 orchestrator emits explicit `CV_FAILED` / `FIT_FAILED` / `SHAP_FAILED` / `PLOT_FAILED` status codes instead of a catch-all; J2 plot drops the silent marginal-SHAP fallback and renders a one-panel figure with a visible banner when `shap_interaction_values` fails. Also: bare `MISSING_FEATURE` (with column name logged), `asdict(hp)` instead of `hp.__dict__`, regex-anchored `_daily$` stripping in `discover_sites`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a single-file CLI script `src/Analyzers/per_site_sm_shap.py` that, per site, tunes an XGBoost regressor (`sap_velocity ~ vpd + ta + ws + sw_in + precip_sum + sm`), refits on full site data, computes SHAP values + SHAP interaction values, and writes a two-panel SM-dependence PNG plus per-site artifacts and a global `summary.csv`. Runs in two passes for `--sm-variant {raw, zscore}`.
@@ -391,7 +394,8 @@ def load_site_data(
     if missing:
         if sm_source_col in missing:
             return None, "MISSING_SM_VARIANT"
-        return None, f"MISSING_FEATURE:{missing[0]}"
+        logger.warning("Site %s missing feature columns: %s", site_csv.stem, missing)
+        return None, "MISSING_FEATURE"
 
     df = df.rename(columns={sm_source_col: SM_COL_NAME})
     df = df.dropna(subset=[TARGET_COL, *FEATURE_COLS])
@@ -791,9 +795,9 @@ class FinalFit:
 
 @dataclass(frozen=True)
 class ShapResult:
-    shap_values: np.ndarray       # (n, p)
-    shap_interaction: "np.ndarray | None"  # (n, p, p) or None if computation failed
-    main_effect_sm: np.ndarray    # (n,)
+    shap_values: np.ndarray                       # (n, p)
+    shap_interaction: "np.ndarray | None"         # (n, p, p) or None
+    main_effect_sm: "np.ndarray | None"           # (n,) or None if interaction failed
 
 
 def fit_final_model(X, y, best_params: dict, random_state: int = 42) -> FinalFit:
@@ -812,8 +816,13 @@ def fit_final_model(X, y, best_params: dict, random_state: int = 42) -> FinalFit
 
 
 def compute_shap(model, X) -> ShapResult:
-    """Compute SHAP values + interaction values + SM main-effect vector."""
-    import numpy as np
+    """Compute SHAP values + interaction values + SM main-effect vector.
+
+    When ``shap_interaction_values`` fails (rare numerical edge cases),
+    ``shap_interaction`` and ``main_effect_sm`` are set to None — callers MUST
+    check for None rather than receiving a silent fallback to marginal SHAP
+    (which would visually duplicate the left-panel curve).
+    """
     import shap
 
     explainer = shap.TreeExplainer(model)
@@ -825,7 +834,7 @@ def compute_shap(model, X) -> ShapResult:
     except Exception as exc:  # pragma: no cover - rare numerical failures
         logger.warning("shap_interaction_values failed: %s", exc)
         shap_interaction = None
-        main_effect_sm = shap_values[:, SM_IDX]  # fallback: marginal SHAP
+        main_effect_sm = None
 
     return ShapResult(
         shap_values=shap_values,
@@ -915,7 +924,13 @@ def plot_dependence_pair(
     site_meta: dict,
     output_path: Path,
 ) -> None:
-    """Render the per-site 2-panel SM dependence figure as PNG."""
+    """Render the per-site SM dependence figure as PNG.
+
+    Two-panel layout when ``shap_result.main_effect_sm`` is available; falls back
+    to a single-panel (standard dependence only) figure with a visible note when
+    the interaction computation failed (``main_effect_sm is None``). The fallback
+    MUST be visually distinct so viewers don't mistake it for the two-panel plot.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -931,10 +946,15 @@ def plot_dependence_pair(
     vpd_vals = X["vpd"].to_numpy()
 
     x_unit = "m³/m³" if sm_variant == "raw" else "z-score"
+    two_panel = main_effect_sm is not None
 
-    fig, (ax_left, ax_right) = plt.subplots(
-        1, 2, figsize=(12, 5), dpi=150, sharey=False
-    )
+    if two_panel:
+        fig, (ax_left, ax_right) = plt.subplots(
+            1, 2, figsize=(12, 5), dpi=150, sharey=False
+        )
+    else:
+        fig, ax_left = plt.subplots(1, 1, figsize=(7, 5), dpi=150)
+        ax_right = None
 
     # Left — standard dependence, coloured by VPD
     sc = ax_left.scatter(sm_vals, shap_sm_marginal, c=vpd_vals, cmap="viridis", s=20, alpha=0.8)
@@ -945,15 +965,26 @@ def plot_dependence_pair(
     cbar = fig.colorbar(sc, ax=ax_left)
     cbar.set_label("VPD (kPa)")
 
-    # Right — pure main effect
-    ax_right.scatter(sm_vals, main_effect_sm, color="steelblue", s=20, alpha=0.8)
-    if lowess is not None and len(sm_vals) >= 10:
-        smoothed = lowess(main_effect_sm, sm_vals, frac=0.3, return_sorted=True)
-        ax_right.plot(smoothed[:, 0], smoothed[:, 1], color="firebrick", linewidth=2)
-    ax_right.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
-    ax_right.set_xlabel(f"SM ({x_unit})")
-    ax_right.set_ylabel("Main-effect SHAP value")
-    ax_right.set_title("Pure main effect (interactions removed)")
+    if two_panel:
+        # Right — pure main effect (interactions removed)
+        ax_right.scatter(sm_vals, main_effect_sm, color="steelblue", s=20, alpha=0.8)
+        if lowess is not None and len(sm_vals) >= 10:
+            smoothed = lowess(main_effect_sm, sm_vals, frac=0.3, return_sorted=True)
+            ax_right.plot(smoothed[:, 0], smoothed[:, 1], color="firebrick", linewidth=2)
+        ax_right.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
+        ax_right.set_xlabel(f"SM ({x_unit})")
+        ax_right.set_ylabel("Main-effect SHAP value")
+        ax_right.set_title("Pure main effect (interactions removed)")
+    else:
+        # Visible banner so viewers don't miss the missing right panel
+        ax_left.text(
+            0.98, 0.02,
+            "main-effect computation unavailable\n(shap_interaction_values failed)",
+            transform=ax_left.transAxes,
+            ha="right", va="bottom",
+            fontsize=8, color="firebrick",
+            bbox=dict(facecolor="white", edgecolor="firebrick", alpha=0.85),
+        )
 
     suptitle = (
         f"{site_meta['site_code']}  "
@@ -1151,22 +1182,55 @@ def test_process_one_site_too_few_rows(tmp_path):
     assert row["status"] == "TOO_FEW_ROWS"
 
 
+def _write_synthetic_site_csv(path: Path, n: int = 200, seed: int = 0) -> None:
+    """Write a well-sized synthetic daily CSV that mimics the canonical layout.
+
+    Uses 200 rows so 5-fold CV has ~40 per fold — enough for stable HP search.
+    Includes both raw and zscore SM columns so either --sm-variant works.
+    """
+    rng = np.random.default_rng(seed)
+    n_rows = n
+    sm_raw = rng.uniform(0.15, 0.38, n_rows)
+    df = pd.DataFrame({
+        "TIMESTAMP":   pd.date_range("2020-06-01", periods=n_rows, freq="D"),
+        "sap_velocity": (
+            0.002 * rng.uniform(100, 300, n_rows)    # sw_in contribution
+            + 5.0 * sm_raw                              # SM contribution
+            + 0.05 * rng.uniform(0.5, 2.5, n_rows)      # vpd noise
+            + rng.normal(0, 0.05, n_rows)
+        ),
+        "vpd":        rng.uniform(0.5, 2.5, n_rows),
+        "ta":         rng.uniform(10, 30, n_rows),
+        "ws":         rng.uniform(0.5, 3.0, n_rows),
+        "sw_in":      rng.uniform(100, 300, n_rows),
+        "precip_sum": rng.uniform(0, 5, n_rows),
+        "volumetric_soil_water_layer_1_raw":    sm_raw,
+        "volumetric_soil_water_layer_1_zscore": (sm_raw - sm_raw.mean()) / sm_raw.std(),
+    })
+    # ensure sap_velocity strictly > 0 (target filter in load_site_data)
+    df["sap_velocity"] = df["sap_velocity"].clip(lower=0.01)
+    df.to_csv(path, index=False)
+
+
 @pytest.mark.slow
 def test_process_one_site_end_to_end(tmp_path):
-    """Runs the real pipeline on the fixture. ~15–30 s."""
-    site_csv = FIXTURE_DIR / "fake_site_daily.csv"
+    """End-to-end: synthetic 200-row site, full HP search + SHAP + plot. ~60 s."""
+    site_csv = tmp_path / "FAKE_SITE_daily.csv"
+    _write_synthetic_site_csv(site_csv, n=200, seed=0)
+
     cfg = SiteConfig(
         site_code="FAKE_SITE",
         site_csv=site_csv,
         sm_variant="raw",
-        min_rows=5,                          # fixture has 8 usable rows
+        min_rows=100,                        # same threshold as production
         output_root=tmp_path / "out",
         site_meta={"PFT": "ENF", "biome": "Temperate forest"},
         random_state=42,
     )
     row = process_one_site(cfg)
-    assert row["status"] == "OK"
-    assert row["n_rows"] == 8
+    assert row["status"] in {"OK", "OK_NO_INTERACTION"}, row["status"]
+    assert row["n_rows"] == 200
+    assert row["cv_r2_mean"] > 0.3  # synthetic is learnable; relaxed bound
     assert (tmp_path / "out" / "plots" / "FAKE_SITE_SM_dependence.png").exists()
     assert (tmp_path / "out" / "shap_values" / "FAKE_SITE_shap.parquet").exists()
     assert (tmp_path / "out" / "models" / "FAKE_SITE.joblib").exists()
@@ -1226,15 +1290,22 @@ def process_one_site(cfg: SiteConfig) -> dict:
     }
 
     try:
+        # 1. Load — any of MISSING_FILE / MISSING_SM_VARIANT / MISSING_FEATURE / TOO_FEW_ROWS
         df, status = load_site_data(cfg.site_csv, cfg.sm_variant, cfg.min_rows)
         if df is None:
             row["status"] = status
             return row
         row["n_rows"] = int(len(df))
-
         X, y = build_feature_matrix(df)
 
-        hp = tune_site_hp(X, y, random_state=cfg.random_state)
+        # 2. Hyperparameter search — explicit CV_FAILED on any exception
+        try:
+            hp = tune_site_hp(X, y, random_state=cfg.random_state)
+        except Exception as exc:
+            logger.error("Site %s CV_FAILED:\n%s", cfg.site_code, traceback.format_exc())
+            row["status"] = f"CV_FAILED:{type(exc).__name__}"[:200]
+            return row
+
         row.update({
             "cv_r2_mean": hp.cv_r2_mean,
             "cv_r2_std": hp.cv_r2_std,
@@ -1242,28 +1313,58 @@ def process_one_site(cfg: SiteConfig) -> dict:
             "best_params": _dumps(hp.best_params),
         })
 
-        fit = fit_final_model(X, y, hp.best_params, random_state=cfg.random_state)
+        # 3. Final refit (part of CV step in spirit; rare failures → FIT_FAILED)
+        try:
+            fit = fit_final_model(X, y, hp.best_params, random_state=cfg.random_state)
+        except Exception as exc:
+            logger.error("Site %s FIT_FAILED:\n%s", cfg.site_code, traceback.format_exc())
+            row["status"] = f"FIT_FAILED:{type(exc).__name__}"[:200]
+            return row
         row["in_sample_r2"] = fit.in_sample_r2
 
-        shap_res = compute_shap(fit.model, X)
-        row["sm_shap_mean_abs"] = float(np.mean(np.abs(shap_res.shap_values[:, SM_IDX])))
-        row["sm_main_effect_range"] = float(
-            shap_res.main_effect_sm.max() - shap_res.main_effect_sm.min()
-        )
+        # 4. SHAP — compute_shap already catches interaction failures internally;
+        #    a total shap_values failure is caught here with explicit SHAP_FAILED.
+        try:
+            shap_res = compute_shap(fit.model, X)
+        except Exception as exc:
+            logger.error("Site %s SHAP_FAILED:\n%s", cfg.site_code, traceback.format_exc())
+            row["status"] = f"SHAP_FAILED:{type(exc).__name__}"[:200]
+            return row
 
+        row["sm_shap_mean_abs"] = float(np.mean(np.abs(shap_res.shap_values[:, SM_IDX])))
+        if shap_res.main_effect_sm is not None:
+            row["sm_main_effect_range"] = float(
+                shap_res.main_effect_sm.max() - shap_res.main_effect_sm.min()
+            )
+        # else: sm_main_effect_range stays NaN, status will be OK_NO_INTERACTION below
+
+        # 5. Plot + persist — wrap each in their own guard
         plot_dir = cfg.output_root / "plots"
         parquet_dir = cfg.output_root / "shap_values"
         model_dir = cfg.output_root / "models"
 
-        full_meta = {**cfg.site_meta, **hp.__dict__, "in_sample_r2": fit.in_sample_r2,
-                     "site_code": cfg.site_code, "n_rows": row["n_rows"]}
-        plot_dependence_pair(
-            X=X,
-            shap_result=shap_res,
-            sm_variant=cfg.sm_variant,
-            site_meta=full_meta,
-            output_path=plot_dir / f"{cfg.site_code}_SM_dependence.png",
-        )
+        from dataclasses import asdict
+        full_meta = {
+            **cfg.site_meta,
+            **asdict(hp),
+            "in_sample_r2": fit.in_sample_r2,
+            "site_code": cfg.site_code,
+            "n_rows": row["n_rows"],
+        }
+
+        try:
+            plot_dependence_pair(
+                X=X,
+                shap_result=shap_res,
+                sm_variant=cfg.sm_variant,
+                site_meta=full_meta,
+                output_path=plot_dir / f"{cfg.site_code}_SM_dependence.png",
+            )
+        except Exception as exc:
+            logger.error("Site %s PLOT_FAILED:\n%s", cfg.site_code, traceback.format_exc())
+            row["status"] = f"PLOT_FAILED:{type(exc).__name__}"[:200]
+            # still persist parquet + model below so SHAP isn't lost to a matplotlib glitch
+
         save_shap_parquet(
             shap_result=shap_res,
             X=X,
@@ -1272,10 +1373,14 @@ def process_one_site(cfg: SiteConfig) -> dict:
         )
         save_model(fit.model, model_dir / f"{cfg.site_code}.joblib")
 
-        row["status"] = STATUS_OK if shap_res.shap_interaction is not None else STATUS_OK_NO_INTERACTION
+        if not row["status"]:  # nothing downgraded us
+            row["status"] = (
+                STATUS_OK if shap_res.shap_interaction is not None
+                else STATUS_OK_NO_INTERACTION
+            )
 
     except Exception as exc:
-        logger.error("Site %s failed:\n%s", cfg.site_code, traceback.format_exc())
+        logger.error("Site %s unexpected failure:\n%s", cfg.site_code, traceback.format_exc())
         row["status"] = f"ERROR:{type(exc).__name__}:{exc}"[:200]
     finally:
         row["runtime_sec"] = round(time.time() - t0, 2)
@@ -1378,8 +1483,12 @@ Replace `main()` with:
 
 ```python
 def discover_sites(data_dir: Path) -> list[str]:
-    """Return all site codes present in data_dir."""
-    return sorted(p.stem.replace("_daily", "") for p in data_dir.glob("*_daily.csv"))
+    """Return all site codes present in data_dir. Trailing ``_daily`` only."""
+    import re
+    return sorted(
+        re.sub(r"_daily$", "", p.stem)
+        for p in data_dir.glob("*_daily.csv")
+    )
 
 
 def append_to_run_log(log_path: Path, rows: list[dict]) -> None:
@@ -1409,7 +1518,17 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Processing %d sites, variant=%s, n_jobs=%d",
                 len(sites), args.sm_variant, args.n_jobs)
 
-    meta = load_site_metadata(args.site_meta_csv)
+    # Load site metadata with a graceful fallback — a missing file must not
+    # abort the whole run, just strip PFT/biome annotations.
+    try:
+        meta = load_site_metadata(args.site_meta_csv)
+    except (FileNotFoundError, ValueError) as exc:
+        logger.warning(
+            "Could not load site metadata (%s): %s — continuing with 'unknown' "
+            "PFT/biome annotations.",
+            args.site_meta_csv, exc,
+        )
+        meta = pd.DataFrame(columns=["site_code", "PFT", "biome"])
 
     configs = [
         SiteConfig(
@@ -1707,19 +1826,48 @@ If you've been developing locally, run the SCP loop now (adjust paths as needed)
 ```
 Expected: all tests pass.
 
-- [ ] **Step 4: Submit a tiny dry-run via `srun` (NOT on login node — use `srun` with a short allocation)**
+- [ ] **Step 4: Submit a tiny dry-run as a short sbatch job (NOT on login node)**
+
+Create `.claude/plan/job_per_site_sm_shap_dryrun.sh`:
+
+```bash
+#!/bin/bash
+#SBATCH --partition=normal
+#SBATCH --time=00:30:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=3
+#SBATCH --mem=8G
+#SBATCH --job-name=sm_shap_dryrun
+#SBATCH --output=logs/sm_shap_dryrun_%j.out
+#SBATCH --error=logs/sm_shap_dryrun_%j.err
+
+set -euo pipefail
+cd /scratch/tmp/yluo2/gsv
+mkdir -p logs
+source .venv/bin/activate
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+
+python src/Analyzers/per_site_sm_shap.py \
+  --sm-variant raw --n-jobs 3 \
+  --sites ARG_MAZ FIN_HYY AUS_KAR \
+  --output-dir outputs/analysis/per_site_sm_shap_dryrun
+```
+
+Submit and poll for completion:
 
 ```bash
 /c/Windows/System32/OpenSSH/ssh.exe -i "$HOME/.ssh/id_ecdsa_palma" \
   yluo2@palma-login.uni-muenster.de \
-  "cd /scratch/tmp/yluo2/gsv && \
-   srun --partition=normal --time=00:30:00 --cpus-per-task=3 --mem=8G --pty \
-     bash -lc 'source .venv/bin/activate && \
-       python src/Analyzers/per_site_sm_shap.py \
-         --sm-variant raw --n-jobs 3 \
-         --sites ARG_MAZ FIN_HYY AUS_KAR \
-         --output-dir outputs/analysis/per_site_sm_shap_dryrun'"
+  "cd /scratch/tmp/yluo2/gsv && sbatch .claude/plan/job_per_site_sm_shap_dryrun.sh"
+
+# then monitor:
+/c/Windows/System32/OpenSSH/ssh.exe -i "$HOME/.ssh/id_ecdsa_palma" \
+  yluo2@palma-login.uni-muenster.de \
+  "squeue -u yluo2"
 ```
+
+Rationale: `srun --pty` needs a TTY; non-interactive SSH doesn't allocate one. A short sbatch job is the robust path.
 
 - [ ] **Step 5: Inspect dry-run outputs**
 

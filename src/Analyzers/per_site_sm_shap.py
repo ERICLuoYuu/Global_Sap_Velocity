@@ -13,6 +13,7 @@ import argparse
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -172,6 +173,49 @@ def lookup_site_meta(meta, site_code: str) -> dict[str, str]:
     if row.empty:
         return {"PFT": "unknown", "biome": "unknown"}
     return {"PFT": str(row["PFT"].iloc[0]), "biome": str(row["biome"].iloc[0])}
+
+
+# ── Hyperparameter tuning ────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class HPResult:
+    best_params: dict[str, object]
+    cv_r2_mean: float
+    cv_r2_std: float
+    cv_rmse_mean: float
+
+
+def tune_site_hp(X, y, random_state: int = 42) -> HPResult:
+    """30-trial RandomizedSearchCV with 5-fold KFold. Returns HPResult."""
+    from sklearn.model_selection import KFold, RandomizedSearchCV
+    from xgboost import XGBRegressor
+
+    search = RandomizedSearchCV(
+        estimator=XGBRegressor(**FIXED_XGB_PARAMS, random_state=random_state),
+        param_distributions=PARAM_DIST,
+        n_iter=N_HP_TRIALS,
+        cv=KFold(n_splits=CV_FOLDS, shuffle=True, random_state=random_state),
+        scoring=["neg_root_mean_squared_error", "r2"],
+        refit="neg_root_mean_squared_error",
+        n_jobs=1,
+        random_state=random_state,
+        return_train_score=False,
+    )
+    search.fit(X, y)
+
+    best_idx = int(search.best_index_)
+    cv_r2_mean = float(search.cv_results_["mean_test_r2"][best_idx])
+    cv_r2_std = float(search.cv_results_["std_test_r2"][best_idx])
+    cv_rmse_mean = float(-search.cv_results_["mean_test_neg_root_mean_squared_error"][best_idx])
+
+    best_params_clean = {k: search.best_params_[k] for k in PARAM_DIST}
+    return HPResult(
+        best_params=best_params_clean,
+        cv_r2_mean=cv_r2_mean,
+        cv_r2_std=cv_r2_std,
+        cv_rmse_mean=cv_rmse_mean,
+    )
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

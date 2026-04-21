@@ -12,6 +12,7 @@ import pytest
 
 from src.Analyzers.per_site_sm_shap import (
     FEATURE_COLS,
+    PARAM_DIST,
     SKIP_STATUSES,
     SM_COL_NAME,
     TARGET_COL,
@@ -19,6 +20,7 @@ from src.Analyzers.per_site_sm_shap import (
     load_site_data,
     load_site_metadata,
     lookup_site_meta,
+    tune_site_hp,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -179,3 +181,34 @@ def test_load_site_metadata_accepts_site_biome_only_file(tmp_path):
     row = meta.loc[meta.site_code == "AUT_PAT_KRU"].iloc[0]
     assert row["biome"] == "Boreal forest"
     assert row["PFT"] == "unknown"
+
+
+# ── HP tuning tests (Task 6) ───────────────────────────────────────────────
+
+
+def _make_synthetic_xy(n=200, seed=0):
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(
+        {
+            "vpd": rng.uniform(0.5, 2.5, n),
+            "ta": rng.uniform(10, 30, n),
+            "ws": rng.uniform(0.5, 3.0, n),
+            "sw_in": rng.uniform(100, 300, n),
+            "precip_sum": rng.uniform(0, 5, n),
+            SM_COL_NAME: rng.uniform(0.15, 0.35, n),
+        }
+    )
+    y = 0.002 * X["sw_in"] + 5.0 * X["sm"] + 0.05 * X["vpd"] + rng.normal(0, 0.05, n)
+    return X, pd.Series(y)
+
+
+def test_tune_site_hp_returns_expected_keys():
+    X, y = _make_synthetic_xy(n=200)
+    result = tune_site_hp(X, y, random_state=42)
+    assert set(PARAM_DIST.keys()).issubset(result.best_params.keys())
+
+
+def test_tune_site_hp_cv_r2_is_positive_on_learnable_data():
+    X, y = _make_synthetic_xy(n=200)
+    result = tune_site_hp(X, y, random_state=42)
+    assert result.cv_r2_mean > 0.5, f"Expected learnable synthetic data; got R2={result.cv_r2_mean}"

@@ -16,6 +16,7 @@ from src.Analyzers.per_site_sm_shap import (
     SKIP_STATUSES,
     SM_COL_NAME,
     TARGET_COL,
+    SiteConfig,
     build_feature_matrix,
     compute_shap,
     fit_final_model,
@@ -23,6 +24,7 @@ from src.Analyzers.per_site_sm_shap import (
     load_site_metadata,
     lookup_site_meta,
     plot_dependence_pair,
+    process_one_site,
     save_model,
     save_shap_parquet,
     tune_site_hp,
@@ -358,3 +360,85 @@ def test_save_shap_parquet_has_expected_columns(tmp_path):
         "shap_precip_sum",
     }.issubset(loaded.columns)
     assert len(loaded) == 50
+
+
+# ── process_one_site tests (Task 10) ───────────────────────────────────────
+
+
+def test_process_one_site_missing_file(tmp_path):
+    cfg = SiteConfig(
+        site_code="NO_SUCH_SITE",
+        site_csv=tmp_path / "missing.csv",
+        sm_variant="raw",
+        min_rows=100,
+        output_root=tmp_path / "out",
+        site_meta={"PFT": "unknown", "biome": "unknown"},
+        random_state=42,
+    )
+    row = process_one_site(cfg)
+    assert row["status"] == "MISSING_FILE"
+    assert row["site_code"] == "NO_SUCH_SITE"
+
+
+def test_process_one_site_too_few_rows(tmp_path):
+    site_csv = FIXTURE_DIR / "fake_site_daily.csv"
+    cfg = SiteConfig(
+        site_code="FAKE_SITE",
+        site_csv=site_csv,
+        sm_variant="raw",
+        min_rows=1_000,
+        output_root=tmp_path / "out",
+        site_meta={"PFT": "ENF", "biome": "Temperate forest"},
+        random_state=42,
+    )
+    row = process_one_site(cfg)
+    assert row["status"] == "TOO_FEW_ROWS"
+
+
+def _write_synthetic_site_csv(path: Path, n: int = 200, seed: int = 0) -> None:
+    rng = np.random.default_rng(seed)
+    sm_raw = rng.uniform(0.15, 0.38, n)
+    df = pd.DataFrame(
+        {
+            "TIMESTAMP": pd.date_range("2020-06-01", periods=n, freq="D"),
+            "sap_velocity": (
+                0.002 * rng.uniform(100, 300, n)
+                + 5.0 * sm_raw
+                + 0.05 * rng.uniform(0.5, 2.5, n)
+                + rng.normal(0, 0.05, n)
+            ),
+            "vpd": rng.uniform(0.5, 2.5, n),
+            "ta": rng.uniform(10, 30, n),
+            "ws": rng.uniform(0.5, 3.0, n),
+            "sw_in": rng.uniform(100, 300, n),
+            "precip_sum": rng.uniform(0, 5, n),
+            "volumetric_soil_water_layer_1_raw": sm_raw,
+            "volumetric_soil_water_layer_1_zscore": (sm_raw - sm_raw.mean()) / sm_raw.std(),
+        }
+    )
+    df["sap_velocity"] = df["sap_velocity"].clip(lower=0.01)
+    df.to_csv(path, index=False)
+
+
+@pytest.mark.slow
+def test_process_one_site_end_to_end(tmp_path):
+    """End-to-end: synthetic 200-row site, full HP search + SHAP + plot. ~60 s."""
+    site_csv = tmp_path / "FAKE_SITE_daily.csv"
+    _write_synthetic_site_csv(site_csv, n=200, seed=0)
+
+    cfg = SiteConfig(
+        site_code="FAKE_SITE",
+        site_csv=site_csv,
+        sm_variant="raw",
+        min_rows=100,
+        output_root=tmp_path / "out",
+        site_meta={"PFT": "ENF", "biome": "Temperate forest"},
+        random_state=42,
+    )
+    row = process_one_site(cfg)
+    assert row["status"] in {"OK", "OK_NO_INTERACTION"}, row["status"]
+    assert row["n_rows"] == 200
+    assert row["cv_r2_mean"] > 0.3
+    assert (tmp_path / "out" / "plots" / "FAKE_SITE_SM_dependence.png").exists()
+    assert (tmp_path / "out" / "shap_values" / "FAKE_SITE_shap.parquet").exists()
+    assert (tmp_path / "out" / "models" / "FAKE_SITE.joblib").exists()

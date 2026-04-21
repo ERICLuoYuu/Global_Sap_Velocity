@@ -405,6 +405,141 @@ def save_shap_parquet(
     out.to_parquet(output_path, index=False)
 
 
+# ── Per-site orchestrator ────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SiteConfig:
+    site_code: str
+    site_csv: Path
+    sm_variant: str
+    min_rows: int
+    output_root: Path
+    site_meta: dict
+    random_state: int
+
+
+def _dumps(params: dict) -> str:
+    import json
+
+    return json.dumps(params, sort_keys=True)
+
+
+def process_one_site(cfg: SiteConfig) -> dict:
+    """Run the full pipeline for one site. Always returns a summary row dict.
+
+    On skip / failure the row's `status` field records the reason; on success
+    all artifacts are persisted under cfg.output_root.
+    """
+    import time
+    import traceback
+    from dataclasses import asdict
+
+    t0 = time.time()
+    row = {
+        "site_code": cfg.site_code,
+        "sm_variant": cfg.sm_variant,
+        "status": "",
+        "n_rows": 0,
+        "PFT": cfg.site_meta.get("PFT", "unknown"),
+        "biome": cfg.site_meta.get("biome", "unknown"),
+        "cv_r2_mean": float("nan"),
+        "cv_r2_std": float("nan"),
+        "cv_rmse_mean": float("nan"),
+        "in_sample_r2": float("nan"),
+        "best_params": "",
+        "sm_shap_mean_abs": float("nan"),
+        "sm_main_effect_range": float("nan"),
+        "runtime_sec": float("nan"),
+    }
+
+    try:
+        df, status = load_site_data(cfg.site_csv, cfg.sm_variant, cfg.min_rows)
+        if df is None:
+            row["status"] = status
+            return row
+        row["n_rows"] = int(len(df))
+        X, y = build_feature_matrix(df)
+
+        try:
+            hp = tune_site_hp(X, y, random_state=cfg.random_state)
+        except Exception as exc:
+            logger.error("Site %s CV_FAILED:\n%s", cfg.site_code, traceback.format_exc())
+            row["status"] = f"CV_FAILED:{type(exc).__name__}"[:200]
+            return row
+
+        row.update(
+            {
+                "cv_r2_mean": hp.cv_r2_mean,
+                "cv_r2_std": hp.cv_r2_std,
+                "cv_rmse_mean": hp.cv_rmse_mean,
+                "best_params": _dumps(hp.best_params),
+            }
+        )
+
+        try:
+            fit = fit_final_model(X, y, hp.best_params, random_state=cfg.random_state)
+        except Exception as exc:
+            logger.error("Site %s FIT_FAILED:\n%s", cfg.site_code, traceback.format_exc())
+            row["status"] = f"FIT_FAILED:{type(exc).__name__}"[:200]
+            return row
+        row["in_sample_r2"] = fit.in_sample_r2
+
+        try:
+            shap_res = compute_shap(fit.model, X)
+        except Exception as exc:
+            logger.error("Site %s SHAP_FAILED:\n%s", cfg.site_code, traceback.format_exc())
+            row["status"] = f"SHAP_FAILED:{type(exc).__name__}"[:200]
+            return row
+
+        row["sm_shap_mean_abs"] = float(np.mean(np.abs(shap_res.shap_values[:, SM_IDX])))
+        if shap_res.main_effect_sm is not None:
+            row["sm_main_effect_range"] = float(shap_res.main_effect_sm.max() - shap_res.main_effect_sm.min())
+
+        plot_dir = cfg.output_root / "plots"
+        parquet_dir = cfg.output_root / "shap_values"
+        model_dir = cfg.output_root / "models"
+
+        full_meta = {
+            **cfg.site_meta,
+            **asdict(hp),
+            "in_sample_r2": fit.in_sample_r2,
+            "site_code": cfg.site_code,
+            "n_rows": row["n_rows"],
+        }
+
+        try:
+            plot_dependence_pair(
+                X=X,
+                shap_result=shap_res,
+                sm_variant=cfg.sm_variant,
+                site_meta=full_meta,
+                output_path=plot_dir / f"{cfg.site_code}_SM_dependence.png",
+            )
+        except Exception as exc:
+            logger.error("Site %s PLOT_FAILED:\n%s", cfg.site_code, traceback.format_exc())
+            row["status"] = f"PLOT_FAILED:{type(exc).__name__}"[:200]
+
+        save_shap_parquet(
+            shap_result=shap_res,
+            X=X,
+            timestamps=df["TIMESTAMP"].to_numpy(),
+            output_path=parquet_dir / f"{cfg.site_code}_shap.parquet",
+        )
+        save_model(fit.model, model_dir / f"{cfg.site_code}.joblib")
+
+        if not row["status"]:
+            row["status"] = STATUS_OK if shap_res.shap_interaction is not None else STATUS_OK_NO_INTERACTION
+
+    except Exception as exc:
+        logger.error("Site %s unexpected failure:\n%s", cfg.site_code, traceback.format_exc())
+        row["status"] = f"ERROR:{type(exc).__name__}:{exc}"[:200]
+    finally:
+        row["runtime_sec"] = round(time.time() - t0, 2)
+
+    return row
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 

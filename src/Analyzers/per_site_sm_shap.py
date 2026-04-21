@@ -15,6 +15,8 @@ import os
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -61,6 +63,61 @@ FIXED_XGB_PARAMS: dict[str, object] = {
 
 N_HP_TRIALS: int = 30
 CV_FOLDS: int = 5
+
+
+# ── Status codes ─────────────────────────────────────────────────────────────
+
+STATUS_OK = "OK"
+STATUS_OK_NO_INTERACTION = "OK_NO_INTERACTION"
+SKIP_STATUSES: frozenset[str] = frozenset(
+    {
+        "MISSING_FILE",
+        "MISSING_SM_VARIANT",
+        "MISSING_FEATURE",
+        "TOO_FEW_ROWS",
+        "CV_FAILED",
+    }
+)
+
+
+# ── Data loading ─────────────────────────────────────────────────────────────
+
+
+def load_site_data(
+    site_csv: Path,
+    sm_variant: str,
+    min_rows: int,
+) -> tuple[pd.DataFrame | None, str]:
+    """Load one site's daily CSV and return (frame, status).
+
+    On success returns (DataFrame with generic `sm` column, "OK").
+    On failure returns (None, one of SKIP_STATUSES).
+    """
+    import pandas as pd
+
+    if not site_csv.exists():
+        return None, "MISSING_FILE"
+
+    sm_source_col = SM_VARIANT_TO_COL[sm_variant]
+    required_cols = [TARGET_COL, *FEATURE_COLS_BASE, sm_source_col]
+
+    df = pd.read_csv(site_csv, usecols=lambda c: c in {"TIMESTAMP", *required_cols})
+
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        if sm_source_col in missing:
+            return None, "MISSING_SM_VARIANT"
+        logger.warning("Site %s missing feature columns: %s", site_csv.stem, missing)
+        return None, "MISSING_FEATURE"
+
+    df = df.rename(columns={sm_source_col: SM_COL_NAME})
+    df = df.dropna(subset=[TARGET_COL, *FEATURE_COLS])
+    df = df[df[TARGET_COL] > 0].reset_index(drop=True)
+
+    if len(df) < min_rows:
+        return None, "TOO_FEW_ROWS"
+
+    return df, STATUS_OK
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

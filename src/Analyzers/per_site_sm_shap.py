@@ -581,13 +581,91 @@ def build_parser() -> argparse.ArgumentParser:
         default=42,
         help="Random seed for KFold and XGBoost.",
     )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=REPO_ROOT / DATA_DIR_REL,
+        help="Directory containing {SITE}_daily.csv files.",
+    )
+    parser.add_argument(
+        "--site-meta-csv",
+        type=Path,
+        default=REPO_ROOT / SITE_META_REL,
+        help="CSV file with columns site_code, PFT, biome.",
+    )
     return parser
 
 
+def discover_sites(data_dir: Path) -> list[str]:
+    """Return all site codes present in data_dir. Trailing ``_daily`` only."""
+    import re
+
+    return sorted(re.sub(r"_daily$", "", p.stem) for p in data_dir.glob("*_daily.csv"))
+
+
+def append_to_run_log(log_path: Path, rows: list[dict]) -> None:
+    """Append one line per site result to run_log.txt."""
+    from datetime import datetime, timezone
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with log_path.open("a", encoding="utf-8") as f:
+        for row in rows:
+            f.write(f"{now}\t{row['site_code']}\t{row['status']}\t{row['runtime_sec']}s\n")
+
+
 def main(argv: list[str] | None = None) -> int:
-    _args = build_parser().parse_args(argv)
-    logger.info("Scaffold only — implementation arrives in later tasks.")
-    return 0
+    from joblib import Parallel, delayed
+
+    args = build_parser().parse_args(argv)
+
+    output_root = args.output_dir / args.sm_variant
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    sites = args.sites or discover_sites(args.data_dir)
+    if not sites:
+        logger.error("No sites found in %s", args.data_dir)
+        return 1
+
+    logger.info(
+        "Processing %d sites, variant=%s, n_jobs=%d",
+        len(sites),
+        args.sm_variant,
+        args.n_jobs,
+    )
+
+    try:
+        meta = load_site_metadata(args.site_meta_csv)
+    except (FileNotFoundError, ValueError) as exc:
+        logger.warning(
+            "Could not load site metadata (%s): %s - continuing with 'unknown' PFT/biome annotations.",
+            args.site_meta_csv,
+            exc,
+        )
+        meta = pd.DataFrame(columns=["site_code", "PFT", "biome"])
+
+    configs = [
+        SiteConfig(
+            site_code=sc,
+            site_csv=args.data_dir / f"{sc}_daily.csv",
+            sm_variant=args.sm_variant,
+            min_rows=args.min_rows,
+            output_root=output_root,
+            site_meta=lookup_site_meta(meta, sc),
+            random_state=args.random_seed,
+        )
+        for sc in sites
+    ]
+
+    rows = Parallel(n_jobs=args.n_jobs, verbose=10, backend="loky")(delayed(process_one_site)(cfg) for cfg in configs)
+
+    summary_df = pd.DataFrame(rows)
+    summary_df.to_csv(output_root / "summary.csv", index=False)
+    append_to_run_log(args.output_dir / "run_log.txt", rows)
+
+    ok_count = int((summary_df["status"] == STATUS_OK).sum())
+    logger.info("Finished. OK=%d of %d.", ok_count, len(rows))
+    return 0 if ok_count > 0 else 1
 
 
 if __name__ == "__main__":

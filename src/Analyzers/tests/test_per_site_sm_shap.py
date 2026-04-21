@@ -442,3 +442,46 @@ def test_process_one_site_end_to_end(tmp_path):
     assert (tmp_path / "out" / "plots" / "FAKE_SITE_SM_dependence.png").exists()
     assert (tmp_path / "out" / "shap_values" / "FAKE_SITE_shap.parquet").exists()
     assert (tmp_path / "out" / "models" / "FAKE_SITE.joblib").exists()
+
+
+# ── main CLI e2e (Task 11) ─────────────────────────────────────────────────
+
+
+@pytest.mark.slow
+def test_main_writes_summary_and_runs_on_fixture_only(tmp_path):
+    """End-to-end CLI using a private data dir containing synthetic 200-row site."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _write_synthetic_site_csv(data_dir / "FAKE_SITE_daily.csv", n=200, seed=0)
+
+    meta_csv = tmp_path / "meta.csv"
+    meta_csv.write_text("site_code,PFT,biome\nFAKE_SITE,ENF,Temperate forest\n")
+    out_root = tmp_path / "out"
+
+    from src.Analyzers import per_site_sm_shap as m
+
+    rc = m.main(
+        [
+            "--sm-variant",
+            "raw",
+            "--n-jobs",
+            "1",
+            "--min-rows",
+            "100",
+            "--sites",
+            "FAKE_SITE",
+            "--output-dir",
+            str(out_root),
+            "--data-dir",
+            str(data_dir),
+            "--site-meta-csv",
+            str(meta_csv),
+        ]
+    )
+    assert rc == 0
+    summary_csv = out_root / "raw" / "summary.csv"
+    assert summary_csv.exists()
+    summary = pd.read_csv(summary_csv)
+    assert "FAKE_SITE" in summary["site_code"].values
+    status = summary.loc[summary.site_code == "FAKE_SITE", "status"].iloc[0]
+    assert status in {"OK", "OK_NO_INTERACTION"}, status

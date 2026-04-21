@@ -17,5 +17,5 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 python src/Analyzers/per_site_sm_shap.py \
   --sm-variant raw --n-jobs 3 \
-  --sites ARG_MAZ FIN_HYY AUS_KAR \
+  --sites AUS_CAN_ST1_EUC USA_UMB_CON USA_UMB_GIR \
   --output-dir outputs/analysis/per_site_sm_shap_dryrun

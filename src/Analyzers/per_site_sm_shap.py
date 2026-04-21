@@ -26,6 +26,43 @@ logging.basicConfig(
 logger = logging.getLogger("per_site_sm_shap")
 
 
+# ── Constants ────────────────────────────────────────────────────────────────
+
+FEATURE_COLS_BASE: tuple[str, ...] = ("vpd", "ta", "ws", "sw_in", "precip_sum")
+TARGET_COL: str = "sap_velocity"
+SM_COL_NAME: str = "sm"  # generic internal name
+FEATURE_COLS: tuple[str, ...] = FEATURE_COLS_BASE + (SM_COL_NAME,)  # final 6 features
+SM_IDX: int = FEATURE_COLS.index(SM_COL_NAME)
+
+SM_VARIANT_TO_COL: dict[str, str] = {
+    "raw": "volumetric_soil_water_layer_1_raw",
+    "zscore": "volumetric_soil_water_layer_1_zscore",
+}
+
+DATA_DIR_REL = Path("outputs/processed_data/sapwood/merged/daytime_only/growing_season/daily")
+SITE_META_REL = Path("outputs/processed_data/sapwood/merged/site_biome_mapping.csv")
+
+PARAM_DIST: dict[str, list] = {
+    "max_depth": [3, 4, 5],
+    "min_child_weight": [1, 3, 5, 10],
+    "n_estimators": [200, 400, 600],
+    "subsample": [0.8, 1.0],
+    "gamma": [0.0, 0.1],
+}
+
+FIXED_XGB_PARAMS: dict[str, object] = {
+    "learning_rate": 0.05,
+    "colsample_bytree": 1.0,
+    "reg_alpha": 0.0,
+    "tree_method": "hist",
+    "n_jobs": 1,  # outer parallelism is across sites
+    "objective": "reg:squarederror",
+}
+
+N_HP_TRIALS: int = 30
+CV_FOLDS: int = 5
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 

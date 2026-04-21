@@ -603,6 +603,75 @@ def discover_sites(data_dir: Path) -> list[str]:
     return sorted(re.sub(r"_daily$", "", p.stem) for p in data_dir.glob("*_daily.csv"))
 
 
+def make_pool_figure(
+    *,
+    output_root: Path,
+    facet_by: str,
+    output_path: Path,
+    sm_variant: str,
+) -> None:
+    """Small-multiples: one subplot per site, x=SM, y=main_effect_sm."""
+    import math
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    summary = pd.read_csv(output_root / "summary.csv")
+    summary = summary[summary["status"].isin([STATUS_OK, STATUS_OK_NO_INTERACTION])]
+    if summary.empty:
+        logger.warning("No successful sites; skipping pool figure.")
+        return
+
+    n_sites = len(summary)
+    ncols = min(6, max(1, int(math.ceil(math.sqrt(n_sites)))))
+    nrows = int(math.ceil(n_sites / ncols))
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(2.2 * ncols, 1.8 * nrows),
+        dpi=150,
+        sharex=True,
+        sharey=True,
+    )
+    axes = np.atleast_2d(axes)
+
+    x_unit = "m^3/m^3" if sm_variant == "raw" else "z-score"
+
+    for idx, (_, site_row) in enumerate(summary.iterrows()):
+        r, c = divmod(idx, ncols)
+        ax = axes[r, c]
+        parquet = output_root / "shap_values" / f"{site_row['site_code']}_shap.parquet"
+        if not parquet.exists():
+            ax.axis("off")
+            continue
+        df = pd.read_parquet(parquet, columns=["sm", "main_effect_sm"])
+        ax.scatter(df["sm"], df["main_effect_sm"], s=4, alpha=0.6)
+        ax.axhline(0.0, color="grey", linestyle="--", linewidth=0.5)
+        ax.set_title(
+            f"{site_row['site_code']}\n{site_row.get(facet_by, '')}",
+            fontsize=7,
+        )
+        ax.tick_params(labelsize=6)
+
+    for idx in range(n_sites, nrows * ncols):
+        r, c = divmod(idx, ncols)
+        axes[r, c].axis("off")
+
+    fig.suptitle(
+        f"Per-site SM main-effect ({sm_variant}) - faceted by {facet_by}",
+        fontsize=12,
+    )
+    fig.supxlabel(f"SM ({x_unit})")
+    fig.supylabel("Main-effect SHAP")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def append_to_run_log(log_path: Path, rows: list[dict]) -> None:
     """Append one line per site result to run_log.txt."""
     from datetime import datetime, timezone
@@ -662,6 +731,25 @@ def main(argv: list[str] | None = None) -> int:
     summary_df = pd.DataFrame(rows)
     summary_df.to_csv(output_root / "summary.csv", index=False)
     append_to_run_log(args.output_dir / "run_log.txt", rows)
+
+    pool_dir = output_root / "pool"
+    try:
+        make_pool_figure(
+            output_root=output_root,
+            facet_by="biome",
+            output_path=pool_dir / "pool_by_biome.png",
+            sm_variant=args.sm_variant,
+        )
+        make_pool_figure(
+            output_root=output_root,
+            facet_by="PFT",
+            output_path=pool_dir / "pool_by_pft.png",
+            sm_variant=args.sm_variant,
+        )
+    except Exception:
+        import traceback
+
+        logger.error("Pool figure failed:\n%s", traceback.format_exc())
 
     ok_count = int((summary_df["status"] == STATUS_OK).sum())
     logger.info("Finished. OK=%d of %d.", ok_count, len(rows))

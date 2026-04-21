@@ -485,3 +485,44 @@ def test_main_writes_summary_and_runs_on_fixture_only(tmp_path):
     assert "FAKE_SITE" in summary["site_code"].values
     status = summary.loc[summary.site_code == "FAKE_SITE", "status"].iloc[0]
     assert status in {"OK", "OK_NO_INTERACTION"}, status
+
+
+# ── pool figure tests (Task 12) ────────────────────────────────────────────
+
+
+def test_make_pool_figure_writes_png(tmp_path):
+    from src.Analyzers.per_site_sm_shap import make_pool_figure
+
+    shap_dir = tmp_path / "shap_values"
+    shap_dir.mkdir()
+    rng = np.random.default_rng(0)
+    for site in ["A", "B", "C"]:
+        n = 50
+        df = pd.DataFrame(
+            {
+                "TIMESTAMP": pd.date_range("2020-06-01", periods=n),
+                "sm": rng.uniform(0.1, 0.4, n),
+                "main_effect_sm": rng.normal(0, 0.05, n),
+            }
+        )
+        df.to_parquet(shap_dir / f"{site}_shap.parquet")
+
+    summary = pd.DataFrame(
+        {
+            "site_code": ["A", "B", "C"],
+            "status": ["OK"] * 3,
+            "biome": ["Boreal forest"] * 3,
+            "PFT": ["ENF"] * 3,
+            "n_rows": [50, 50, 50],
+        }
+    )
+    summary.to_csv(tmp_path / "summary.csv", index=False)
+
+    out_png = tmp_path / "pool_by_biome.png"
+    make_pool_figure(
+        output_root=tmp_path,
+        facet_by="biome",
+        output_path=out_png,
+        sm_variant="raw",
+    )
+    assert out_png.exists()

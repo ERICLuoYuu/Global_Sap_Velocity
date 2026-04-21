@@ -17,6 +17,8 @@ from src.Analyzers.per_site_sm_shap import (
     TARGET_COL,
     build_feature_matrix,
     load_site_data,
+    load_site_metadata,
+    lookup_site_meta,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -138,3 +140,42 @@ def test_build_feature_matrix_preserves_row_order():
     df = _make_clean_df(n=10)
     X, y = build_feature_matrix(df)
     np.testing.assert_array_equal(y.values, df[TARGET_COL].values)
+
+
+# ── site metadata tests (Task 5) ───────────────────────────────────────────
+
+
+def test_load_site_metadata_returns_frame_with_site_code_column(tmp_path):
+    csv = tmp_path / "meta.csv"
+    csv.write_text("site_code,PFT,biome\nARG_MAZ,ENF,Temperate forest\n")
+    meta = load_site_metadata(csv)
+    assert "site_code" in meta.columns
+    assert meta.loc[meta.site_code == "ARG_MAZ", "PFT"].iloc[0] == "ENF"
+
+
+def test_lookup_site_meta_unknown_site_returns_sentinels(tmp_path):
+    csv = tmp_path / "meta.csv"
+    csv.write_text("site_code,PFT,biome\nARG_MAZ,ENF,Temperate forest\n")
+    meta = load_site_metadata(csv)
+    info = lookup_site_meta(meta, "NOT_IN_FILE")
+    assert info == {"PFT": "unknown", "biome": "unknown"}
+
+
+def test_lookup_site_meta_known_site():
+    import io
+
+    meta = pd.read_csv(io.StringIO("site_code,PFT,biome\nFIN_HYY,ENF,Boreal forest\n"))
+    info = lookup_site_meta(meta, "FIN_HYY")
+    assert info == {"PFT": "ENF", "biome": "Boreal forest"}
+
+
+def test_load_site_metadata_accepts_site_biome_only_file(tmp_path):
+    """Real site_biome_mapping.csv header is `site,biome` with no PFT column."""
+    csv = tmp_path / "meta.csv"
+    csv.write_text("site,biome\nAUT_PAT_KRU,Boreal forest\n")
+    meta = load_site_metadata(csv)
+    assert "site_code" in meta.columns
+    assert "PFT" in meta.columns
+    row = meta.loc[meta.site_code == "AUT_PAT_KRU"].iloc[0]
+    assert row["biome"] == "Boreal forest"
+    assert row["PFT"] == "unknown"

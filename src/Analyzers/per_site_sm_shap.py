@@ -133,6 +133,47 @@ def build_feature_matrix(df):
     return X, y
 
 
+# ── Site metadata ────────────────────────────────────────────────────────────
+
+
+def load_site_metadata(path: Path):
+    """Load site_biome_mapping.csv, normalising expected columns.
+
+    The canonical file ships with `site,biome` only (no PFT). We rename
+    `site -> site_code` and fill PFT="unknown" when absent so the returned
+    frame always exposes the contract {site_code, PFT, biome}. Per-row PFT
+    from individual daily CSVs is preferred downstream via
+    `process_one_site` (see Task 10) but this loader keeps working when only
+    biome is available.
+    """
+    import pandas as pd
+
+    meta = pd.read_csv(path)
+    renames = {
+        "Site": "site_code",
+        "site": "site_code",
+        "PFT_MODIS": "PFT",
+        "pft": "PFT",
+        "Biome": "biome",
+    }
+    meta = meta.rename(columns={k: v for k, v in renames.items() if k in meta.columns})
+    if "site_code" not in meta.columns:
+        raise ValueError("site metadata missing site identifier column")
+    if "biome" not in meta.columns:
+        raise ValueError("site metadata missing biome column")
+    if "PFT" not in meta.columns:
+        meta["PFT"] = "unknown"
+    return meta[["site_code", "PFT", "biome"]]
+
+
+def lookup_site_meta(meta, site_code: str) -> dict[str, str]:
+    """Return {'PFT': ..., 'biome': ...}; 'unknown' sentinels if not found."""
+    row = meta.loc[meta["site_code"] == site_code]
+    if row.empty:
+        return {"PFT": "unknown", "biome": "unknown"}
+    return {"PFT": str(row["PFT"].iloc[0]), "biome": str(row["biome"].iloc[0])}
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 

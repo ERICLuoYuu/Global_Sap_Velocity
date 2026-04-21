@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=zen2
+#SBATCH --partition=zen2-128C-496G
 #SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

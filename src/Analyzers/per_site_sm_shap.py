@@ -370,6 +370,41 @@ def plot_dependence_pair(
     plt.close(fig)
 
 
+# ── Artifact writers ─────────────────────────────────────────────────────────
+
+
+def save_model(model, path: Path) -> None:
+    import joblib
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model, path)
+
+
+def save_shap_parquet(
+    *,
+    shap_result: ShapResult,
+    X,
+    timestamps,
+    output_path: Path,
+) -> None:
+    """Write a flat parquet: one row per observation, SHAP columns per feature."""
+    shap_df = pd.DataFrame(
+        shap_result.shap_values,
+        columns=[f"shap_{c}" for c in FEATURE_COLS],
+    )
+    out = pd.concat(
+        [
+            pd.Series(timestamps, name="TIMESTAMP").reset_index(drop=True),
+            X.reset_index(drop=True),
+            shap_df.reset_index(drop=True),
+        ],
+        axis=1,
+    )
+    out["main_effect_sm"] = shap_result.main_effect_sm
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_parquet(output_path, index=False)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 

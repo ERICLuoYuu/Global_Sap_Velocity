@@ -23,6 +23,8 @@ from src.Analyzers.per_site_sm_shap import (
     load_site_metadata,
     lookup_site_meta,
     plot_dependence_pair,
+    save_model,
+    save_shap_parquet,
     tune_site_hp,
 )
 
@@ -301,3 +303,58 @@ def test_plot_dependence_pair_writes_png(tmp_path):
     )
     assert out_png.exists()
     assert out_png.stat().st_size > 10_000
+
+
+# ── writer tests (Task 9) ──────────────────────────────────────────────────
+
+
+def test_save_model_roundtrip(tmp_path):
+    import joblib
+
+    X, y = _make_synthetic_xy(n=120)
+    best_params = {
+        "max_depth": 3,
+        "min_child_weight": 3,
+        "n_estimators": 200,
+        "subsample": 1.0,
+        "gamma": 0.0,
+    }
+    fit = fit_final_model(X, y, best_params, random_state=42)
+    path = tmp_path / "m.joblib"
+    save_model(fit.model, path)
+    loaded = joblib.load(path)
+    np.testing.assert_allclose(loaded.predict(X), fit.model.predict(X))
+
+
+def test_save_shap_parquet_has_expected_columns(tmp_path):
+    X, y = _make_synthetic_xy(n=50)
+    best_params = {
+        "max_depth": 3,
+        "min_child_weight": 3,
+        "n_estimators": 200,
+        "subsample": 1.0,
+        "gamma": 0.0,
+    }
+    fit = fit_final_model(X, y, best_params, random_state=42)
+    shap_res = compute_shap(fit.model, X)
+    timestamps = pd.date_range("2020-06-01", periods=50, freq="D")
+    path = tmp_path / "s.parquet"
+    save_shap_parquet(
+        shap_result=shap_res,
+        X=X,
+        timestamps=timestamps,
+        output_path=path,
+    )
+    loaded = pd.read_parquet(path)
+    assert {
+        "TIMESTAMP",
+        "sm",
+        "shap_sm",
+        "main_effect_sm",
+        "shap_vpd",
+        "shap_ta",
+        "shap_ws",
+        "shap_sw_in",
+        "shap_precip_sum",
+    }.issubset(loaded.columns)
+    assert len(loaded) == 50

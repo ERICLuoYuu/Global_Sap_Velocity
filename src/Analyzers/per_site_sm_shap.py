@@ -520,10 +520,15 @@ def process_one_site(cfg: SiteConfig) -> dict:
             logger.error("Site %s PLOT_FAILED:\n%s", cfg.site_code, traceback.format_exc())
             row["status"] = f"PLOT_FAILED:{type(exc).__name__}"[:200]
 
+        if "TIMESTAMP" in df.columns:
+            ts = df["TIMESTAMP"].to_numpy()
+        else:
+            logger.warning("Site %s has no TIMESTAMP column; using row index", cfg.site_code)
+            ts = np.arange(len(df))
         save_shap_parquet(
             shap_result=shap_res,
             X=X,
-            timestamps=df["TIMESTAMP"].to_numpy(),
+            timestamps=ts,
             output_path=parquet_dir / f"{cfg.site_code}_shap.parquet",
         )
         save_model(fit.model, model_dir / f"{cfg.site_code}.joblib")
@@ -726,7 +731,7 @@ def main(argv: list[str] | None = None) -> int:
         for sc in sites
     ]
 
-    rows = Parallel(n_jobs=args.n_jobs, verbose=10, backend="loky")(delayed(process_one_site)(cfg) for cfg in configs)
+    rows = Parallel(n_jobs=args.n_jobs, verbose=5, backend="loky")(delayed(process_one_site)(cfg) for cfg in configs)
 
     summary_df = pd.DataFrame(rows)
     summary_df.to_csv(output_root / "summary.csv", index=False)

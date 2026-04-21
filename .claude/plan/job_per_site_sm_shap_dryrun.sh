@@ -13,6 +13,7 @@ set -euo pipefail
 cd /scratch/tmp/yluo2/gsv
 mkdir -p logs
 source .venv/bin/activate
+export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 python src/Analyzers/per_site_sm_shap.py \

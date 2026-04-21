@@ -16,6 +16,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -215,6 +216,65 @@ def tune_site_hp(X, y, random_state: int = 42) -> HPResult:
         cv_r2_mean=cv_r2_mean,
         cv_r2_std=cv_r2_std,
         cv_rmse_mean=cv_rmse_mean,
+    )
+
+
+# ── Final fit + SHAP ─────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FinalFit:
+    model: object  # xgboost.XGBRegressor
+    in_sample_r2: float
+
+
+@dataclass(frozen=True)
+class ShapResult:
+    shap_values: np.ndarray  # (n, p)
+    shap_interaction: np.ndarray | None  # (n, p, p) or None
+    main_effect_sm: np.ndarray | None  # (n,) or None if interaction failed
+
+
+def fit_final_model(X, y, best_params: dict, random_state: int = 42) -> FinalFit:
+    """Refit XGBoost on full site data with already-tuned HPs."""
+    from sklearn.metrics import r2_score
+    from xgboost import XGBRegressor
+
+    model = XGBRegressor(
+        **FIXED_XGB_PARAMS,
+        **best_params,
+        random_state=random_state,
+    )
+    model.fit(X, y)
+    in_sample_r2 = float(r2_score(y, model.predict(X)))
+    return FinalFit(model=model, in_sample_r2=in_sample_r2)
+
+
+def compute_shap(model, X) -> ShapResult:
+    """Compute SHAP values + interaction values + SM main-effect vector.
+
+    When ``shap_interaction_values`` fails (rare numerical edge cases),
+    ``shap_interaction`` and ``main_effect_sm`` are set to None — callers MUST
+    check for None rather than receiving a silent fallback to marginal SHAP
+    (which would visually duplicate the left-panel curve).
+    """
+    import shap
+
+    explainer = shap.TreeExplainer(model)
+    shap_values = np.asarray(explainer.shap_values(X))
+
+    try:
+        shap_interaction = np.asarray(explainer.shap_interaction_values(X))
+        main_effect_sm = shap_interaction[:, SM_IDX, SM_IDX]
+    except Exception as exc:  # pragma: no cover - rare numerical failures
+        logger.warning("shap_interaction_values failed: %s", exc)
+        shap_interaction = None
+        main_effect_sm = None
+
+    return ShapResult(
+        shap_values=shap_values,
+        shap_interaction=shap_interaction,
+        main_effect_sm=main_effect_sm,
     )
 
 

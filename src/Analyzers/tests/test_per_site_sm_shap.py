@@ -17,6 +17,8 @@ from src.Analyzers.per_site_sm_shap import (
     SM_COL_NAME,
     TARGET_COL,
     build_feature_matrix,
+    compute_shap,
+    fit_final_model,
     load_site_data,
     load_site_metadata,
     lookup_site_meta,
@@ -212,3 +214,53 @@ def test_tune_site_hp_cv_r2_is_positive_on_learnable_data():
     X, y = _make_synthetic_xy(n=200)
     result = tune_site_hp(X, y, random_state=42)
     assert result.cv_r2_mean > 0.5, f"Expected learnable synthetic data; got R2={result.cv_r2_mean}"
+
+
+# ── final model + SHAP tests (Task 7) ──────────────────────────────────────
+
+
+def test_fit_final_model_predicts_reasonably():
+    X, y = _make_synthetic_xy(n=200)
+    best_params = {
+        "max_depth": 4,
+        "min_child_weight": 3,
+        "n_estimators": 300,
+        "subsample": 1.0,
+        "gamma": 0.0,
+    }
+    fit = fit_final_model(X, y, best_params, random_state=42)
+    assert fit.in_sample_r2 > 0.6
+
+
+def test_compute_shap_shapes_and_identity():
+    X, y = _make_synthetic_xy(n=120)
+    best_params = {
+        "max_depth": 3,
+        "min_child_weight": 3,
+        "n_estimators": 200,
+        "subsample": 1.0,
+        "gamma": 0.0,
+    }
+    fit = fit_final_model(X, y, best_params, random_state=42)
+    shap_res = compute_shap(fit.model, X)
+
+    n, p = X.shape
+    assert shap_res.shap_values.shape == (n, p)
+    assert shap_res.shap_interaction is not None
+    assert shap_res.shap_interaction.shape == (n, p, p)
+    recovered = shap_res.shap_interaction.sum(axis=2)
+    np.testing.assert_allclose(recovered, shap_res.shap_values, atol=1e-3)
+
+
+def test_compute_shap_main_effect_length_matches_x():
+    X, y = _make_synthetic_xy(n=150)
+    best_params = {
+        "max_depth": 3,
+        "min_child_weight": 3,
+        "n_estimators": 200,
+        "subsample": 1.0,
+        "gamma": 0.0,
+    }
+    fit = fit_final_model(X, y, best_params, random_state=42)
+    shap_res = compute_shap(fit.model, X)
+    assert shap_res.main_effect_sm.shape == (150,)

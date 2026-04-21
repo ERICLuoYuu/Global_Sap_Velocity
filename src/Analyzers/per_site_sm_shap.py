@@ -120,6 +120,19 @@ def load_site_data(
     return df, STATUS_OK
 
 
+# ── Feature matrix ───────────────────────────────────────────────────────────
+
+
+def build_feature_matrix(df):
+    """Select feature columns in canonical order and return (X, y).
+
+    Assumes `df` has already been filtered by `load_site_data`.
+    """
+    X = df[list(FEATURE_COLS)].copy()
+    y = df[TARGET_COL].copy()
+    return X, y
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 

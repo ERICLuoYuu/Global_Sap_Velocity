@@ -6,10 +6,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from src.Analyzers.per_site_sm_shap import SKIP_STATUSES, load_site_data
+from src.Analyzers.per_site_sm_shap import (
+    FEATURE_COLS,
+    SKIP_STATUSES,
+    SM_COL_NAME,
+    TARGET_COL,
+    build_feature_matrix,
+    load_site_data,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "src" / "Analyzers" / "per_site_sm_shap.py"
@@ -92,3 +100,41 @@ def test_load_site_data_missing_sm_variant(tmp_path: Path) -> None:
     df, status = load_site_data(site_csv=path, sm_variant="zscore", min_rows=1)
     assert df is None
     assert status == "MISSING_SM_VARIANT"
+
+
+# ── build_feature_matrix tests (Task 4) ────────────────────────────────────
+
+
+def _make_clean_df(n: int = 50, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame(
+        {
+            "TIMESTAMP": pd.date_range("2020-06-01", periods=n, freq="D"),
+            TARGET_COL: rng.uniform(0.5, 3.0, n),
+            "vpd": rng.uniform(0.5, 2.5, n),
+            "ta": rng.uniform(10, 30, n),
+            "ws": rng.uniform(0.5, 3.0, n),
+            "sw_in": rng.uniform(100, 300, n),
+            "precip_sum": rng.uniform(0, 5, n),
+            SM_COL_NAME: rng.uniform(0.15, 0.35, n),
+        }
+    )
+
+
+def test_build_feature_matrix_shape():
+    df = _make_clean_df(n=30)
+    X, y = build_feature_matrix(df)
+    assert X.shape == (30, 6)
+    assert y.shape == (30,)
+
+
+def test_build_feature_matrix_column_order():
+    df = _make_clean_df(n=10)
+    X, _ = build_feature_matrix(df)
+    assert list(X.columns) == list(FEATURE_COLS)
+
+
+def test_build_feature_matrix_preserves_row_order():
+    df = _make_clean_df(n=10)
+    X, y = build_feature_matrix(df)
+    np.testing.assert_array_equal(y.values, df[TARGET_COL].values)

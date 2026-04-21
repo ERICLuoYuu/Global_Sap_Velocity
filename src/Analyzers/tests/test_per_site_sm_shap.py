@@ -23,7 +23,7 @@ from src.Analyzers.per_site_sm_shap import (
     load_site_data,
     load_site_metadata,
     lookup_site_meta,
-    plot_dependence_pair,
+    plot_sm_dependence,
     process_one_site,
     save_model,
     save_shap_parquet,
@@ -274,7 +274,7 @@ def test_compute_shap_main_effect_length_matches_x():
 # ── plot tests (Task 8) ────────────────────────────────────────────────────
 
 
-def test_plot_dependence_pair_writes_png(tmp_path):
+def test_plot_sm_dependence_writes_png(tmp_path):
     X, y = _make_synthetic_xy(n=120)
     best_params = {
         "max_depth": 3,
@@ -287,7 +287,7 @@ def test_plot_dependence_pair_writes_png(tmp_path):
     shap_res = compute_shap(fit.model, X)
 
     out_png = tmp_path / "test_plot.png"
-    plot_dependence_pair(
+    plot_sm_dependence(
         X=X,
         shap_result=shap_res,
         sm_variant="raw",
@@ -414,6 +414,8 @@ def _write_synthetic_site_csv(path: Path, n: int = 200, seed: int = 0) -> None:
             "precip_sum": rng.uniform(0, 5, n),
             "volumetric_soil_water_layer_1_raw": sm_raw,
             "volumetric_soil_water_layer_1_zscore": (sm_raw - sm_raw.mean()) / sm_raw.std(),
+            "pft": ["ENF"] * n,
+            "biome": ["Temperate forest"] * n,
         }
     )
     df["sap_velocity"] = df["sap_velocity"].clip(lower=0.01)
@@ -432,13 +434,16 @@ def test_process_one_site_end_to_end(tmp_path):
         sm_variant="raw",
         min_rows=100,
         output_root=tmp_path / "out",
-        site_meta={"PFT": "ENF", "biome": "Temperate forest"},
+        # deliberately wrong metadata — per-row pft/biome must override it
+        site_meta={"PFT": "metadata_bogus", "biome": "metadata_bogus"},
         random_state=42,
     )
     row = process_one_site(cfg)
     assert row["status"] in {"OK", "OK_NO_INTERACTION"}, row["status"]
     assert row["n_rows"] == 200
     assert row["cv_r2_mean"] > 0.3
+    assert row["PFT"] == "ENF", f"PFT not overridden from per-row data: {row['PFT']}"
+    assert row["biome"] == "Temperate forest"
     assert (tmp_path / "out" / "plots" / "FAKE_SITE_SM_dependence.png").exists()
     assert (tmp_path / "out" / "shap_values" / "FAKE_SITE_shap.parquet").exists()
     assert (tmp_path / "out" / "models" / "FAKE_SITE.joblib").exists()
@@ -502,6 +507,7 @@ def test_make_pool_figure_writes_png(tmp_path):
             {
                 "TIMESTAMP": pd.date_range("2020-06-01", periods=n),
                 "sm": rng.uniform(0.1, 0.4, n),
+                "shap_sm": rng.normal(0, 0.05, n),
                 "main_effect_sm": rng.normal(0, 0.05, n),
             }
         )

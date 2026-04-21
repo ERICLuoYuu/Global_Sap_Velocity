@@ -22,6 +22,7 @@ from src.Analyzers.per_site_sm_shap import (
     load_site_data,
     load_site_metadata,
     lookup_site_meta,
+    plot_dependence_pair,
     tune_site_hp,
 )
 
@@ -264,3 +265,39 @@ def test_compute_shap_main_effect_length_matches_x():
     fit = fit_final_model(X, y, best_params, random_state=42)
     shap_res = compute_shap(fit.model, X)
     assert shap_res.main_effect_sm.shape == (150,)
+
+
+# ── plot tests (Task 8) ────────────────────────────────────────────────────
+
+
+def test_plot_dependence_pair_writes_png(tmp_path):
+    X, y = _make_synthetic_xy(n=120)
+    best_params = {
+        "max_depth": 3,
+        "min_child_weight": 3,
+        "n_estimators": 200,
+        "subsample": 1.0,
+        "gamma": 0.0,
+    }
+    fit = fit_final_model(X, y, best_params, random_state=42)
+    shap_res = compute_shap(fit.model, X)
+
+    out_png = tmp_path / "test_plot.png"
+    plot_dependence_pair(
+        X=X,
+        shap_result=shap_res,
+        sm_variant="raw",
+        site_meta={
+            "site_code": "FAKE_SITE",
+            "PFT": "ENF",
+            "biome": "Temperate forest",
+            "n_rows": len(X),
+            "cv_r2_mean": 0.78,
+            "cv_r2_std": 0.04,
+            "in_sample_r2": 0.91,
+            "best_params": best_params,
+        },
+        output_path=out_png,
+    )
+    assert out_png.exists()
+    assert out_png.stat().st_size > 10_000

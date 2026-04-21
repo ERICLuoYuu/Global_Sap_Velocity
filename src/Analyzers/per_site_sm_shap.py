@@ -278,6 +278,98 @@ def compute_shap(model, X) -> ShapResult:
     )
 
 
+# ── Plotting ─────────────────────────────────────────────────────────────────
+
+
+def plot_dependence_pair(
+    *,
+    X,
+    shap_result: ShapResult,
+    sm_variant: str,
+    site_meta: dict,
+    output_path: Path,
+) -> None:
+    """Render the per-site SM dependence figure as PNG.
+
+    Two-panel layout when ``shap_result.main_effect_sm`` is available; falls
+    back to a single-panel figure with a visible red banner when the
+    interaction computation failed (``main_effect_sm is None``). The fallback
+    is visually distinct so viewers don't mistake it for the two-panel plot.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    try:
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+    except ImportError:
+        lowess = None
+
+    sm_vals = X[SM_COL_NAME].to_numpy()
+    shap_sm_marginal = shap_result.shap_values[:, SM_IDX]
+    main_effect_sm = shap_result.main_effect_sm
+    vpd_vals = X["vpd"].to_numpy()
+
+    x_unit = "m^3/m^3" if sm_variant == "raw" else "z-score"
+    two_panel = main_effect_sm is not None
+
+    if two_panel:
+        fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(12, 5), dpi=150, sharey=False)
+    else:
+        fig, ax_left = plt.subplots(1, 1, figsize=(7, 5), dpi=150)
+        ax_right = None
+
+    sc = ax_left.scatter(sm_vals, shap_sm_marginal, c=vpd_vals, cmap="viridis", s=20, alpha=0.8)
+    ax_left.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
+    ax_left.set_xlabel(f"SM ({x_unit})")
+    ax_left.set_ylabel("SHAP value  (delta sap_velocity, cm3/cm2/h)")
+    ax_left.set_title("Standard SHAP dependence")
+    cbar = fig.colorbar(sc, ax=ax_left)
+    cbar.set_label("VPD (kPa)")
+
+    if two_panel:
+        ax_right.scatter(sm_vals, main_effect_sm, color="steelblue", s=20, alpha=0.8)
+        if lowess is not None and len(sm_vals) >= 10:
+            smoothed = lowess(main_effect_sm, sm_vals, frac=0.3, return_sorted=True)
+            ax_right.plot(smoothed[:, 0], smoothed[:, 1], color="firebrick", linewidth=2)
+        ax_right.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
+        ax_right.set_xlabel(f"SM ({x_unit})")
+        ax_right.set_ylabel("Main-effect SHAP value")
+        ax_right.set_title("Pure main effect (interactions removed)")
+    else:
+        ax_left.text(
+            0.98,
+            0.02,
+            "main-effect computation unavailable\n(shap_interaction_values failed)",
+            transform=ax_left.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="firebrick",
+            bbox=dict(facecolor="white", edgecolor="firebrick", alpha=0.85),
+        )
+
+    suptitle = f"{site_meta['site_code']}  PFT={site_meta['PFT']}  biome={site_meta['biome']}  SM={sm_variant}"
+    fig.suptitle(suptitle, fontsize=12)
+
+    bp = site_meta["best_params"]
+    footer = (
+        f"n={site_meta['n_rows']}   "
+        f"CV-R2={site_meta['cv_r2_mean']:.2f}+/-{site_meta['cv_r2_std']:.2f}   "
+        f"in-sample R2={site_meta['in_sample_r2']:.2f}   "
+        f"max_depth={bp['max_depth']}, n_est={bp['n_estimators']}, "
+        f"min_child_wt={bp['min_child_weight']}, subsample={bp['subsample']}, "
+        f"gamma={bp['gamma']}"
+    )
+    fig.text(0.5, 0.01, footer, ha="center", fontsize=9)
+
+    fig.tight_layout(rect=(0, 0.04, 1, 0.95))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 

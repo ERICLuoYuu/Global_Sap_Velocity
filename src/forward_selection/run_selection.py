@@ -81,7 +81,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data_dir",
         type=str,
-        help="Path to merged site CSV directory (for --build_cache).",
+        help="Override data directory (parent of daily/ or hourly/ subdirectory).",
     )
     parser.add_argument(
         "--time_scale",
@@ -141,14 +141,14 @@ def _cmd_build_cache(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
 
     if args.data_dir:
-        data_dir = Path(args.data_dir)
+        data_dir = Path(args.data_dir) / args.time_scale
     else:
         # Default: use PathConfig
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".venv"))
         from path_config import get_default_paths
 
         paths = get_default_paths()
-        data_dir = paths.merged_daytime_only_dir / args.time_scale
+        data_dir = paths.merged_data_root / args.time_scale
 
     cache_path = output_dir / "feature_cache.npz"
     logger.info("Building cache from %s -> %s", data_dir, cache_path)

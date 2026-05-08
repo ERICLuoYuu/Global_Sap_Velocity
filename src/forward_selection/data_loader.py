@@ -1,14 +1,9 @@
 """Load all site CSVs, compute all features, and cache to .npz.
 
 Reuses helper functions from the training script without modification:
-  - add_sap_flow_features()
-  - apply_feature_engineering()
+  - apply_all_feature_engineering()
   - add_time_features()
   - create_spatial_groups()
-  - calculate_soil_hydraulics_sr2006()
-
-The data_loader extends apply_feature_engineering() rolling and lag groups
-to include rh alongside ta/vpd/sw_in.
 """
 
 from __future__ import annotations
@@ -23,9 +18,11 @@ import pandas as pd
 
 from src.forward_selection.feature_registry import (
     ADDITIONAL_FEATURES,
-    ALL_FEATURE_ENGINEERING_GROUPS,
+    INTERMEDIATE_ONLY,
     PFT_ONEHOT_COLS,
 )
+
+_INTERMEDIATE_SET = frozenset(INTERMEDIATE_ONLY)
 
 logger = logging.getLogger(__name__)
 
@@ -37,40 +34,15 @@ def _import_training_helpers() -> tuple:
     at module load time (they are only needed for cache building).
     """
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from src.hyperparameter_optimization.test_hyperparameter_tuning_ML_spatial_stratified_prediction import (
-        add_sap_flow_features,
+    from src.hyperparameter_optimization.feature_engineering import (
+        apply_all_feature_engineering,
+    )
+    from src.hyperparameter_optimization.training_utils import (
         add_time_features,
-        apply_feature_engineering,
         create_spatial_groups,
     )
 
-    return add_sap_flow_features, add_time_features, apply_feature_engineering, create_spatial_groups
-
-
-# ── rh extensions for rolling / lag groups ──────────────────────────────────
-def _add_rh_rolling_and_lag(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Add rh rolling statistics and lag that the base FE doesn't compute.
-
-    The training script's ``apply_feature_engineering()`` computes rolling
-    stats for ta/vpd/sw_in only.  We extend with rh here.
-    """
-    df = df.copy()
-    new_features: list[str] = []
-
-    if "rh" not in df.columns:
-        return df, new_features
-
-    for window in [3, 7, 14]:
-        mn = f"rh_roll{window}d_mean"
-        sd = f"rh_roll{window}d_std"
-        df[mn] = df["rh"].rolling(window, min_periods=1).mean()
-        df[sd] = df["rh"].rolling(window, min_periods=2).std()
-        new_features.extend([mn, sd])
-
-    df["rh_lag1d"] = df["rh"].shift(1)
-    new_features.append("rh_lag1d")
-
-    return df, new_features
+    return apply_all_feature_engineering, add_time_features, create_spatial_groups
 
 
 def load_and_cache_features(
@@ -104,9 +76,7 @@ def load_and_cache_features(
     -------
     dict with keys: X, y, groups, pfts_encoded, feature_names, pft_categories
     """
-    add_sap_flow_features, add_time_features, apply_feature_engineering, create_spatial_groups = (
-        _import_training_helpers()
-    )
+    apply_all_feature_engineering, add_time_features, create_spatial_groups = _import_training_helpers()
 
     data_list = sorted(data_dir.glob(f"*{time_scale}.csv"))
     data_list = [f for f in data_list if "all_biomes_merged" not in f.name]
@@ -184,32 +154,20 @@ def load_and_cache_features(
             df["latitude"] = latitude
             df["longitude"] = longitude
 
-            # Step 1: add_sap_flow_features (always computed)
-            df = add_sap_flow_features(df, verbose=False)
-
             pft_value = df[pft_col].mode()[0]
 
-            # Step 2: set index + time features (all 8)
+            # Step 1: set index + time features (all 8)
             df.set_index("solar_TIMESTAMP", inplace=True)
             df.sort_index(inplace=True)
             df = add_time_features(df, datetime_column=None)
 
-            # Step 3: apply ALL feature engineering groups
-            engineered_names: list[str] = []
-            df, engineered_names = apply_feature_engineering(
-                df, ALL_FEATURE_ENGINEERING_GROUPS, time_scale, verbose=False
-            )
+            # Step 2: apply ALL feature engineering (single call)
+            df, engineered_names = apply_all_feature_engineering(df, time_scale)
             for fname in engineered_names:
                 if fname not in used_cols:
                     used_cols.append(fname)
 
-            # Step 4: add rh rolling/lag extensions
-            df, rh_extra = _add_rh_rolling_and_lag(df)
-            for fname in rh_extra:
-                if fname not in used_cols:
-                    used_cols.append(fname)
-
-            # Step 5: all 8 time features
+            # Step 3: all 8 time features
             time_features = [
                 "Day sin",
                 "Day cos",
@@ -221,7 +179,7 @@ def load_and_cache_features(
                 "Year cos",
             ]
 
-            feature_cols = used_cols + time_features
+            feature_cols = [c for c in used_cols + time_features if c not in _INTERMEDIATE_SET]
             missing_cols = [c for c in feature_cols if c not in df.columns]
 
             if missing_cols:

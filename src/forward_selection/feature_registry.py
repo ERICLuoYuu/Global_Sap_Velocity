@@ -1,11 +1,11 @@
 """Unified feature definitions for forward feature selection.
 
-Merges features from add_sap_flow_features() and apply_feature_engineering()
-into a single registry.  Each selectable unit maps to one or more column names
-in the pre-computed feature matrix.
+Defines all candidate features produced by apply_all_feature_engineering().
+Both daily and hourly feature names are included — build_feature_groups()
+silently skips names not present in the cached data, so only the correct
+scale's features participate in selection.
 
 PFT one-hot (8 columns) is a single group; everything else is 1:1.
-The API supports arbitrary grouping — swap in multi-column groups later.
 """
 
 from __future__ import annotations
@@ -39,26 +39,7 @@ PFT_ONEHOT_COLS: list[str] = [
 ]
 
 # ---------------------------------------------------------------------------
-# All feature engineering group names to request from apply_feature_engineering
-# ---------------------------------------------------------------------------
-ALL_FEATURE_ENGINEERING_GROUPS: list[str] = [
-    "interactions",
-    "lags_1d",
-    "rolling_3d",
-    "rolling_7d",
-    "rolling_14d",
-    "physics",
-    "precip_memory",
-    "indicators",
-    "root_zone_swc",
-    "rew",
-    "et0",
-    "psi_soil",
-    "cwd",
-]
-
-# ---------------------------------------------------------------------------
-# Additional features to request during data loading (--additional_features)
+# Additional raw columns to load from CSV (beyond base features)
 # ---------------------------------------------------------------------------
 ADDITIONAL_FEATURES: list[str] = [
     # Static
@@ -74,10 +55,19 @@ ADDITIONAL_FEATURES: list[str] = [
     "precip_seasonality",
     "mean_annual_temp",
     "mean_annual_precip",
+    # Pre-computed Saxton-Rawls hydraulic params (from merge pipeline)
+    "soil_theta_wp",
+    "soil_theta_fc",
+    "soil_theta_sat",
     # Dynamic — deeper soil layers + ERA5-Land extras
     "volumetric_soil_water_layer_2",
     "volumetric_soil_water_layer_3",
     "volumetric_soil_water_layer_4",
+    # Raw SWC (m³/m³) — needed for physics-based features (REW, ψ_soil)
+    "volumetric_soil_water_layer_1_raw",
+    "volumetric_soil_water_layer_2_raw",
+    "volumetric_soil_water_layer_3_raw",
+    "volumetric_soil_water_layer_4_raw",
     "soil_temperature_level_2",
     "soil_temperature_level_3",
     "soil_temperature_level_4",
@@ -89,135 +79,150 @@ ADDITIONAL_FEATURES: list[str] = [
     "total_precipitation_hourly_sum",
 ]
 
+# Columns loaded only as inputs to feature engineering — drop before building X
+INTERMEDIATE_ONLY: list[str] = [
+    "soil_theta_wp",
+    "soil_theta_fc",
+    "soil_theta_sat",
+    "volumetric_soil_water_layer_1_raw",
+    "volumetric_soil_water_layer_2_raw",
+    "volumetric_soil_water_layer_3_raw",
+    "volumetric_soil_water_layer_4_raw",
+]
+
+
 # ---------------------------------------------------------------------------
 # Candidate features — ordered dict: group_name -> list of column names
 # Each group is one selectable unit in SFS.
 # ---------------------------------------------------------------------------
+def _pairs(*names: str) -> list[tuple[str, list[str]]]:
+    """Helper: one-to-one name→[name] entries."""
+    return [(n, [n]) for n in names]
+
+
 CANDIDATE_FEATURES: OrderedDict[str, list[str]] = OrderedDict(
     [
-        # -- Base features (individual) --
+        # -- Base features (individual, daily only marked) --
         ("precip", ["precip"]),
-        ("ta_max", ["ta_max"]),
-        ("ta_min", ["ta_min"]),
-        ("vpd_max", ["vpd_max"]),
-        ("vpd_min", ["vpd_min"]),
+        ("ta_max", ["ta_max"]),  # daily only
+        ("ta_min", ["ta_min"]),  # daily only
+        ("vpd_max", ["vpd_max"]),  # daily only
+        ("vpd_min", ["vpd_min"]),  # daily only
         ("canopy_height", ["canopy_height"]),
         ("elevation", ["elevation"]),
         ("LAI", ["LAI"]),
         ("prcip/PET", ["prcip/PET"]),
         ("volumetric_soil_water_layer_1", ["volumetric_soil_water_layer_1"]),
         ("soil_temperature_level_1", ["soil_temperature_level_1"]),
-        ("day_length", ["day_length"]),
+        ("day_length", ["day_length"]),  # daily only
         # PFT one-hot = 1 group of 8 columns
         ("pft", PFT_ONEHOT_COLS),
         # -- Time features (8 individual) --
-        ("Day sin", ["Day sin"]),
-        ("Day cos", ["Day cos"]),
-        ("Week sin", ["Week sin"]),
-        ("Week cos", ["Week cos"]),
-        ("Month sin", ["Month sin"]),
-        ("Month cos", ["Month cos"]),
-        ("Year sin", ["Year sin"]),
-        ("Year cos", ["Year cos"]),
+        *_pairs("Day sin", "Day cos", "Week sin", "Week cos", "Month sin", "Month cos", "Year sin", "Year cos"),
         # -- Additional static --
-        ("slope", ["slope"]),
-        ("aspect_sin", ["aspect_sin"]),
-        ("aspect_cos", ["aspect_cos"]),
-        ("stand_age", ["stand_age"]),
-        ("soil_sand", ["soil_sand"]),
-        ("soil_clay", ["soil_clay"]),
-        ("soil_soc", ["soil_soc"]),
-        ("soil_cfvo", ["soil_cfvo"]),
-        ("temp_seasonality", ["temp_seasonality"]),
-        ("precip_seasonality", ["precip_seasonality"]),
-        ("mean_annual_temp", ["mean_annual_temp"]),
-        ("mean_annual_precip", ["mean_annual_precip"]),
+        *_pairs(
+            "slope",
+            "aspect_sin",
+            "aspect_cos",
+            "stand_age",
+            "soil_sand",
+            "soil_clay",
+            "soil_soc",
+            "soil_cfvo",
+            "temp_seasonality",
+            "precip_seasonality",
+            "mean_annual_temp",
+            "mean_annual_precip",
+        ),
         # -- Additional dynamic --
-        ("volumetric_soil_water_layer_2", ["volumetric_soil_water_layer_2"]),
-        ("volumetric_soil_water_layer_3", ["volumetric_soil_water_layer_3"]),
-        ("volumetric_soil_water_layer_4", ["volumetric_soil_water_layer_4"]),
-        ("soil_temperature_level_2", ["soil_temperature_level_2"]),
-        ("soil_temperature_level_3", ["soil_temperature_level_3"]),
-        ("soil_temperature_level_4", ["soil_temperature_level_4"]),
-        ("rh", ["rh"]),
-        ("rh_max", ["rh_max"]),
-        ("rh_min", ["rh_min"]),
-        ("surface_pressure", ["surface_pressure"]),
-        ("potential_evaporation_hourly_sum", ["potential_evaporation_hourly_sum"]),
-        ("total_precipitation_hourly_sum", ["total_precipitation_hourly_sum"]),
-        # -- Feature engineering: rolling statistics (ta/vpd/sw_in/rh) --
-        ("ta_roll3d_mean", ["ta_roll3d_mean"]),
-        ("ta_roll3d_std", ["ta_roll3d_std"]),
-        ("vpd_roll3d_mean", ["vpd_roll3d_mean"]),
-        ("vpd_roll3d_std", ["vpd_roll3d_std"]),
-        ("sw_in_roll3d_mean", ["sw_in_roll3d_mean"]),
-        ("sw_in_roll3d_std", ["sw_in_roll3d_std"]),
-        ("rh_roll3d_mean", ["rh_roll3d_mean"]),
-        ("rh_roll3d_std", ["rh_roll3d_std"]),
-        ("ta_roll7d_mean", ["ta_roll7d_mean"]),
-        ("ta_roll7d_std", ["ta_roll7d_std"]),
-        ("vpd_roll7d_mean", ["vpd_roll7d_mean"]),
-        ("vpd_roll7d_std", ["vpd_roll7d_std"]),
-        ("sw_in_roll7d_mean", ["sw_in_roll7d_mean"]),
-        ("sw_in_roll7d_std", ["sw_in_roll7d_std"]),
-        ("rh_roll7d_mean", ["rh_roll7d_mean"]),
-        ("rh_roll7d_std", ["rh_roll7d_std"]),
-        ("ta_roll14d_mean", ["ta_roll14d_mean"]),
-        ("ta_roll14d_std", ["ta_roll14d_std"]),
-        ("vpd_roll14d_mean", ["vpd_roll14d_mean"]),
-        ("vpd_roll14d_std", ["vpd_roll14d_std"]),
-        ("sw_in_roll14d_mean", ["sw_in_roll14d_mean"]),
-        ("sw_in_roll14d_std", ["sw_in_roll14d_std"]),
-        ("rh_roll14d_mean", ["rh_roll14d_mean"]),
-        ("rh_roll14d_std", ["rh_roll14d_std"]),
-        # -- Feature engineering: eco-hydro --
-        ("swc_layer2_norm", ["swc_layer2_norm"]),
-        ("swc_layer3_norm", ["swc_layer3_norm"]),
-        ("swc_layer4_norm", ["swc_layer4_norm"]),
-        ("rew", ["rew"]),
-        ("et0", ["et0"]),
-        ("psi_soil", ["psi_soil"]),
-        ("cwd", ["cwd"]),
-        # -- Feature engineering: interactions --
-        ("vpd_x_sw_in", ["vpd_x_sw_in"]),
-        ("vpd_squared", ["vpd_squared"]),
-        ("ta_x_vpd", ["ta_x_vpd"]),
-        ("height_x_vpd", ["height_x_vpd"]),
-        ("wind_x_vpd", ["wind_x_vpd"]),
-        ("demand_x_supply", ["demand_x_supply"]),
-        # -- Feature engineering: physics --
-        ("clear_sky_index", ["clear_sky_index"]),
-        ("gdd", ["gdd"]),
-        ("absorbed_radiation", ["absorbed_radiation"]),
-        # -- Feature engineering: precip memory --
-        ("precip_sum_3d", ["precip_sum_3d"]),
-        ("precip_sum_7d", ["precip_sum_7d"]),
-        ("days_since_rain", ["days_since_rain"]),
-        # -- Feature engineering: indicators --
-        ("vpd_high", ["vpd_high"]),
-        ("soil_moisture_rel", ["soil_moisture_rel"]),
-        ("soil_dry", ["soil_dry"]),
-        # -- Feature engineering: lags --
-        ("ta_lag1d", ["ta_lag1d"]),
-        ("vpd_lag1d", ["vpd_lag1d"]),
-        ("sw_in_lag1d", ["sw_in_lag1d"]),
-        ("precip_lag1d", ["precip_lag1d"]),
-        ("rh_lag1d", ["rh_lag1d"]),
-        # -- add_sap_flow_features unique outputs --
+        *_pairs(
+            "volumetric_soil_water_layer_2",
+            "volumetric_soil_water_layer_3",
+            "volumetric_soil_water_layer_4",
+            "soil_temperature_level_2",
+            "soil_temperature_level_3",
+            "soil_temperature_level_4",
+            "rh",
+            "rh_max",
+            "rh_min",
+            "surface_pressure",
+            "potential_evaporation_hourly_sum",
+            "total_precipitation_hourly_sum",
+        ),
+        # == Feature engineering: interactions (both scales) ==
+        *_pairs("vpd_x_sw_in", "vpd_squared", "ta_x_vpd", "height_x_vpd", "wind_x_vpd", "demand_x_supply"),
+        # == Feature engineering: physics (both scales) ==
+        *_pairs("clear_sky_index", "gdd", "absorbed_radiation"),
+        # == Feature engineering: indicators (both scales) ==
+        *_pairs("vpd_high", "soil_moisture_rel", "soil_dry"),
+        # == Feature engineering: eco-hydro (both scales) ==
+        *_pairs("swc_layer2_norm", "swc_layer3_norm", "swc_layer4_norm", "rew", "et0", "psi_soil", "cwd"),
+        # == Derived scalar features (both scales) ==
+        *_pairs("vpd_log", "dew_point", "dew_point_depression", "tropical", "boreal", "southern_hemisphere"),
+        # == Feature engineering: soil_hydraulics_extended (both scales) ==
+        *_pairs(
+            "awc",
+            "available_water",
+            "soil_water_deficit",
+            "root_zone_swc_weighted",
+            "soil_temp_gradient",
+            "soil_frozen",
+        ),
+        # == Feature engineering: atm_demand_extended (both scales) ==
+        *_pairs("net_radiation", "priestley_taylor_pet"),
+        # == Feature engineering: plant_hydraulics (both scales) ==
+        *_pairs("fAPAR", "lai_change_rate", "radiation_per_leaf"),
+        # == Feature engineering: temporal_anomalies (both scales) ==
+        *_pairs("ta_anomaly", "vpd_anomaly", "swc_anomaly", "cumulative_gdd"),
+        # == Feature engineering: cross_interactions (both scales) ==
+        *_pairs("vpd_x_swc", "vpd_x_rew", "lai_x_vpd", "lai_x_sw_in", "ta_x_swc", "et0_x_rew"),
+        # == Feature engineering: bioclimatic (both scales) ==
+        *_pairs("de_martonne_aridity"),
+        # == Derived: soil-atmosphere temp diff (both scales) ==
+        *_pairs("soil_atm_temp_diff"),
+        # =====================================================================
+        # DAILY-specific temporal features
+        # =====================================================================
+        # -- Daily lags --
+        *_pairs("ta_lag1d", "vpd_lag1d", "sw_in_lag1d", "precip_lag1d", "rh_lag1d"),
+        # -- Daily rolling (3d, 7d, 14d) --
+        *[
+            (f"{v}_roll{w}d_{s}", [f"{v}_roll{w}d_{s}"])
+            for v in ("ta", "vpd", "sw_in", "rh")
+            for w in (3, 7, 14)
+            for s in ("mean", "std")
+        ],
+        # -- Daily precip memory --
+        *_pairs("precip_sum_3d", "precip_sum_7d", "days_since_rain"),
+        # -- Daily temporal extras --
+        *_pairs("ta_change_1d", "sw_in_cumsum_7d", "vpd_cumsum_3d"),
+        # -- Daily vpd_change + swc_memory + diurnal ranges --
+        *_pairs("vpd_change_1d", "swc_lag1d", "swc_lag3d", "swc_lag7d", "swc_change_1d"),
+        *_pairs("diurnal_temp_range", "vpd_diurnal_range"),
+        # =====================================================================
+        # HOURLY-specific temporal features
+        # =====================================================================
+        # -- Hourly lags (1h, 3h, 6h, 12h, 24h) --
+        *[
+            (f"{v}_lag{h}h", [f"{v}_lag{h}h"])
+            for v in ("ta", "vpd", "sw_in", "precip", "rh")
+            for h in (1, 3, 6, 12, 24)
+        ],
+        # -- Hourly rolling (3h, 6h, 12h, 24h) --
+        *[
+            (f"{v}_roll{h}h_{s}", [f"{v}_roll{h}h_{s}"])
+            for v in ("ta", "vpd", "sw_in", "rh")
+            for h in (3, 6, 12, 24)
+            for s in ("mean", "std")
+        ],
+        # -- Hourly precip memory --
+        *_pairs("precip_sum_24h", "precip_sum_72h", "hours_since_rain"),
+        # -- Hourly temporal extras --
+        *_pairs("ta_change_1h", "sw_in_cumsum_24h", "vpd_cumsum_6h"),
+        # -- Hourly vpd_change + swc_memory --
+        *_pairs("vpd_change_1h", "swc_lag1h", "swc_lag6h", "swc_lag24h", "swc_change_1h"),
+        # -- Hourly only --
         ("is_daytime", ["is_daytime"]),
-        ("southern_hemisphere", ["southern_hemisphere"]),
-        ("vpd_mean_6h", ["vpd_mean_6h"]),
-        ("vpd_log", ["vpd_log"]),
-        ("sw_in_cumsum_day", ["sw_in_cumsum_day"]),
-        ("vpd_cumsum_6h", ["vpd_cumsum_6h"]),
-        ("ta_change_1h", ["ta_change_1h"]),
-        ("tropical", ["tropical"]),
-        ("boreal", ["boreal"]),
-        ("dew_point", ["dew_point"]),
-        ("dew_point_depression", ["dew_point_depression"]),
-        ("precip_sum_24h", ["precip_sum_24h"]),
-        ("precip_sum_72h", ["precip_sum_72h"]),
-        ("hours_since_rain", ["hours_since_rain"]),
     ]
 )
 

@@ -53,9 +53,17 @@ FEATURE_UNITS = {
     "precip": "mm",
     "precipitation": "mm",
     # Soil variables
-    "volumetric_soil_water_layer_1": "m³ m⁻³",
+    # SWC representations available per layer (merge_gap_filled_hourly_orginal.py:725):
+    #   plain (no suffix) — x/σ (divided by per-site std, NOT mean-centered)
+    #   *_raw            — original m³ m⁻³
+    #   *_zscore         — (x-μ)/σ true z-score, mean-centered at 0
+    # The trained model uses *_zscore for cleanly interpretable PFT dependence:
+    # x=0 means "at site mean SWC"; x=-1 means "1σ drier than usual at this site".
+    "volumetric_soil_water_layer_1": "σ scaled",
+    "volumetric_soil_water_layer_1_zscore": "z-score",
+    "volumetric_soil_water_layer_1_raw": "m³ m⁻³",
     "soil_temperature_level_1": "K",
-    "swc": "m³ m⁻³",
+    "swc": "σ scaled",
     # Vegetation/Site characteristics
     "canopy_height": "m",
     "elevation": "m",

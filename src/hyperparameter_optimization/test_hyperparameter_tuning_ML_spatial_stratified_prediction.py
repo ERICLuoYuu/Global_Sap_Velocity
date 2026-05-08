@@ -59,8 +59,7 @@ import shap  # noqa: E402
 from matplotlib.colors import TwoSlopeNorm  # noqa: E402
 
 from src.hyperparameter_optimization.feature_engineering import (  # noqa: E402
-    add_sap_flow_features,
-    apply_feature_engineering,
+    apply_all_feature_engineering,
 )
 from src.hyperparameter_optimization.hyper_tuner import MLOptimizer  # noqa: E402
 
@@ -99,6 +98,7 @@ from src.hyperparameter_optimization.shap_plotting import (  # noqa: E402
 )
 from src.hyperparameter_optimization.target_transformer import TargetTransformer  # noqa: E402
 from src.hyperparameter_optimization.training_utils import (  # noqa: E402
+    _str_to_bool,
     add_time_features,
     convert_windows_to_numpy,
     create_spatial_groups,
@@ -118,20 +118,31 @@ def parse_args():
     parser.add_argument("--LABEL_WIDTH", type=int, default=1, help="Label width for time series windows")
     parser.add_argument("--SHIFT", type=int, default=1, help="Shift for time series windows")
     parser.add_argument("--TARGET_COL", type=str, default="sap_velocity", help="Target column name")
-    parser.add_argument("--EXCLUDE_LABELS", type=bool, default=True, help="Exclude labels from input features")
-    parser.add_argument("--EXCLUDE_TARGETS", type=bool, default=True, help="Exclude targets from input features")
-    parser.add_argument("--IS_WINDOWING", type=bool, default=False, help="Enable time windowing for data processing")
+    parser.add_argument("--EXCLUDE_LABELS", type=_str_to_bool, default=True, help="Exclude labels from input features")
+    parser.add_argument(
+        "--EXCLUDE_TARGETS", type=_str_to_bool, default=True, help="Exclude targets from input features"
+    )
+    parser.add_argument(
+        "--IS_WINDOWING", type=_str_to_bool, default=False, help="Enable time windowing for data processing"
+    )
     parser.add_argument(
         "--spatial_split_method", type=str, default="default", help="Method for spatial splitting of data"
     )
-    parser.add_argument("--hyperparameters", type=str, help="Path to the JSON file of hyperparameters")
-    parser.add_argument("--IS_SHUFFLE", type=bool, default=True, help="Whether to enable shuffling of data")
+    parser.add_argument(
+        "--hyperparameters",
+        type=str,
+        default="src/hyperparameter_optimization/JSON/XGB_hyperparameters_fixed.json",
+        help="Path to the JSON file of hyperparameters",
+    )
+    parser.add_argument("--IS_SHUFFLE", type=_str_to_bool, default=True, help="Whether to enable shuffling of data")
     parser.add_argument("--N_ITERATIONS", type=int, default=None, help="Number of iterations for random search")
-    parser.add_argument("--IS_CV", type=bool, default=True, help="Whether to enable cross-validation for inner loop")
-    parser.add_argument("--IS_STRATIFIED", type=bool, default=True, help="Whether to use stratified sampling")
-    parser.add_argument("--BALANCED", type=bool, default=False, help="Whether to balance the spatial groups")
+    parser.add_argument(
+        "--IS_CV", type=_str_to_bool, default=True, help="Whether to enable cross-validation for inner loop"
+    )
+    parser.add_argument("--IS_STRATIFIED", type=_str_to_bool, default=True, help="Whether to use stratified sampling")
+    parser.add_argument("--BALANCED", type=_str_to_bool, default=False, help="Whether to balance the spatial groups")
     parser.add_argument("--SPLIT_TYPE", type=str, default="spatial_stratified", help="Type of data splitting strategy")
-    parser.add_argument("--IS_ONLY_DAY", type=bool, default=False, help="Whether to use only day data")
+    parser.add_argument("--IS_ONLY_DAY", type=_str_to_bool, default=False, help="Whether to use only day data")
     parser.add_argument(
         "--selected_features",
         type=str,
@@ -140,7 +151,9 @@ def parse_args():
     )
     parser.add_argument("--TIME_SCALE", type=str, default="daily", help="Time scale of the data: hourly or daily")
     parser.add_argument("--SHAP_SAMPLE_SIZE", type=int, default=50000, help="Sample size for SHAP analysis")
-    parser.add_argument("--IS_TRANSFORM", type=bool, default=True, help="Whether to apply target transformation")
+    parser.add_argument(
+        "--IS_TRANSFORM", type=_str_to_bool, default=True, help="Whether to apply target transformation"
+    )
     parser.add_argument(
         "--TRANSFORM_METHOD",
         type=str,
@@ -157,12 +170,6 @@ def parse_args():
         default="mean",
         choices=["mean", "pooled", "both"],
         help="R2 reporting: mean (per-fold average), pooled (concatenated OOF), or both",
-    )
-    parser.add_argument(
-        "--feature_groups",
-        nargs="*",
-        default=[],
-        help="Feature engineering groups: interactions lags_1d rolling_3d rolling_7d rolling_14d physics precip_memory indicators static_enrich root_zone_swc rew et0 psi_soil cwd",
     )
     parser.add_argument(
         "--data_dir",
@@ -198,7 +205,6 @@ def main(run_id="default"):
     spatial_split_method = args.spatial_split_method
     SPLIT_TYPE = args.SPLIT_TYPE
     BALANCED = args.BALANCED
-    feature_groups = args.feature_groups
     TIME_SCALE = args.TIME_SCALE
     SHAP_SAMPLE_SIZE = args.SHAP_SAMPLE_SIZE
     IS_TRANSFORM = args.IS_TRANSFORM
@@ -320,8 +326,6 @@ def main(run_id="default"):
 
             df["latitude"] = latitude
             df["longitude"] = longitude
-            # Add engineered features
-            df = add_sap_flow_features(df, verbose=False)
 
             pft_value = df[pft_col].mode()[0]
             logging.debug(f"PFT value: {pft_value}")
@@ -330,9 +334,8 @@ def main(run_id="default"):
             df.sort_index(inplace=True)  # Ensure chronological order
             df = add_time_features(df, datetime_column=None)
 
-            # Apply feature engineering groups (if any requested)
-            if feature_groups:
-                df, _ = apply_feature_engineering(df, feature_groups, TIME_SCALE, verbose=True)
+            # Apply ALL feature engineering unconditionally
+            df, _ = apply_all_feature_engineering(df, TIME_SCALE)
 
             # Create PFT one-hot columns if requested in selected_features
             requested_pft = [c for c in used_cols if c in PFT_COLUMNS]

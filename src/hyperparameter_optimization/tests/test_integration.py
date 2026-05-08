@@ -166,11 +166,11 @@ class TestCrossModuleImports:
 
     def test_import_feature_engineering(self):
         from src.hyperparameter_optimization.feature_engineering import (
-            add_sap_flow_features,
+            apply_all_feature_engineering,
             apply_feature_engineering,
         )
 
-        assert callable(add_sap_flow_features)
+        assert callable(apply_all_feature_engineering)
         assert callable(apply_feature_engineering)
 
     def test_import_training_utils(self):

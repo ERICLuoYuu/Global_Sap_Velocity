@@ -220,6 +220,18 @@ Constant per site; broadcast to all timestamps:
 
 **Sample size:** Configurable (default: 50,000 observations)
 
+### Dual-target SHAP decomposition (V vs Gc)
+
+Post-hoc module that consumes `shap_values_{run_id}.npz` + `SHAP_context_{run_id}.npz`
+from two runs (V = sap_velocity, Gc = canopy_conductance) to compute
+ΔSHAP = z-score(SHAP_V) − z-score(SHAP_Gc), separating transport physics
+from stomatal regulation.
+
+**Module:** `src/hyperparameter_optimization/shap_dual_*.py`
+**CLI:** `python -m src.hyperparameter_optimization.run_shap_dual_analysis --run_id_v ... --run_id_gc ... --analyses tier1`
+**HPC job:** `.claude/plan/job_shap_dual_analysis.sh`
+**Plan:** `.claude/plan/shap-dual-plan.md` (35-analysis roadmap; Tiers 1–2 implemented)
+
 ---
 
 ## Execution Order (Stage 5)

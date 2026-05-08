@@ -12,6 +12,18 @@ import logging
 import warnings
 from pathlib import Path
 
+
+def _str_to_bool(v: str) -> bool:
+    """Parse boolean CLI arguments correctly (type=bool treats any string as True)."""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    if v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected, got '{v}'")
+
+
 import numpy as np
 import pandas as pd
 
@@ -270,20 +282,31 @@ def parse_args():
     parser.add_argument("--LABEL_WIDTH", type=int, default=1, help="Label width for time series windows")
     parser.add_argument("--SHIFT", type=int, default=1, help="Shift for time series windows")
     parser.add_argument("--TARGET_COL", type=str, default="sap_velocity", help="Target column name")
-    parser.add_argument("--EXCLUDE_LABELS", type=bool, default=True, help="Exclude labels from input features")
-    parser.add_argument("--EXCLUDE_TARGETS", type=bool, default=True, help="Exclude targets from input features")
-    parser.add_argument("--IS_WINDOWING", type=bool, default=False, help="Enable time windowing for data processing")
+    parser.add_argument("--EXCLUDE_LABELS", type=_str_to_bool, default=True, help="Exclude labels from input features")
+    parser.add_argument(
+        "--EXCLUDE_TARGETS", type=_str_to_bool, default=True, help="Exclude targets from input features"
+    )
+    parser.add_argument(
+        "--IS_WINDOWING", type=_str_to_bool, default=False, help="Enable time windowing for data processing"
+    )
     parser.add_argument(
         "--spatial_split_method", type=str, default="default", help="Method for spatial splitting of data"
     )
-    parser.add_argument("--hyperparameters", type=str, help="Path to the JSON file of hyperparameters")
-    parser.add_argument("--IS_SHUFFLE", type=bool, default=True, help="Whether to enable shuffling of data")
+    parser.add_argument(
+        "--hyperparameters",
+        type=str,
+        default="src/hyperparameter_optimization/JSON/XGB_hyperparameters_fixed.json",
+        help="Path to the JSON file of hyperparameters",
+    )
+    parser.add_argument("--IS_SHUFFLE", type=_str_to_bool, default=True, help="Whether to enable shuffling of data")
     parser.add_argument("--N_ITERATIONS", type=int, default=None, help="Number of iterations for random search")
-    parser.add_argument("--IS_CV", type=bool, default=True, help="Whether to enable cross-validation for inner loop")
-    parser.add_argument("--IS_STRATIFIED", type=bool, default=True, help="Whether to use stratified sampling")
-    parser.add_argument("--BALANCED", type=bool, default=False, help="Whether to balance the spatial groups")
+    parser.add_argument(
+        "--IS_CV", type=_str_to_bool, default=True, help="Whether to enable cross-validation for inner loop"
+    )
+    parser.add_argument("--IS_STRATIFIED", type=_str_to_bool, default=True, help="Whether to use stratified sampling")
+    parser.add_argument("--BALANCED", type=_str_to_bool, default=False, help="Whether to balance the spatial groups")
     parser.add_argument("--SPLIT_TYPE", type=str, default="spatial_stratified", help="Type of data splitting strategy")
-    parser.add_argument("--IS_ONLY_DAY", type=bool, default=False, help="Whether to use only day data")
+    parser.add_argument("--IS_ONLY_DAY", type=_str_to_bool, default=False, help="Whether to use only day data")
     parser.add_argument(
         "--selected_features",
         type=str,
@@ -292,7 +315,9 @@ def parse_args():
     )
     parser.add_argument("--TIME_SCALE", type=str, default="daily", help="Time scale of the data: hourly or daily")
     parser.add_argument("--SHAP_SAMPLE_SIZE", type=int, default=50000, help="Sample size for SHAP analysis")
-    parser.add_argument("--IS_TRANSFORM", type=bool, default=True, help="Whether to apply target transformation")
+    parser.add_argument(
+        "--IS_TRANSFORM", type=_str_to_bool, default=True, help="Whether to apply target transformation"
+    )
     parser.add_argument(
         "--TRANSFORM_METHOD",
         type=str,
@@ -311,15 +336,17 @@ def parse_args():
         help="R2 reporting: mean (per-fold average), pooled (concatenated OOF), or both",
     )
     parser.add_argument(
-        "--feature_groups",
-        nargs="*",
-        default=[],
-        help="Feature engineering groups: interactions lags_1d rolling_3d rolling_7d rolling_14d physics precip_memory indicators static_enrich",
-    )
-    parser.add_argument(
         "--data_dir",
         type=str,
         default=None,
         help="Override data directory path (e.g. for growing-season-filtered data)",
+    )
+    parser.add_argument(
+        "--vpd_filter",
+        type=float,
+        default=0.0,
+        help="Min VPD (kPa). Rows below are dropped. Default 0 (no filter) — V target "
+        "trains on full data. For canopy_conductance target pass 0.3 explicitly "
+        "(G_c undefined at low VPD; 0.6 per Ewers & Oren 2000 for sensitivity).",
     )
     return parser.parse_args()

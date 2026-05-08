@@ -38,6 +38,13 @@ SM_COL_NAME: str = "sm"  # generic internal name
 FEATURE_COLS: tuple[str, ...] = FEATURE_COLS_BASE + (SM_COL_NAME,)  # final 6 features
 SM_IDX: int = FEATURE_COLS.index(SM_COL_NAME)
 
+# (column_name, axis_label) for the additional climate dependence panels
+CLIMATE_FEATURES: tuple[tuple[str, str], ...] = (
+    ("vpd", "VPD (kPa)"),
+    ("ta", "Ta (degC)"),
+    ("sw_in", "SW_in (W m^-2)"),
+)
+
 SM_VARIANT_TO_COL: dict[str, str] = {
     "raw": "volumetric_soil_water_layer_1_raw",
     "zscore": "volumetric_soil_water_layer_1_zscore",
@@ -102,12 +109,8 @@ def load_site_data(
 
     sm_source_col = SM_VARIANT_TO_COL[sm_variant]
     required_cols = [TARGET_COL, *FEATURE_COLS_BASE, sm_source_col]
-    optional_cols = {"pft", "biome"}  # per-row metadata carried through if present
 
-    df = pd.read_csv(
-        site_csv,
-        usecols=lambda c: c in {"TIMESTAMP", *required_cols, *optional_cols},
-    )
+    df = pd.read_csv(site_csv, usecols=lambda c: c in {"TIMESTAMP", *required_cols})
 
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
@@ -118,7 +121,10 @@ def load_site_data(
 
     df = df.rename(columns={sm_source_col: SM_COL_NAME})
     df = df.dropna(subset=[TARGET_COL, *FEATURE_COLS])
-    df = df[df[TARGET_COL] > 0].reset_index(drop=True)
+    # Keep zero-flow rows: drought-shutdown days at the dry SM tail are
+    # biologically real and informative for SHAP. Only sensor-noise negatives
+    # are excluded.
+    df = df[df[TARGET_COL] >= 0].reset_index(drop=True)
 
     if len(df) < min_rows:
         return None, "TOO_FEW_ROWS"
@@ -285,7 +291,7 @@ def compute_shap(model, X) -> ShapResult:
 # ── Plotting ─────────────────────────────────────────────────────────────────
 
 
-def plot_sm_dependence(
+def plot_dependence_pair(
     *,
     X,
     shap_result: ShapResult,
@@ -293,29 +299,66 @@ def plot_sm_dependence(
     site_meta: dict,
     output_path: Path,
 ) -> None:
-    """Render the per-site SM vs SHAP dependence scatter PNG (single panel).
+    """Render the per-site SM dependence figure as PNG.
 
-    Points colored by VPD. Main-effect panel removed; ``main_effect_sm`` is
-    still available in the parquet artifact for external analysis.
+    Two-panel layout when ``shap_result.main_effect_sm`` is available; falls
+    back to a single-panel figure with a visible red banner when the
+    interaction computation failed (``main_effect_sm is None``). The fallback
+    is visually distinct so viewers don't mistake it for the two-panel plot.
     """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    try:
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+    except ImportError:
+        lowess = None
+
     sm_vals = X[SM_COL_NAME].to_numpy()
-    shap_sm = shap_result.shap_values[:, SM_IDX]
+    shap_sm_marginal = shap_result.shap_values[:, SM_IDX]
+    main_effect_sm = shap_result.main_effect_sm
     vpd_vals = X["vpd"].to_numpy()
 
     x_unit = "m^3/m^3" if sm_variant == "raw" else "z-score"
+    two_panel = main_effect_sm is not None
 
-    fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=150)
-    sc = ax.scatter(sm_vals, shap_sm, c=vpd_vals, cmap="viridis", s=20, alpha=0.8)
-    ax.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
-    ax.set_xlabel(f"SM ({x_unit})")
-    ax.set_ylabel("SHAP values for sap flow density (cm3 cm-2 h-1)")
-    cbar = fig.colorbar(sc, ax=ax)
+    if two_panel:
+        fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(12, 5), dpi=150, sharey=False)
+    else:
+        fig, ax_left = plt.subplots(1, 1, figsize=(7, 5), dpi=150)
+        ax_right = None
+
+    sc = ax_left.scatter(sm_vals, shap_sm_marginal, c=vpd_vals, cmap="viridis", s=20, alpha=0.8)
+    ax_left.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
+    ax_left.set_xlabel(f"SM ({x_unit})")
+    ax_left.set_ylabel("SHAP value  (delta sap_velocity, cm3/cm2/h)")
+    ax_left.set_title("Standard SHAP dependence")
+    cbar = fig.colorbar(sc, ax=ax_left)
     cbar.set_label("VPD (kPa)")
+
+    if two_panel:
+        ax_right.scatter(sm_vals, main_effect_sm, color="steelblue", s=20, alpha=0.8)
+        if lowess is not None and len(sm_vals) >= 10:
+            smoothed = lowess(main_effect_sm, sm_vals, frac=0.3, return_sorted=True)
+            ax_right.plot(smoothed[:, 0], smoothed[:, 1], color="firebrick", linewidth=2)
+        ax_right.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
+        ax_right.set_xlabel(f"SM ({x_unit})")
+        ax_right.set_ylabel("Main-effect SHAP value")
+        ax_right.set_title("Pure main effect (interactions removed)")
+    else:
+        ax_left.text(
+            0.98,
+            0.02,
+            "main-effect computation unavailable\n(shap_interaction_values failed)",
+            transform=ax_left.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="firebrick",
+            bbox=dict(facecolor="white", edgecolor="firebrick", alpha=0.85),
+        )
 
     suptitle = f"{site_meta['site_code']}  PFT={site_meta['PFT']}  biome={site_meta['biome']}  SM={sm_variant}"
     fig.suptitle(suptitle, fontsize=12)
@@ -332,6 +375,75 @@ def plot_sm_dependence(
     fig.text(0.5, 0.01, footer, ha="center", fontsize=9)
 
     fig.tight_layout(rect=(0, 0.04, 1, 0.95))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_climate_dependence(
+    *,
+    X: pd.DataFrame,
+    shap_values: np.ndarray,
+    sm_variant: str,
+    site_meta: dict,
+    output_path: Path,
+) -> None:
+    """Render a 1x3 dependence figure for vpd, ta, sw_in (colored by SM).
+
+    Each subplot: x = feature value, y = SHAP value for that feature, color = SM.
+    Uses ``viridis_r`` so that low SM (drought / stress) renders as bright yellow,
+    matching the visual semantic of the standard SM panel where high VPD is yellow.
+    Single-panel layout — main-effect interactions are shown only for SM in
+    ``plot_dependence_pair``.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    sm_vals = X[SM_COL_NAME].to_numpy()
+    sm_unit = "m^3/m^3" if sm_variant == "raw" else "z-score"
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), dpi=150, sharey=True)
+
+    sc = None
+    # Indexed loop (no zip) — HPC venv is Python 3.9 and ruff keeps "fixing"
+    # zip() to add strict=, which is a 3.10+ kwarg.
+    for i in range(len(CLIMATE_FEATURES)):
+        ax = axes[i]
+        feat, xlabel = CLIMATE_FEATURES[i]
+        if feat not in X.columns:
+            ax.text(0.5, 0.5, f"missing column: {feat}", ha="center", va="center", transform=ax.transAxes)
+            ax.axis("off")
+            continue
+        feat_vals = X[feat].to_numpy()
+        feat_idx = FEATURE_COLS.index(feat)
+        shap_feat = shap_values[:, feat_idx]
+        sc = ax.scatter(feat_vals, shap_feat, c=sm_vals, cmap="viridis_r", s=20, alpha=0.8)
+        ax.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
+        ax.set_xlabel(xlabel)
+        ax.set_title(f"{feat} dependence")
+
+    axes[0].set_ylabel("SHAP values for sap flow density (cm3 cm-2 h-1)")
+
+    if sc is not None:
+        cbar = fig.colorbar(sc, ax=axes, location="right", fraction=0.025, pad=0.02)
+        cbar.set_label(f"SM ({sm_unit})")
+
+    suptitle = f"{site_meta['site_code']}  PFT={site_meta['PFT']}  biome={site_meta['biome']}  SM={sm_variant}"
+    fig.suptitle(suptitle, fontsize=12)
+
+    bp = site_meta["best_params"]
+    footer = (
+        f"n={site_meta['n_rows']}   "
+        f"CV-R2={site_meta['cv_r2_mean']:.2f}+/-{site_meta['cv_r2_std']:.2f}   "
+        f"in-sample R2={site_meta['in_sample_r2']:.2f}   "
+        f"max_depth={bp['max_depth']}, n_est={bp['n_estimators']}, "
+        f"min_child_wt={bp['min_child_weight']}, subsample={bp['subsample']}, "
+        f"gamma={bp['gamma']}"
+    )
+    fig.text(0.5, 0.01, footer, ha="center", fontsize=9)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -426,15 +538,6 @@ def process_one_site(cfg: SiteConfig) -> dict:
             row["status"] = status
             return row
         row["n_rows"] = int(len(df))
-
-        # Override PFT/biome from per-row daily-CSV data when present —
-        # the canonical site_biome_mapping.csv lacks PFT, but each daily
-        # CSV carries `pft` and `biome` columns.
-        if "pft" in df.columns and df["pft"].notna().any():
-            row["PFT"] = str(df["pft"].dropna().iloc[0])
-        if "biome" in df.columns and df["biome"].notna().any():
-            row["biome"] = str(df["biome"].dropna().iloc[0])
-
         X, y = build_feature_matrix(df)
 
         try:
@@ -482,12 +585,10 @@ def process_one_site(cfg: SiteConfig) -> dict:
             "in_sample_r2": fit.in_sample_r2,
             "site_code": cfg.site_code,
             "n_rows": row["n_rows"],
-            "PFT": row["PFT"],
-            "biome": row["biome"],
         }
 
         try:
-            plot_sm_dependence(
+            plot_dependence_pair(
                 X=X,
                 shap_result=shap_res,
                 sm_variant=cfg.sm_variant,
@@ -497,6 +598,24 @@ def process_one_site(cfg: SiteConfig) -> dict:
         except Exception as exc:
             logger.error("Site %s PLOT_FAILED:\n%s", cfg.site_code, traceback.format_exc())
             row["status"] = f"PLOT_FAILED:{type(exc).__name__}"[:200]
+
+        # Secondary climate dependence panel — failure here is logged but does
+        # not change row["status"], since SM plot + parquet + model are the
+        # primary artifacts and may already have succeeded.
+        try:
+            plot_climate_dependence(
+                X=X,
+                shap_values=shap_res.shap_values,
+                sm_variant=cfg.sm_variant,
+                site_meta=full_meta,
+                output_path=plot_dir / f"{cfg.site_code}_climate_dependence.png",
+            )
+        except Exception:
+            logger.error(
+                "Site %s CLIMATE_PLOT_FAILED:\n%s",
+                cfg.site_code,
+                traceback.format_exc(),
+            )
 
         if "TIMESTAMP" in df.columns:
             ts = df["TIMESTAMP"].to_numpy()
@@ -593,7 +712,7 @@ def make_pool_figure(
     output_path: Path,
     sm_variant: str,
 ) -> None:
-    """Small-multiples: one subplot per site, x=SM, y=shap_sm."""
+    """Small-multiples: one subplot per site, x=SM, y=main_effect_sm."""
     import math
 
     import matplotlib
@@ -630,8 +749,8 @@ def make_pool_figure(
         if not parquet.exists():
             ax.axis("off")
             continue
-        df = pd.read_parquet(parquet, columns=["sm", "shap_sm"])
-        ax.scatter(df["sm"], df["shap_sm"], s=4, alpha=0.6)
+        df = pd.read_parquet(parquet, columns=["sm", "main_effect_sm"])
+        ax.scatter(df["sm"], df["main_effect_sm"], s=4, alpha=0.6)
         ax.axhline(0.0, color="grey", linestyle="--", linewidth=0.5)
         ax.set_title(
             f"{site_row['site_code']}\n{site_row.get(facet_by, '')}",
@@ -644,11 +763,11 @@ def make_pool_figure(
         axes[r, c].axis("off")
 
     fig.suptitle(
-        f"Per-site SM SHAP ({sm_variant}) - faceted by {facet_by}",
+        f"Per-site SM main-effect ({sm_variant}) - faceted by {facet_by}",
         fontsize=12,
     )
     fig.supxlabel(f"SM ({x_unit})")
-    fig.supylabel("SHAP values for sap flow density (cm3 cm-2 h-1)")
+    fig.supylabel("Main-effect SHAP")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")

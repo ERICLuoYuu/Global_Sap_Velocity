@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -37,8 +38,8 @@ parent_dir = str(Path(__file__).parent.parent.parent)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
-from path_config import PathConfig
-from src.hyperparameter_optimization.shap_constants import (
+from path_config import PathConfig  # noqa: E402
+from src.hyperparameter_optimization.shap_constants import (  # noqa: E402
     FEATURE_UNITS,
     PFT_COLORS,
     PFT_COLUMNS,
@@ -47,7 +48,11 @@ from src.hyperparameter_optimization.shap_constants import (
     get_feature_unit,
     get_shap_label,
 )
-from src.hyperparameter_optimization.shap_plotting import (
+from src.hyperparameter_optimization.shap_pft_dependence import (  # noqa: E402
+    plot_shap_dependence_by_pft_binned,
+    plot_single_feature_dependence_per_pft,
+)
+from src.hyperparameter_optimization.shap_plotting import (  # noqa: E402
     aggregate_pft_shap_values,
     aggregate_static_feature_shap,
     aggregate_static_feature_values,
@@ -67,7 +72,7 @@ from src.hyperparameter_optimization.shap_plotting import (
     plot_shap_by_pft_violin,
     plot_top_features_per_pft,
 )
-from src.hyperparameter_optimization.target_transformer import TargetTransformer
+from src.hyperparameter_optimization.target_transformer import TargetTransformer  # noqa: E402
 
 
 def parse_args():
@@ -144,8 +149,6 @@ def run_shap_analysis(
     y_all_records = context["y_all_records"]
     site_ids_all_records = context["site_ids"]
     timestamps_all = context["timestamps"]
-    groups_all_records = context["groups"] if "groups" in context.files else None
-    pfts_all_records = context["pfts"]
 
     # Extract config values (nested under data_info in training config)
     data_info = config.get("data_info", {})
@@ -254,7 +257,6 @@ def run_shap_analysis(
 
             shap_values_windowed = shap_values_raw
             shap_feature_names_windowed = shap_feature_names
-            X_for_plots_windowed = X_original_sampled
 
             logging.info(f"Aggregated SHAP values shape: {shap_values.shape}")
             logging.info(f"Aggregated feature count: {len(shap_feature_names_final)}")
@@ -264,7 +266,6 @@ def run_shap_analysis(
             X_for_plots = X_original_sampled
             shap_values_windowed = None
             shap_feature_names_windowed = None
-            X_for_plots_windowed = None
 
         df_shap = pd.DataFrame(shap_values, columns=shap_feature_names_final)
         df_X = pd.DataFrame(X_for_plots, columns=shap_feature_names_final)
@@ -338,12 +339,10 @@ def run_shap_analysis(
                     ax.text(0.5, 0.5, "No valid data", ha="center", va="center")
                     continue
                 ax.scatter(x_valid, y_valid, alpha=0.3, color="steelblue", s=10)
-                try:
+                with contextlib.suppress(Exception):
                     sns.regplot(
                         x=x_valid, y=y_valid, scatter=False, lowess=True, ax=ax, color="red", line_kws={"linewidth": 2}
                     )
-                except Exception:
-                    pass
                 ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
                 feat_unit = get_feature_unit(feature)
                 xlabel = f"{feature} ({feat_unit})" if feat_unit else feature
@@ -729,6 +728,26 @@ def run_shap_analysis(
                 shap_values=shap_values_pft_agg,
                 feature_names=feature_names_pft_agg,
                 pft_labels=pft_labels_sampled,
+                output_dir=plot_dir,
+            )
+
+            logging.info("  Generating PFT-grouped binned SHAP dependence plot...")
+            plot_shap_dependence_by_pft_binned(
+                shap_values=shap_values_pft_agg,
+                X_original=X_for_pft_plots,
+                feature_names=feature_names_pft_agg,
+                pft_labels=pft_labels_sampled,
+                output_dir=plot_dir,
+                top_n=9,
+            )
+
+            logging.info("  Generating per-PFT SWC dependence plot...")
+            plot_single_feature_dependence_per_pft(
+                shap_values=shap_values_pft_agg,
+                X_original=X_for_pft_plots,
+                feature_names=feature_names_pft_agg,
+                pft_labels=pft_labels_sampled,
+                target_feature="volumetric_soil_water_layer_1_zscore",
                 output_dir=plot_dir,
             )
 

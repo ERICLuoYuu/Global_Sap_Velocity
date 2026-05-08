@@ -53,8 +53,7 @@ np.random.seed(42)
 
 # Import the hyperparameter optimizer
 from src.hyperparameter_optimization.feature_engineering import (  # noqa: E402
-    add_sap_flow_features,
-    apply_feature_engineering,
+    apply_all_feature_engineering,
 )
 from src.hyperparameter_optimization.hyper_tuner import MLOptimizer  # noqa: E402
 
@@ -101,12 +100,12 @@ def main(run_id="default"):
     spatial_split_method = args.spatial_split_method
     SPLIT_TYPE = args.SPLIT_TYPE
     BALANCED = args.BALANCED
-    feature_groups = args.feature_groups
     TIME_SCALE = args.TIME_SCALE
     IS_TRANSFORM = args.IS_TRANSFORM
     TRANSFORM_METHOD = args.TRANSFORM_METHOD if IS_TRANSFORM else "none"
     GRID_SIZE = args.grid_size
     R2_METHOD = args.r2_method
+    VPD_FILTER = args.vpd_filter
 
     # Initialize target transformer
     target_transformer = TargetTransformer(method=TRANSFORM_METHOD)
@@ -194,19 +193,17 @@ def main(run_id="default"):
                     continue
 
             site_id = df["site_name"].iloc[0]
-            if df[TARGET_COL].max() > max_sap:
-                max_sap = df[TARGET_COL].max()
-                max_site = data_file.name
-
-            site_max = df[TARGET_COL].max()
-            if site_max > 100:
-                logging.info(f"!!! HIGH VELOCITY ALERT: Site {site_id} has max value: {site_max:.2f}")
 
             lat_col = next((col for col in df.columns if col.lower() in ["lat", "latitude_x"]), None)
             lon_col = next((col for col in df.columns if col.lower() in ["lon", "longitude_x"]), None)
-            pft_col = next(
-                (col for col in df.columns if col.lower() in ["pft", "plant_functional_type", "biome"]), None
-            )
+            # Walk candidates in priority order (not df.columns order): merged CSV has both
+            # `pft` (short codes like 'DBF' matching PFT_COLUMNS) and `biome` (IGBP long names
+            # like 'Woodland/Shrubland'). Picking by df.columns order historically grabbed
+            # `biome`, whose long names silently coerced to NaN under pd.Categorical(...,
+            # categories=PFT_COLUMNS) — producing all-zero PFT one-hot and zero-SHAP columns.
+            _pft_priority = ["pft", "plant_functional_type", "biome"]
+            _lower_to_actual = {col.lower(): col for col in df.columns}
+            pft_col = next((_lower_to_actual[p] for p in _pft_priority if p in _lower_to_actual), None)
 
             logging.info(f"PFT column found: {pft_col}")
 
@@ -223,8 +220,6 @@ def main(run_id="default"):
 
             df["latitude"] = latitude
             df["longitude"] = longitude
-            # Add engineered features (only used if listed in selected_features)
-            df = add_sap_flow_features(df, verbose=False)
 
             pft_value = df[pft_col].mode()[0]
             logging.debug(f"PFT value: {pft_value}")
@@ -233,9 +228,53 @@ def main(run_id="default"):
             df.sort_index(inplace=True)  # Ensure chronological order
             df = add_time_features(df, datetime_column=None)
 
-            # Apply feature engineering groups (if any requested)
-            if feature_groups:
-                df, _ = apply_feature_engineering(df, feature_groups, TIME_SCALE, verbose=True)
+            # Apply ALL feature engineering unconditionally
+            df, _ = apply_all_feature_engineering(df, TIME_SCALE)
+
+            # Compute canopy conductance if requested as target
+            if TARGET_COL == "canopy_conductance":
+                from src.hyperparameter_optimization.feature_engineering import compute_canopy_conductance
+
+                _gc_required = ["sap_velocity", "vpd", "ta"]
+                if all(c in df.columns for c in _gc_required):
+                    _elev = float(df["elevation"].iloc[0]) if "elevation" in df.columns else 0.0
+                    df["canopy_conductance"] = compute_canopy_conductance(
+                        sap_velocity=df["sap_velocity"],
+                        vpd=df["vpd"],
+                        temperature=df["ta"],
+                        elevation=_elev,
+                        vpd_min=VPD_FILTER,
+                    )
+                    _n_filtered = df["canopy_conductance"].isna().sum() - df["sap_velocity"].isna().sum()
+                    logging.info(
+                        f"  {site_id}: computed canopy_conductance "
+                        f"(VPD filter={VPD_FILTER} kPa, {_n_filtered} rows below threshold)"
+                    )
+                else:
+                    _missing_gc = [c for c in _gc_required if c not in df.columns]
+                    logging.warning(f"  {site_id}: cannot compute canopy_conductance, missing {_missing_gc}. Skipping.")
+                    continue
+
+            # --- Universal VPD filter (ensures V and G_c targets use identical
+            # training rows for clean ΔSHAP comparison) ---
+            if VPD_FILTER > 0 and "vpd" in df.columns:
+                _vpd_mask = df["vpd"] >= VPD_FILTER
+                _n_vpd_dropped = int((~_vpd_mask).sum())
+                if _n_vpd_dropped > 0:
+                    df = df[_vpd_mask].copy()
+                    logging.info(
+                        f"  {site_id}: VPD>={VPD_FILTER} kPa filter dropped "
+                        f"{_n_vpd_dropped} rows ({100 * _n_vpd_dropped / (_n_vpd_dropped + len(df)):.1f}%)"
+                    )
+
+            # Track max target value (placed after G_c computation so column exists)
+            if TARGET_COL in df.columns:
+                _site_max = df[TARGET_COL].max()
+                if _site_max > max_sap:
+                    max_sap = _site_max
+                    max_site = data_file.name
+                if _site_max > 100:
+                    logging.info(f"!!! HIGH VALUE ALERT: Site {site_id} has max {TARGET_COL}: {_site_max:.2f}")
 
             # Create PFT one-hot columns if requested in selected_features
             requested_pft = [c for c in used_cols if c in PFT_COLUMNS]
@@ -243,6 +282,17 @@ def main(run_id="default"):
                 pft_cat = pd.Categorical(df[pft_col], categories=PFT_COLUMNS)
                 pft_dummies = pd.get_dummies(pft_cat).astype(int)
                 pft_dummies.index = df.index
+                # Fail loudly if pd.Categorical silently NaN-coerced the values (e.g. long
+                # IGBP names like 'Mixed Forest' passed where short codes like 'MF' expected).
+                # Without this guard, PFT one-hot is all-zero per row → XGBoost never splits
+                # on PFT → SHAP = 0 for every PFT column. Silent failure must not happen twice.
+                if (pft_dummies.sum(axis=1) == 0).any():
+                    raise ValueError(
+                        f"Site {site_id}: PFT one-hot produced all-zero rows from column "
+                        f"'{pft_col}'. df['{pft_col}'] unique values = "
+                        f"{list(df[pft_col].unique())}. Expected values in PFT_COLUMNS = "
+                        f"{PFT_COLUMNS}. Check that merge pipeline emits short IGBP codes."
+                    )
                 for col in pft_dummies.columns:
                     df[col] = pft_dummies[col]
 
@@ -338,7 +388,9 @@ def main(run_id="default"):
 
     logging.info(f"Spatial groups assigned: {np.unique(spatial_groups)}")
 
-    site_to_group = {site_id: group for site_id, group in zip(site_ids, spatial_groups, strict=False)}
+    # zip(strict=) is Python 3.10+; HPC runs 3.9. site_ids and spatial_groups are built
+    # from the same site list so lengths are guaranteed equal.
+    site_to_group = {site_id: group for site_id, group in zip(site_ids, spatial_groups)}  # noqa: B905
     site_to_pft = {site_id: site_info_dict[site_id]["pft"] for site_id in site_ids}
 
     # Plot spatial grouping

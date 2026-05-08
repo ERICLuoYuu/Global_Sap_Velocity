@@ -5,51 +5,10 @@ import pandas as pd
 import pytest
 
 from src.hyperparameter_optimization.feature_engineering import (
-    add_sap_flow_features,
+    apply_all_feature_engineering,
     apply_feature_engineering,
     calculate_soil_hydraulics_sr2006,
 )
-
-
-class TestAddSapFlowFeatures:
-    """Test add_sap_flow_features column creation."""
-
-    @pytest.fixture
-    def base_df(self):
-        rng = np.random.RandomState(42)
-        n = 100
-        return pd.DataFrame(
-            {
-                "vpd": rng.uniform(0.1, 3.0, n),
-                "sw_in": rng.uniform(0, 800, n),
-                "ta": rng.uniform(5, 35, n),
-                "precip": rng.uniform(0, 20, n),
-                "ws": rng.uniform(0, 10, n),
-                "LAI": rng.uniform(0.5, 6.0, n),
-                "volumetric_soil_water_layer_1": rng.uniform(0.1, 0.5, n),
-                "canopy_height": rng.uniform(5, 30, n),
-                "soil_temperature_level_1": rng.uniform(273, 300, n),
-                "ppfd_in": rng.uniform(0, 2000, n),
-            }
-        )
-
-    def test_returns_dataframe(self, base_df):
-        result = add_sap_flow_features(base_df)
-        assert isinstance(result, pd.DataFrame)
-
-    def test_adds_interaction_features(self, base_df):
-        result = add_sap_flow_features(base_df)
-        assert "vpd_x_sw_in" in result.columns
-
-    def test_does_not_mutate_input(self, base_df):
-        original_cols = set(base_df.columns)
-        add_sap_flow_features(base_df)
-        assert set(base_df.columns) == original_cols
-
-    def test_handles_missing_columns(self):
-        df = pd.DataFrame({"ta": [1.0, 2.0, 3.0]})
-        result = add_sap_flow_features(df)
-        assert isinstance(result, pd.DataFrame)
 
 
 class TestApplyFeatureEngineering:
@@ -190,12 +149,16 @@ class TestREW:
     def rew_df(self):
         rng = np.random.RandomState(42)
         n = 50
+        # Pre-computed Saxton-Rawls values for 40% sand, 20% clay, 15 g/kg SOC, 5% cfvo
         return pd.DataFrame(
             {
-                "soil_sand": [40.0] * n,  # 40% sand
-                "soil_clay": [20.0] * n,  # 20% clay
-                "soil_soc": [15.0] * n,  # g/kg SOC
-                "soil_cfvo": [5.0] * n,  # 5% coarse fragments
+                "soil_sand": [40.0] * n,
+                "soil_clay": [20.0] * n,
+                "soil_soc": [15.0] * n,
+                "soil_cfvo": [5.0] * n,
+                "soil_theta_wp": [0.130640] * n,
+                "soil_theta_fc": [0.266469] * n,
+                "soil_theta_sat": [0.438513] * n,
                 "volumetric_soil_water_layer_2": rng.uniform(0.1, 0.4, n),
                 "sap_velocity": rng.uniform(0, 50, n),
             }
@@ -749,29 +712,23 @@ class TestREWEdgeCases:
     def test_rew_skipped_when_wp_equals_fc(self):
         """When WP ≈ FC (fc - wp < 0.01), REW should not be created."""
         n = 10
-        # Very extreme soil: try to make fc ≈ wp
-        # Pure sand: sand=1.0, clay=0.0, om=0
         df = pd.DataFrame(
             {
-                "soil_sand": [100.0] * n,  # extreme sand
-                "soil_clay": [0.0] * n,
-                "soil_soc": [0.0] * n,
-                "soil_cfvo": [0.0] * n,
+                "soil_theta_wp": [0.10] * n,
+                "soil_theta_fc": [0.105] * n,  # fc - wp = 0.005 < 0.01
                 "volumetric_soil_water_layer_2": np.full(n, 0.2),
             }
         )
         result, feats = apply_feature_engineering(df, ["rew"])
-        # Either rew is created (fc-wp > 0.01) or skipped — no crash either way
-        # We test it doesn't crash
-        assert isinstance(result, pd.DataFrame)
+        assert "rew" not in feats
 
     def test_rew_with_nan_soil_data(self):
-        """NaN soil texture → REW skipped."""
+        """NaN soil hydraulic params → REW skipped."""
         n = 5
         df = pd.DataFrame(
             {
-                "soil_sand": [np.nan] * n,
-                "soil_clay": [np.nan] * n,
+                "soil_theta_wp": [np.nan] * n,
+                "soil_theta_fc": [np.nan] * n,
                 "volumetric_soil_water_layer_2": np.full(n, 0.2),
             }
         )
@@ -831,10 +788,19 @@ class TestMultipleGroupsCombined:
                 "volumetric_soil_water_layer_1": rng.uniform(0.1, 0.4, n),
                 "volumetric_soil_water_layer_2": rng.uniform(0.1, 0.4, n),
                 "volumetric_soil_water_layer_3": rng.uniform(0.1, 0.4, n),
+                "volumetric_soil_water_layer_4": rng.uniform(0.15, 0.3, n),
+                "soil_temperature_level_1": rng.uniform(275, 300, n),
                 "soil_temperature_level_2": rng.uniform(275, 295, n),
                 "soil_temperature_level_3": rng.uniform(275, 295, n),
+                "soil_temperature_level_4": rng.uniform(278, 290, n),
+                "soil_theta_wp": np.full(n, 0.130640),
+                "soil_theta_fc": np.full(n, 0.266469),
                 "potential_evaporation_hourly_sum": np.full(n, -0.001),
                 "total_precipitation_hourly_sum": rng.uniform(0, 0.002, n),
+                "vpd_max": rng.uniform(2.0, 4.0, n),
+                "vpd_min": rng.uniform(0.2, 1.0, n),
+                "mean_annual_temp": np.full(n, 12.0),
+                "mean_annual_precip": np.full(n, 750.0),
                 "pl_dbh": rng.uniform(10, 40, n),
                 "pl_sens_meth": ["HD"] * n,
                 "pl_species": ["Pinus sylvestris"] * n,
@@ -856,10 +822,17 @@ class TestMultipleGroupsCombined:
             "et0",
             "psi_soil",
             "cwd",
+            "soil_hydraulics_extended",
+            "atm_demand_extended",
+            "plant_hydraulics",
+            "swc_memory",
+            "temporal_anomalies",
+            "cross_interactions",
+            "bioclimatic",
             "tree_metadata",
         ]
         result, feats = apply_feature_engineering(df, all_groups)
-        assert len(feats) > 30  # Should create many features
+        assert len(feats) > 50  # Should create many features with new groups
         assert len(result) == n  # No rows dropped
 
     def test_no_mutation_of_input(self):
@@ -927,3 +900,605 @@ class TestTreeMetadataEdgeCases:
         )
         result, feats = apply_feature_engineering(df, ["tree_metadata"])
         assert "genus_Pinus" in feats
+
+
+class TestApplyAllFeatureEngineering:
+    """Test the unified apply_all_feature_engineering entry point."""
+
+    @pytest.fixture
+    def full_df(self):
+        rng = np.random.RandomState(42)
+        n = 60
+        return pd.DataFrame(
+            {
+                "vpd": rng.uniform(0.5, 3.0, n),
+                "sw_in": rng.uniform(50, 600, n),
+                "ta": rng.uniform(5, 35, n),
+                "ta_max": rng.uniform(25, 40, n),
+                "ta_min": rng.uniform(0, 15, n),
+                "precip": rng.uniform(0, 10, n),
+                "ws": rng.uniform(0.5, 8, n),
+                "rh": rng.uniform(30, 90, n),
+                "LAI": rng.uniform(1, 5, n),
+                "ext_rad": rng.uniform(200, 450, n),
+                "ppfd_in": rng.uniform(0, 2000, n),
+                "canopy_height": rng.uniform(5, 30, n),
+                "elevation": np.full(n, 200.0),
+                "prcip/PET": rng.uniform(0.2, 2.0, n),
+                "soil_sand": np.full(n, 40.0),
+                "soil_clay": np.full(n, 20.0),
+                "soil_soc": np.full(n, 15.0),
+                "soil_cfvo": np.full(n, 5.0),
+                "volumetric_soil_water_layer_1": rng.uniform(0.1, 0.4, n),
+                "volumetric_soil_water_layer_2": rng.uniform(0.1, 0.4, n),
+                "volumetric_soil_water_layer_3": rng.uniform(0.1, 0.4, n),
+                "soil_temperature_level_2": rng.uniform(275, 295, n),
+                "soil_temperature_level_3": rng.uniform(275, 295, n),
+                "potential_evaporation_hourly_sum": np.full(n, -0.001),
+                "total_precipitation_hourly_sum": rng.uniform(0, 0.002, n),
+                "latitude": np.full(n, 51.0),
+                "sap_velocity": rng.uniform(0, 50, n),
+            }
+        )
+
+    def test_returns_tuple(self, full_df):
+        result_df, new_features = apply_all_feature_engineering(full_df)
+        assert isinstance(result_df, pd.DataFrame)
+        assert isinstance(new_features, list)
+        assert len(new_features) > 30
+
+    def test_includes_all_group_features(self, full_df):
+        _, feats = apply_all_feature_engineering(full_df)
+        assert "vpd_x_sw_in" in feats  # interactions
+        assert "ta_lag1d" in feats  # lags_1d
+        assert "ta_roll3d_mean" in feats  # rolling_3d
+        assert "clear_sky_index" in feats  # physics
+
+    def test_shared_scalar_features(self, full_df):
+        _, feats = apply_all_feature_engineering(full_df)
+        assert "vpd_log" in feats
+        assert "dew_point" in feats
+        assert "dew_point_depression" in feats
+        assert "tropical" in feats
+        assert "boreal" in feats
+        assert "southern_hemisphere" in feats
+
+    def test_daily_scale_aware_names(self, full_df):
+        _, feats = apply_all_feature_engineering(full_df, time_scale="daily")
+        # Daily lags: _lag1d
+        assert "ta_lag1d" in feats
+        assert "vpd_lag1d" in feats
+        # Daily rolling: _roll{3,7,14}d
+        assert "ta_roll3d_mean" in feats
+        assert "vpd_roll7d_std" in feats
+        assert "sw_in_roll14d_mean" in feats
+        # Daily precip: _3d/_7d, days_since_rain
+        assert "precip_sum_3d" in feats
+        assert "precip_sum_7d" in feats
+        assert "days_since_rain" in feats
+        # Daily extras
+        assert "ta_change_1d" in feats
+        assert "sw_in_cumsum_7d" in feats
+        assert "vpd_cumsum_3d" in feats
+        # Must NOT have hourly names
+        assert "ta_lag1h" not in feats
+        assert "ta_roll3h_mean" not in feats
+
+    def test_hourly_scale_aware_names(self, full_df):
+        _, feats = apply_all_feature_engineering(full_df, time_scale="hourly")
+        # Hourly lags: 1h, 3h, 6h, 12h, 24h
+        for lag in [1, 3, 6, 12, 24]:
+            assert f"ta_lag{lag}h" in feats
+            assert f"vpd_lag{lag}h" in feats
+        # Hourly rolling: 3h, 6h, 12h, 24h
+        for w in [3, 6, 12, 24]:
+            assert f"ta_roll{w}h_mean" in feats
+            assert f"vpd_roll{w}h_std" in feats
+        # Hourly precip: 24h/72h, hours_since_rain
+        assert "precip_sum_24h" in feats
+        assert "precip_sum_72h" in feats
+        assert "hours_since_rain" in feats
+        # Hourly extras
+        assert "ta_change_1h" in feats
+        assert "sw_in_cumsum_24h" in feats
+        assert "vpd_cumsum_6h" in feats
+        # Must NOT have daily names
+        assert "ta_lag1d" not in feats
+        assert "ta_roll3d_mean" not in feats
+        assert "precip_sum_3d" not in feats
+
+    def test_no_rows_dropped(self, full_df):
+        n_before = len(full_df)
+        result_df, _ = apply_all_feature_engineering(full_df)
+        assert len(result_df) == n_before
+
+    def test_binary_flags(self, full_df):
+        result_df, _ = apply_all_feature_engineering(full_df)
+        for col in ["tropical", "boreal", "southern_hemisphere"]:
+            assert set(result_df[col].unique()).issubset({0.0, 1.0})
+
+    def test_daily_no_is_daytime(self, full_df):
+        """Daily scale must NOT include is_daytime."""
+        _, feats = apply_all_feature_engineering(full_df, time_scale="daily")
+        assert "is_daytime" not in feats
+
+    def test_hourly_has_is_daytime(self, full_df):
+        """Hourly scale must include is_daytime."""
+        _, feats = apply_all_feature_engineering(full_df, time_scale="hourly")
+        assert "is_daytime" in feats
+
+    def test_symmetric_feature_categories(self, full_df):
+        """Daily and hourly share the same non-temporal features; temporal names differ by scale."""
+        _, daily_feats = apply_all_feature_engineering(full_df, time_scale="daily")
+        _, hourly_feats = apply_all_feature_engineering(full_df, time_scale="hourly")
+        # Non-temporal features identical across scales
+        non_temporal = {
+            "vpd_log",
+            "dew_point",
+            "dew_point_depression",
+            "tropical",
+            "boreal",
+            "southern_hemisphere",
+            "vpd_x_sw_in",
+            "vpd_squared",
+            "clear_sky_index",
+            "gdd",
+        }
+        for feat in non_temporal:
+            assert feat in daily_feats, f"{feat} missing from daily"
+            assert feat in hourly_feats, f"{feat} missing from hourly"
+        # is_daytime only in hourly
+        assert "is_daytime" not in daily_feats
+        assert "is_daytime" in hourly_feats
+
+    def test_works_without_optional_cols(self):
+        """Should not crash when optional columns (rh, latitude) are missing."""
+        df = pd.DataFrame(
+            {
+                "vpd": [1.0, 2.0, 3.0],
+                "ta": [20.0, 25.0, 30.0],
+                "sw_in": [200.0, 300.0, 400.0],
+            }
+        )
+        result_df, feats = apply_all_feature_engineering(df)
+        assert isinstance(result_df, pd.DataFrame)
+        assert "vpd_log" in feats
+        assert "ta_change_1d" in feats
+        assert "sw_in_cumsum_7d" in feats
+        assert "dew_point" not in feats  # no rh
+        assert "tropical" not in feats  # no latitude
+
+
+# =====================================================================
+# Tests for new feature groups (feature expansion)
+# =====================================================================
+
+
+class TestSoilHydraulicsExtended:
+    """Test soil_hydraulics_extended feature group."""
+
+    @pytest.fixture
+    def hydro_df(self):
+        rng = np.random.RandomState(42)
+        n = 50
+        _swc2 = rng.uniform(0.1, 0.4, n)
+        return pd.DataFrame(
+            {
+                "soil_theta_wp": [0.130640] * n,
+                "soil_theta_fc": [0.266469] * n,
+                "soil_theta_sat": [0.438513] * n,
+                "volumetric_soil_water_layer_1": rng.uniform(0.1, 0.4, n),
+                "volumetric_soil_water_layer_2": _swc2 / _swc2.std(),  # variance-normalised
+                "volumetric_soil_water_layer_2_raw": _swc2,  # physical m³/m³
+                "volumetric_soil_water_layer_3": rng.uniform(0.15, 0.35, n),
+                "volumetric_soil_water_layer_4": rng.uniform(0.2, 0.3, n),
+                "soil_temperature_level_1": rng.uniform(275, 300, n),  # Kelvin
+                "soil_temperature_level_4": rng.uniform(278, 290, n),
+            }
+        )
+
+    def test_creates_awc(self, hydro_df):
+        result, feats = apply_feature_engineering(hydro_df, ["soil_hydraulics_extended"])
+        assert "awc" in feats
+        # AWC = (fc - wp) * 1000 = (0.266469 - 0.130640) * 1000 ≈ 135.8
+        assert result["awc"].iloc[0] == pytest.approx(135.829, abs=0.1)
+
+    def test_creates_available_water_and_deficit(self, hydro_df):
+        result, feats = apply_feature_engineering(hydro_df, ["soil_hydraulics_extended"])
+        assert "available_water" in feats
+        assert "soil_water_deficit" in feats
+        assert (result["available_water"] >= 0).all()
+        assert (result["soil_water_deficit"] >= 0).all()
+
+    def test_creates_root_zone_weighted(self, hydro_df):
+        result, feats = apply_feature_engineering(hydro_df, ["soil_hydraulics_extended"])
+        assert "root_zone_swc_weighted" in feats
+        # Weighted mean should be between min and max of layers
+        _min = min(hydro_df[f"volumetric_soil_water_layer_{i}"].min() for i in range(1, 5))
+        _max = max(hydro_df[f"volumetric_soil_water_layer_{i}"].max() for i in range(1, 5))
+        assert result["root_zone_swc_weighted"].min() >= _min - 0.01
+        assert result["root_zone_swc_weighted"].max() <= _max + 0.01
+
+    def test_creates_soil_temp_gradient(self, hydro_df):
+        result, feats = apply_feature_engineering(hydro_df, ["soil_hydraulics_extended"])
+        assert "soil_temp_gradient" in feats
+
+    def test_soil_frozen_kelvin(self, hydro_df):
+        result, feats = apply_feature_engineering(hydro_df, ["soil_hydraulics_extended"])
+        assert "soil_frozen" in feats
+        # All temps > 273.15 → frozen should be 0
+        assert result["soil_frozen"].sum() == 0
+
+    def test_soil_frozen_detects_freezing(self):
+        n = 10
+        df = pd.DataFrame(
+            {"soil_temperature_level_1": [270.0] * n}  # Below 273.15 K
+        )
+        result, feats = apply_feature_engineering(df, ["soil_hydraulics_extended"])
+        assert "soil_frozen" in feats
+        assert (result["soil_frozen"] == 1.0).all()
+
+    def test_skipped_without_soil_params(self):
+        n = 10
+        df = pd.DataFrame({"volumetric_soil_water_layer_2": np.full(n, 0.25)})
+        result, feats = apply_feature_engineering(df, ["soil_hydraulics_extended"])
+        assert "awc" not in feats
+        assert "available_water" not in feats
+
+    def test_available_water_skipped_without_raw_column(self):
+        """available_water requires _raw SWC (m³/m³), not variance-normalised."""
+        n = 10
+        df = pd.DataFrame(
+            {
+                "soil_theta_wp": [0.130640] * n,
+                "soil_theta_fc": [0.266469] * n,
+                "volumetric_soil_water_layer_2": np.full(n, 3.0),  # normalised (x/σ)
+                # No _raw column!
+            }
+        )
+        result, feats = apply_feature_engineering(df, ["soil_hydraulics_extended"])
+        assert "awc" in feats  # AWC only needs θ_fc - θ_wp
+        assert "available_water" not in feats  # requires _raw
+        assert "soil_water_deficit" not in feats  # requires _raw
+
+
+class TestAtmDemandExtended:
+    """Test atm_demand_extended feature group."""
+
+    @pytest.fixture
+    def atm_df(self):
+        n = 30
+        return pd.DataFrame(
+            {
+                "ta": np.full(n, 20.0),
+                "ta_max": np.full(n, 25.0),
+                "ta_min": np.full(n, 15.0),
+                "rh": np.full(n, 60.0),
+                "sw_in": np.full(n, 200.0),
+                "ext_rad": np.full(n, 350.0),
+                "elevation": np.full(n, 100.0),
+                "vpd_max": np.full(n, 2.5),
+                "vpd_min": np.full(n, 0.5),
+            }
+        )
+
+    def test_creates_net_radiation(self, atm_df):
+        result, feats = apply_feature_engineering(atm_df, ["atm_demand_extended"])
+        assert "net_radiation" in feats
+
+    def test_creates_priestley_taylor(self, atm_df):
+        result, feats = apply_feature_engineering(atm_df, ["atm_demand_extended"])
+        assert "priestley_taylor_pet" in feats
+        # PT PET should be non-negative
+        assert (result["priestley_taylor_pet"] >= 0).all()
+        # Realistic range: 0-15 mm/day for daily
+        assert result["priestley_taylor_pet"].mean() < 20
+
+    def test_creates_diurnal_ranges_daily(self, atm_df):
+        result, feats = apply_feature_engineering(atm_df, ["atm_demand_extended"], time_scale="daily")
+        assert "diurnal_temp_range" in feats
+        assert result["diurnal_temp_range"].iloc[0] == pytest.approx(10.0)
+        assert "vpd_diurnal_range" in feats
+        assert result["vpd_diurnal_range"].iloc[0] == pytest.approx(2.0)
+
+    def test_no_diurnal_ranges_hourly(self, atm_df):
+        result, feats = apply_feature_engineering(atm_df, ["atm_demand_extended"], time_scale="hourly")
+        assert "diurnal_temp_range" not in feats
+        assert "vpd_diurnal_range" not in feats
+
+    def test_skipped_without_rh(self):
+        n = 10
+        df = pd.DataFrame(
+            {
+                "ta": np.full(n, 20.0),
+                "sw_in": np.full(n, 200.0),
+                "ext_rad": np.full(n, 350.0),
+                "elevation": np.full(n, 100.0),
+            }
+        )
+        result, feats = apply_feature_engineering(df, ["atm_demand_extended"])
+        assert "net_radiation" not in feats
+        assert "priestley_taylor_pet" not in feats
+
+
+class TestPlantHydraulics:
+    """Test plant_hydraulics feature group."""
+
+    @pytest.fixture
+    def plant_df(self):
+        n = 30
+        return pd.DataFrame(
+            {
+                "LAI": np.linspace(0.5, 6.0, n),
+                "sw_in": np.full(n, 300.0),
+            }
+        )
+
+    def test_creates_fAPAR(self, plant_df):
+        result, feats = apply_feature_engineering(plant_df, ["plant_hydraulics"])
+        assert "fAPAR" in feats
+        # fAPAR bounded [0, 1)
+        assert result["fAPAR"].min() >= 0
+        assert result["fAPAR"].max() < 1.0
+
+    def test_fAPAR_increases_with_lai(self, plant_df):
+        result, _ = apply_feature_engineering(plant_df, ["plant_hydraulics"])
+        assert result["fAPAR"].iloc[-1] > result["fAPAR"].iloc[0]
+
+    def test_creates_radiation_per_leaf(self, plant_df):
+        result, feats = apply_feature_engineering(plant_df, ["plant_hydraulics"])
+        assert "radiation_per_leaf" in feats
+        # Higher LAI → less radiation per leaf
+        assert result["radiation_per_leaf"].iloc[-1] < result["radiation_per_leaf"].iloc[0]
+
+    def test_creates_lai_change_rate(self, plant_df):
+        result, feats = apply_feature_engineering(plant_df, ["plant_hydraulics"])
+        assert "lai_change_rate" in feats
+        # Linearly increasing LAI → constant positive change
+        assert result["lai_change_rate"].iloc[1:].mean() > 0
+
+
+class TestSwcMemory:
+    """Test swc_memory feature group."""
+
+    def test_daily_lags(self):
+        n = 20
+        df = pd.DataFrame({"volumetric_soil_water_layer_1": np.arange(n, dtype=float)})
+        result, feats = apply_feature_engineering(df, ["swc_memory"], time_scale="daily")
+        assert "swc_lag1d" in feats
+        assert "swc_lag3d" in feats
+        assert "swc_lag7d" in feats
+        assert "swc_change_1d" in feats
+        # Verify lag value
+        assert result["swc_lag1d"].iloc[1] == pytest.approx(0.0)
+
+    def test_hourly_lags(self):
+        n = 30
+        df = pd.DataFrame({"volumetric_soil_water_layer_1": np.arange(n, dtype=float)})
+        result, feats = apply_feature_engineering(df, ["swc_memory"], time_scale="hourly")
+        assert "swc_lag1h" in feats
+        assert "swc_lag6h" in feats
+        assert "swc_lag24h" in feats
+        assert "swc_change_1h" in feats
+
+    def test_no_rows_dropped(self):
+        n = 10
+        df = pd.DataFrame({"volumetric_soil_water_layer_1": np.arange(n, dtype=float)})
+        result, _ = apply_feature_engineering(df, ["swc_memory"])
+        assert len(result) == n
+
+
+class TestTemporalAnomalies:
+    """Test temporal_anomalies feature group."""
+
+    def test_creates_anomalies(self):
+        rng = np.random.RandomState(42)
+        n = 100
+        df = pd.DataFrame(
+            {
+                "ta": rng.uniform(10, 30, n),
+                "vpd": rng.uniform(0.5, 3.0, n),
+                "volumetric_soil_water_layer_1": rng.uniform(0.1, 0.4, n),
+            }
+        )
+        result, feats = apply_feature_engineering(df, ["temporal_anomalies"])
+        assert "ta_anomaly" in feats
+        assert "vpd_anomaly" in feats
+        assert "swc_anomaly" in feats
+        assert "cumulative_gdd" in feats
+
+    def test_anomalies_mean_near_zero(self):
+        """Over a long enough window, anomalies should center near 0."""
+        rng = np.random.RandomState(42)
+        n = 200
+        df = pd.DataFrame({"ta": rng.uniform(15, 25, n)})
+        result, _ = apply_feature_engineering(df, ["temporal_anomalies"])
+        # After burn-in period, anomaly mean should be close to 0
+        assert abs(result["ta_anomaly"].iloc[50:].mean()) < 2.0
+
+    def test_cumulative_gdd_non_decreasing(self):
+        n = 30
+        df = pd.DataFrame({"ta": np.full(n, 15.0)})  # GDD = 10 per day
+        result, _ = apply_feature_engineering(df, ["temporal_anomalies"])
+        gdd_vals = result["cumulative_gdd"].values
+        assert all(gdd_vals[i] <= gdd_vals[i + 1] for i in range(len(gdd_vals) - 1))
+
+    def test_cumulative_gdd_zero_below_base(self):
+        n = 10
+        df = pd.DataFrame({"ta": np.full(n, 3.0)})  # 3 < 5°C base
+        result, _ = apply_feature_engineering(df, ["temporal_anomalies"])
+        assert (result["cumulative_gdd"] == 0).all()
+
+
+class TestCrossInteractions:
+    """Test cross_interactions feature group."""
+
+    @pytest.fixture
+    def cross_df(self):
+        n = 20
+        return pd.DataFrame(
+            {
+                "vpd": np.full(n, 2.0),
+                "LAI": np.full(n, 3.0),
+                "sw_in": np.full(n, 300.0),
+                "ta": np.full(n, 20.0),
+                "volumetric_soil_water_layer_1": np.full(n, 0.25),
+                "rew": np.full(n, 0.6),
+                "et0": np.full(n, 4.0),
+            }
+        )
+
+    def test_creates_all_cross_terms(self, cross_df):
+        result, feats = apply_feature_engineering(cross_df, ["cross_interactions"])
+        expected = [
+            "vpd_x_swc",
+            "vpd_x_rew",
+            "lai_x_vpd",
+            "lai_x_sw_in",
+            "ta_x_swc",
+            "et0_x_rew",
+        ]
+        for f in expected:
+            assert f in feats, f"Missing cross-interaction: {f}"
+
+    def test_vpd_x_swc_value(self, cross_df):
+        result, _ = apply_feature_engineering(cross_df, ["cross_interactions"])
+        assert result["vpd_x_swc"].iloc[0] == pytest.approx(2.0 * 0.25)
+
+    def test_et0_x_rew_value(self, cross_df):
+        result, _ = apply_feature_engineering(cross_df, ["cross_interactions"])
+        assert result["et0_x_rew"].iloc[0] == pytest.approx(4.0 * 0.6)
+
+    def test_skipped_without_rew(self):
+        n = 10
+        df = pd.DataFrame(
+            {
+                "vpd": np.full(n, 2.0),
+                "volumetric_soil_water_layer_1": np.full(n, 0.25),
+            }
+        )
+        result, feats = apply_feature_engineering(df, ["cross_interactions"])
+        assert "vpd_x_swc" in feats
+        assert "vpd_x_rew" not in feats  # no rew column
+
+
+class TestBioclimatic:
+    """Test bioclimatic feature group."""
+
+    def test_creates_de_martonne(self):
+        n = 10
+        df = pd.DataFrame(
+            {
+                "mean_annual_temp": np.full(n, 15.0),
+                "mean_annual_precip": np.full(n, 800.0),
+            }
+        )
+        result, feats = apply_feature_engineering(df, ["bioclimatic"])
+        assert "de_martonne_aridity" in feats
+        # I_DM = 800 / (15 + 10) = 32.0
+        assert result["de_martonne_aridity"].iloc[0] == pytest.approx(32.0)
+
+    def test_skipped_when_mat_below_minus10(self):
+        n = 5
+        df = pd.DataFrame(
+            {
+                "mean_annual_temp": np.full(n, -11.0),
+                "mean_annual_precip": np.full(n, 200.0),
+            }
+        )
+        result, feats = apply_feature_engineering(df, ["bioclimatic"])
+        # MAT + 10 = -1 < 0 → guard skips
+        assert "de_martonne_aridity" not in feats
+
+    def test_skipped_without_climate_data(self):
+        df = pd.DataFrame({"ta": [20.0, 25.0]})
+        result, feats = apply_feature_engineering(df, ["bioclimatic"])
+        assert "de_martonne_aridity" not in feats
+
+
+class TestApplyAllNewFeatures:
+    """Test that apply_all_feature_engineering includes new features."""
+
+    @pytest.fixture
+    def comprehensive_df(self):
+        rng = np.random.RandomState(42)
+        n = 60
+        return pd.DataFrame(
+            {
+                "vpd": rng.uniform(0.5, 3.0, n),
+                "sw_in": rng.uniform(50, 600, n),
+                "ta": rng.uniform(5, 35, n),
+                "ta_max": rng.uniform(25, 40, n),
+                "ta_min": rng.uniform(0, 15, n),
+                "precip": rng.uniform(0, 10, n),
+                "ws": rng.uniform(0.5, 8, n),
+                "rh": rng.uniform(30, 90, n),
+                "LAI": rng.uniform(1, 5, n),
+                "ext_rad": rng.uniform(200, 450, n),
+                "ppfd_in": rng.uniform(0, 2000, n),
+                "canopy_height": rng.uniform(5, 30, n),
+                "elevation": np.full(n, 200.0),
+                "prcip/PET": rng.uniform(0.2, 2.0, n),
+                "soil_sand": np.full(n, 40.0),
+                "soil_clay": np.full(n, 20.0),
+                "soil_soc": np.full(n, 15.0),
+                "soil_cfvo": np.full(n, 5.0),
+                "soil_theta_wp": np.full(n, 0.130640),
+                "soil_theta_fc": np.full(n, 0.266469),
+                "soil_theta_sat": np.full(n, 0.438513),
+                "volumetric_soil_water_layer_1": rng.uniform(0.1, 0.4, n),
+                "volumetric_soil_water_layer_2": rng.uniform(0.1, 0.4, n),
+                "volumetric_soil_water_layer_3": rng.uniform(0.1, 0.4, n),
+                "volumetric_soil_water_layer_4": rng.uniform(0.15, 0.3, n),
+                "soil_temperature_level_1": rng.uniform(275, 300, n),
+                "soil_temperature_level_2": rng.uniform(275, 295, n),
+                "soil_temperature_level_3": rng.uniform(275, 295, n),
+                "soil_temperature_level_4": rng.uniform(278, 290, n),
+                "potential_evaporation_hourly_sum": np.full(n, -0.001),
+                "total_precipitation_hourly_sum": rng.uniform(0, 0.002, n),
+                "latitude": np.full(n, 51.0),
+                "vpd_max": rng.uniform(2.0, 4.0, n),
+                "vpd_min": rng.uniform(0.2, 1.0, n),
+                "mean_annual_temp": np.full(n, 12.0),
+                "mean_annual_precip": np.full(n, 750.0),
+                "sap_velocity": rng.uniform(0, 50, n),
+            }
+        )
+
+    def test_new_features_present(self, comprehensive_df):
+        _, feats = apply_all_feature_engineering(comprehensive_df)
+        # soil_hydraulics_extended
+        assert "awc" in feats
+        assert "root_zone_swc_weighted" in feats
+        assert "soil_frozen" in feats
+        # atm_demand_extended
+        assert "net_radiation" in feats
+        assert "priestley_taylor_pet" in feats
+        assert "diurnal_temp_range" in feats
+        # plant_hydraulics
+        assert "fAPAR" in feats
+        assert "radiation_per_leaf" in feats
+        # swc_memory (daily)
+        assert "swc_lag1d" in feats
+        assert "swc_change_1d" in feats
+        # temporal_anomalies
+        assert "ta_anomaly" in feats
+        assert "cumulative_gdd" in feats
+        # cross_interactions
+        assert "vpd_x_swc" in feats
+        assert "lai_x_vpd" in feats
+        # bioclimatic
+        assert "de_martonne_aridity" in feats
+        # derived scalars
+        assert "vpd_change_1d" in feats
+        assert "soil_atm_temp_diff" in feats
+
+    def test_total_feature_count_increased(self, comprehensive_df):
+        _, feats = apply_all_feature_engineering(comprehensive_df)
+        # Previously ~55-65 features, now should be 80+
+        assert len(feats) > 75
+
+    def test_no_rows_dropped(self, comprehensive_df):
+        n_before = len(comprehensive_df)
+        result, _ = apply_all_feature_engineering(comprehensive_df)
+        assert len(result) == n_before

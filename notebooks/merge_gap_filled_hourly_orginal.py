@@ -14,16 +14,20 @@ paths = get_default_paths()
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _git_short_sha() -> str:
     try:
-        sha = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL
-        )
-        return sha.decode().strip()
-    except Exception:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception as exc:  # noqa: BLE001
+        # On Palma compute nodes git may not be on PATH; print so the
+        # MANIFEST author can see why it says 'unknown'.
+        print(f"  [MANIFEST] could not read git SHA: {exc}")
         return "unknown"
 
 
@@ -254,20 +258,31 @@ def merge_sap_env_data_site(
                      to add tree metadata (pl_dbh, pl_species, pl_sens_meth, etc.).
         growing_season_only: If True, apply sap-flow-based growing season filter
                              after daily aggregation to remove dormant periods.
-        apply_flo2019_correction_flag: If True, multiply SFD of non-calibrated
-                             HD/CHD plants by Flo et al. 2019 multipliers
-                             (HD ×1.6804, CHD ×1.6373). Default False reproduces
-                             the existing pipeline byte-for-byte.
-        apply_treatment_filter_flag: If True, drop plants whose treatment label
-                             classifies as predictor-target decoupling
-                             (irrigation, drought, throughfall exclusion, root
-                             trenching, elevated CO2, shade). Default False
-                             reproduces the existing pipeline byte-for-byte.
+        apply_flo2019_correction_flag: If True, multiply non-calibrated HD/CHD
+                             plants' SFD by Flo 2019 multipliers (HD ≈1.6804,
+                             CHD ≈1.6373) before melt/aggregation.
+        apply_treatment_filter_flag: If True, drop plant columns whose
+                             pl_treatment / st_treatment indicates predictor-
+                             target decoupling (irrigation, drought, root
+                             trenching, elevated CO2, shade).
     """
+
+    # Imports kept inside the function so they are only resolved when the
+    # merge is actually invoked (avoids module-import-time cost for tools
+    # that load this file just to scrape its argparse). Hoisted out of the
+    # per-site loop per code review.
+    from src.Analyzers.calibration_corrector import (
+        FLO2019_CHD_MULTIPLIER,
+        FLO2019_HD_MULTIPLIER,
+        apply_flo2019_correction,
+    )
+    from src.Analyzers.treatment_filter import filter_by_treatment
 
     # Collect per-site growing season stats
     gs_stats_list = []
+    # Per-plant audit records for calibration + treatment filter actions
     correction_audit_records: list[dict] = []
+    # Sites that survived the empty-plants guard (used for MANIFEST.json)
     sites_retained = 0
 
     if daytime_only:
@@ -319,6 +334,28 @@ def merge_sap_env_data_site(
         soil_data = pd.DataFrame()
 
     stand_age_map = load_stand_age_map(paths.raw_csv_dir.parent)
+
+    # --- LOAD FAN 2017 ROOT DEPTH + HYDROLOGIC REGIME FEATURES ---
+    # Left-joined into site_info so the per-site `.values[0]` lookup below
+    # returns them alongside canopy_height / bio1 / etc. Missing file → NaN
+    # columns (same soft-fail pattern as soil_data / stand_age).
+    _FAN2017_FEATURE_COLS = (
+        "root_depth",
+        "infiltration_depth",
+        "deep_drainage",
+        "drainage_frequency",
+        "regolith_flush_rate",
+        "gw_residence_time",
+    )
+    if paths.root_depth_fan2017_data_path.exists():
+        print(f"Loading Fan 2017 root depth from: {paths.root_depth_fan2017_data_path}")
+        _rd_data = pd.read_csv(paths.root_depth_fan2017_data_path)
+        _rd_keep = ["site_name"] + [c for c in _FAN2017_FEATURE_COLS if c in _rd_data.columns]
+        site_info = site_info.merge(_rd_data[_rd_keep], on="site_name", how="left")
+    else:
+        print(f"WARNING: Fan 2017 root depth file not found at {paths.root_depth_fan2017_data_path}")
+        for _col in _FAN2017_FEATURE_COLS:
+            site_info[_col] = np.nan
 
     era5_data = pd.read_csv(paths.era5_discrete_data_path)
     # Avoid division by zero
@@ -395,6 +432,12 @@ def merge_sap_env_data_site(
                 mean_annual_temp = curr_site_info["bio1"].values[0]
                 mean_annual_precip = curr_site_info["bio12"].values[0]
                 canopy_height = curr_site_info["canopy_height_m"].values[0]
+                # Fan 2017 static features (left-joined into site_info above).
+                # Missing sites → NaN, consistent with stand_age/soil fallback.
+                fan2017_features = {
+                    _col: (curr_site_info[_col].values[0] if _col in curr_site_info.columns else np.nan)
+                    for _col in _FAN2017_FEATURE_COLS
+                }
                 temp_seasonality = curr_site_info["bio4"].values[0]
                 precip_seasonality = curr_site_info["bio15"].values[0]
 
@@ -496,48 +539,56 @@ def merge_sap_env_data_site(
             # solar_TIMESTAMP comes from sap side (canonical); drop env duplicate to avoid merge conflict
             env_data.drop(columns=["solar_TIMESTAMP"], errors="ignore", inplace=True)
 
-            # --- TREATMENT FILTER + FLO 2019 CALIBRATION (opt-in, default OFF) ---
-            # Filter FIRST (fewer plants → cheaper calibration), calibrate SECOND
-            # so the audit log only contains plants that survive into training.
+            # --- TREATMENT FILTER + FLO 2019 CALIBRATION (predictor-target alignment) ---
+            # Order: filter FIRST (drop decoupled plants), calibrate SECOND (apply
+            # ×1.6804 / ×1.6373 to surviving HD/CHD non-calibrated plants).
+            # Both are no-ops when plant_md / stand_md are missing (ICOS pass-through).
             if apply_treatment_filter_flag or apply_flo2019_correction_flag:
-                from src.Analyzers.calibration_corrector import (  # noqa: PLC0415
-                    apply_flo2019_correction,
-                )
-                from src.Analyzers.treatment_filter import filter_by_treatment  # noqa: PLC0415
-
                 _plant_md_path = paths.raw_csv_dir / f"{location_type}_plant_md.csv"
                 _stand_md_path = paths.raw_csv_dir / f"{location_type}_stand_md.csv"
-                _plant_md_df = pd.read_csv(_plant_md_path).replace("NA", np.nan) if _plant_md_path.exists() else None
-                _stand_md_df = pd.read_csv(_stand_md_path).replace("NA", np.nan) if _stand_md_path.exists() else None
+                _plant_md = pd.read_csv(_plant_md_path).replace("NA", np.nan) if _plant_md_path.exists() else None
+                _stand_md = pd.read_csv(_stand_md_path).replace("NA", np.nan) if _stand_md_path.exists() else None
 
                 if apply_treatment_filter_flag:
-                    sap_data, _tf_report = filter_by_treatment(
-                        sap_data, _plant_md_df, _stand_md_df, site_code=location_type
-                    )
-                    if _tf_report["dropped"]:
-                        print(
-                            f"  [TREATMENT FILTER] {location_type}: dropped "
-                            f"{len(_tf_report['dropped'])} plant(s) "
-                            f"({sorted(_tf_report['dropped'])})"
+                    sap_data, _tf_report = filter_by_treatment(sap_data, _plant_md, _stand_md, site_code=location_type)
+                    for _pc in _tf_report["dropped"]:
+                        correction_audit_records.append(
+                            {
+                                "site_name": location_type,
+                                "pl_code": _pc,
+                                "action": "dropped",
+                                "reason": _tf_report["reason_by_plant"].get(_pc, ""),
+                                "detail": "",
+                                "timestamp_utc": _now_iso(),
+                            }
                         )
 
                 if apply_flo2019_correction_flag:
-                    sap_data, _audit = apply_flo2019_correction(sap_data, _plant_md_df)
-                    for _rec in _audit:
-                        _rec["site"] = location_type
-                        correction_audit_records.append(_rec)
+                    sap_data, _calib_records = apply_flo2019_correction(sap_data, _plant_md)
+                    for _r in _calib_records:
+                        correction_audit_records.append(
+                            {
+                                "site_name": location_type,
+                                "pl_code": _r["pl_code"],
+                                "action": "calibrated",
+                                "reason": f"{_r['method']}_not_calibrated",
+                                "detail": f"multiplier={_r['multiplier']:.4f}",
+                                "timestamp_utc": _now_iso(),
+                            }
+                        )
 
             col_names = [
                 col for col in sap_data.columns if col not in ["solar_TIMESTAMP", "TIMESTAMP", "TIMESTAMP_LOCAL"]
             ]
 
-            # Empty-source guard: if treatment filter removed every plant for this
-            # site, skip cleanly so the rest of the loop doesn't crash on an empty
-            # frame. Distinguish the two causes for log readability.
+            # Empty-site guard: skip the site if no plant columns remain. Two
+            # possible causes — distinguish them in the log so post-run debug
+            # on Palma is unambiguous.
             if not col_names:
-                _cause = "TREATMENT FILTER" if apply_treatment_filter_flag else "EMPTY SOURCE"
-                print(f"  [{_cause}] {location_type}: no plant columns remain, skipping site")
+                cause = "TREATMENT FILTER" if apply_treatment_filter_flag else "EMPTY SOURCE"
+                print(f"  [{cause}] {location_type}: no plant columns remain, skipping site")
                 continue
+            sites_retained += 1
 
             if plant_level:
                 # --- PLANT-LEVEL: melt wide → long (one row per tree per timestamp) ---
@@ -642,6 +693,8 @@ def merge_sap_env_data_site(
                 target_df["temp_seasonality"] = temp_seasonality
                 target_df["precip_seasonality"] = precip_seasonality
                 target_df["canopy_height"] = canopy_height
+                for _fan2017_col, _fan2017_val in fan2017_features.items():
+                    target_df[_fan2017_col] = _fan2017_val
                 target_df["stand_age"] = stand_age
                 target_df["soil_sand"] = avg_props["sand"]
                 target_df["soil_clay"] = avg_props["clay"]
@@ -773,6 +826,12 @@ def merge_sap_env_data_site(
                 "precip_seasonality",
                 "canopy_height",
                 "stand_age",
+                "root_depth",
+                "infiltration_depth",
+                "deep_drainage",
+                "drainage_frequency",
+                "regolith_flush_rate",
+                "gw_residence_time",
             ]
             if plant_level:
                 # Tree metadata columns are static per tree — aggregate as "first"
@@ -878,7 +937,6 @@ def merge_sap_env_data_site(
 
             biome_merged_hourly[biome_type].append(df_hourly)
             biome_merged_daily[biome_type].append(df_daily)
-            sites_retained += 1
 
             count += 1
             if count % 10 == 0:
@@ -949,45 +1007,47 @@ def merge_sap_env_data_site(
             print(f"  Evergreen/low-variation: {n_evergreen}, Seasonal: {len(gs_df) - n_evergreen}")
             print(f"  Mean retention: {gs_df['pct_retained'].mean():.1f}%")
 
-        # --- AUDIT + MANIFEST for opt-in preprocessing ---
+        # --- AUDIT CSV + MANIFEST.json (calibration + treatment filter actions) ---
+        # Mirrors removal_log_report.csv convention. MANIFEST records the flags
+        # and multipliers used so downstream training can detect drift.
         if apply_flo2019_correction_flag or apply_treatment_filter_flag:
-            import json  # noqa: PLC0415
+            import json
 
-            from src.Analyzers.calibration_corrector import (  # noqa: PLC0415
-                FLO2019_CHD_MULTIPLIER,
-                FLO2019_HD_MULTIPLIER,
-            )
+            audit_dir = output_base_dir / "_audit"
+            audit_dir.mkdir(exist_ok=True)
+            audit_path = audit_dir / "correction_audit.csv"
+            pd.DataFrame(
+                correction_audit_records,
+                columns=["site_name", "pl_code", "action", "reason", "detail", "timestamp_utc"],
+            ).to_csv(audit_path, index=False)
+            print(f"\nCorrection audit saved: {audit_path} ({len(correction_audit_records)} rows)")
 
-            if apply_flo2019_correction_flag and correction_audit_records:
-                audit_df = pd.DataFrame(correction_audit_records)
-                audit_csv = output_base_dir / "flo2019_calibration_audit.csv"
-                audit_df.to_csv(audit_csv, index=False)
-                print(
-                    f"\nFlo 2019 calibration audit saved ({len(audit_df)} corrections "
-                    f"across {audit_df['site'].nunique()} sites): {audit_csv.name}"
-                )
+            n_dropped = sum(1 for r in correction_audit_records if r["action"] == "dropped")
+            n_calibrated = sum(1 for r in correction_audit_records if r["action"] == "calibrated")
 
             manifest = {
-                "generated_at_utc": _now_iso(),
-                "git_short_sha": _git_short_sha(),
-                "n_sites_retained": int(sites_retained),
-                "options": {
-                    "daytime_only": bool(daytime_only),
-                    "plant_level": bool(plant_level),
-                    "growing_season_only": bool(growing_season_only),
-                    "apply_flo2019_correction": bool(apply_flo2019_correction_flag),
-                    "apply_treatment_filter": bool(apply_treatment_filter_flag),
+                "build_timestamp_utc": _now_iso(),
+                "git_sha": _git_short_sha(),
+                "flags": {
+                    "apply_flo2019_correction": apply_flo2019_correction_flag,
+                    "apply_treatment_filter": apply_treatment_filter_flag,
+                    "daytime_only": daytime_only,
+                    "plant_level": plant_level,
+                    "growing_season_only": growing_season_only,
                 },
-                "flo2019_multipliers": {
+                "calibration_multipliers": {
                     "HD": FLO2019_HD_MULTIPLIER,
                     "CHD": FLO2019_CHD_MULTIPLIER,
                 },
-                "n_calibration_corrections": len(correction_audit_records),
+                "n_sites_processed": count,
+                "n_sites_retained": sites_retained,
+                "n_actions_dropped": n_dropped,
+                "n_actions_calibrated": n_calibrated,
             }
             manifest_path = output_base_dir / "MANIFEST.json"
             with open(manifest_path, "w", encoding="utf-8") as _f:
                 json.dump(manifest, _f, indent=2)
-            print(f"Wrote {manifest_path.name} ({sites_retained} sites retained)")
+            print(f"Manifest saved: {manifest_path}")
 
         print(f"Processing complete. Data saved to {output_base_dir}")
         return daily_all
@@ -1019,18 +1079,18 @@ def main():
     )
     parser.add_argument(
         "--apply-flo2019-correction",
-        action="store_true",
-        help="Multiply SFD of non-calibrated HD/CHD plants by Flo et al. 2019 "
-        "Table 1 multipliers (HD x1.6804, CHD x1.6373). Default OFF reproduces "
-        "the existing pipeline byte-for-byte.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Multiply non-calibrated HD/CHD plant SFD by Flo 2019 multipliers "
+        "(HD ×1.6804, CHD ×1.6373) before melt/aggregation. Default: off.",
     )
     parser.add_argument(
         "--apply-treatment-filter",
-        action="store_true",
-        help="Drop plants whose pl_treatment / st_treatment label classifies as "
-        "predictor-target decoupling (irrigation, drought, throughfall exclusion, "
-        "root trenching, elevated CO2, shade). Default OFF reproduces the "
-        "existing pipeline byte-for-byte.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Drop plant columns whose pl_treatment / st_treatment indicates "
+        "predictor-target decoupling (irrigation, drought, root trenching, "
+        "elevated CO2, shade). Default: off.",
     )
     args = parser.parse_args()
     # Defines the base directory for output

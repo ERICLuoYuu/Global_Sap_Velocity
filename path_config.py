@@ -115,6 +115,14 @@ class PathConfig:
             self.extracted_data_dir / "terrain_site_data" / self.scale / "site_info_with_terrain_data.csv"
         )
 
+        # Fan et al. 2017 PNAS rooting-depth + hydrologic-regime features
+        # Streamed at 30 arcsec native resolution from USC Santiago THREDDS;
+        # one row per site, columns defined by
+        # src.Extractors.extract_root_depth_fan2017.FEATURE_COLUMNS.
+        self.root_depth_fan2017_data_path = (
+            self.extracted_data_dir / "root_depth_site_data" / self.scale / "site_info_with_root_depth_fan2017.csv"
+        )
+
         # =====================================================================
         # PROCESSED DATA PATHS
         # =====================================================================
@@ -155,6 +163,8 @@ class PathConfig:
         self.merged_daily_dir = self.merged_data_root / "daily"
         self.merged_daytime_only_dir = Path("/scratch/tmp/yluo2/gsv-wt/aoa/data_local/merged_daytime_only")
         self.merged_growing_season_dir = Path("/scratch/tmp/yluo2/gsv-wt/aoa/data_local/merged_growing_season")
+        # Plant-level merged data (not sapwood-aggregated) — used by DA script
+        self.merged_plant_level_dir = self.merged_data_root
 
         # Train/test splits
         self.train_test_dir = self.processed_root / "train_test"

@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from src.sm_vpd_decoupling.plotting import (
+    plot_aggregate_lines,
     plot_cross_site_aggregate,
     plot_depth_dominance,
     plot_example_sites,
@@ -57,6 +58,12 @@ def _effects(seed=0, n=30):
 def test_plot_cross_site_aggregate_heatmap(tmp_path):
     out = tmp_path / "grid.png"
     plot_cross_site_aggregate(_table(), response="E_norm", sm_col="swvl1", n_bins=5, out_path=str(out))
+    assert out.exists() and out.stat().st_size > 0
+
+
+def test_plot_aggregate_lines(tmp_path):
+    out = tmp_path / "aggline.png"
+    plot_aggregate_lines(_table(), response="E_norm", sm_col="swvl1", n_bins=5, out_path=str(out))
     assert out.exists() and out.stat().st_size > 0
 
 

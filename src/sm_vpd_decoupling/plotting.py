@@ -169,6 +169,61 @@ def plot_cross_site_aggregate(table, response, sm_col, n_bins, out_path):
     plt.close(fig)
 
 
+def plot_aggregate_lines(table, response, sm_col, n_bins, out_path):
+    """(a2-lines) Cross-site MEAN 2-D decoupling rendered as within-bin lines
+    (mean +/- SE across sites per cell): response vs SM bin with one line per VPD
+    bin (= {sm_col} | vpd), and response vs VPD bin with one line per SM bin
+    (= vpd | {sm_col}). The line analogue of the aggregate heatmap."""
+    grids = []
+    for _site, g in table.groupby("site_name"):
+        gg = g.dropna(subset=[response, sm_col, "vpd"])
+        if len(gg) < MIN_BIN_COUNT * 2:
+            continue
+        grids.append(_grid_cell_means(gg, sm_col, response, n_bins).values)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.3))
+    if not grids:
+        fig.text(0.5, 0.5, "no populated cells", ha="center")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return
+
+    stack = np.dstack(grids)  # axis0 = vpd bin, axis1 = sm bin, axis2 = site
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        mean = np.nanmean(stack, axis=2)
+        n_obs = np.sum(~np.isnan(stack), axis=2)
+        se = np.nanstd(stack, axis=2) / np.sqrt(np.maximum(n_obs, 1))
+
+    nb = mean.shape[0]
+    xs = np.arange(nb)
+    cmap = plt.get_cmap("viridis")
+    denom = max(1, nb - 1)
+
+    # left: response vs SM bin, one line per VPD bin (rows of the grid)
+    for i in range(nb):
+        c = cmap(i / denom)
+        axes[0].plot(xs, mean[i, :], "o-", color=c, label=f"{i}")
+        axes[0].fill_between(xs, mean[i, :] - se[i, :], mean[i, :] + se[i, :], color=c, alpha=0.15)
+    axes[0].set_xlabel(f"{sm_col} percentile bin")
+    axes[0].set_ylabel(f"{response} (cross-site mean)")
+    axes[0].set_title(f"{response} vs {sm_col} | vpd  (mean +/- SE across sites)", fontsize=9)
+    axes[0].legend(title="vpd bin", fontsize=7, ncol=2)
+
+    # right: response vs VPD bin, one line per SM bin (columns of the grid)
+    for j in range(nb):
+        c = cmap(j / denom)
+        axes[1].plot(xs, mean[:, j], "s-", color=c, label=f"{j}")
+        axes[1].fill_between(xs, mean[:, j] - se[:, j], mean[:, j] + se[:, j], color=c, alpha=0.15)
+    axes[1].set_xlabel("vpd percentile bin")
+    axes[1].set_title(f"{response} vs vpd | {sm_col}  (mean +/- SE across sites)", fontsize=9)
+    axes[1].legend(title=f"{sm_col} bin", fontsize=7, ncol=2)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_depth_dominance(depth_df, response, out_path):
     """(b) % of sites where SM dominates, across SM depth variants."""
     fig, ax = plt.subplots(figsize=(7, 4))

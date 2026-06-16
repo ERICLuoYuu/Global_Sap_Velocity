@@ -17,6 +17,7 @@ from src.sm_vpd_decoupling.loader import (
     load_table,
 )
 from src.sm_vpd_decoupling.plotting import (
+    plot_aggregate_lines,
     plot_cross_site_aggregate,
     plot_depth_dominance,
     plot_example_sites,
@@ -111,6 +112,13 @@ def _make_figures(table, depth, out, n_bins_list, min_valid_days_list):
                 sm_col=sm_col,
                 n_bins=nb,
                 out_path=str(figdir / f"grid_{response}_{sm_col}.png"),
+            )
+            plot_aggregate_lines(
+                table,
+                response=response,
+                sm_col=sm_col,
+                n_bins=nb,
+                out_path=str(figdir / f"aggline_{response}_{sm_col}.png"),
             )
             eff_v = decouple_all_sites(table, sm_col=sm_col, response=response, n_bins=nb, min_valid_days=mvd)
             per_variant.append(eff_v.assign(sm_variant=sm_col))

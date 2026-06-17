@@ -25,8 +25,6 @@ ETA = 44.6  # mol m-3, molar air density at STP
 T0_K = 273.0  # K
 SW_TO_PPFD = 2.04  # umol J-1, shortwave -> PAR (used by loader)
 
-Numeric = "float | pd.Series"
-
 
 def sfd_to_kg_m2_s(sfd_cm3_cm2_h):
     """Convert sap flux density from cm3 cm-2 h-1 to kg m-2 s-1."""

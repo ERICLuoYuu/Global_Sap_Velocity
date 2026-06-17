@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
 from src.sm_vpd_decoupling.run_sm_vpd_decoupling import run_analysis
 
 
@@ -60,5 +61,15 @@ def test_run_analysis_end_to_end(tmp_path):
     assert set(depth["sm_variant"].unique()) == {"swvl1", "swvl2", "swvl3", "swvl4", "root_zone_sm"}
     # Per-site CSV written for at least one combination.
     assert (out_dir / "per_site_E_norm_swvl1_nbins5_mvd120.csv").exists()
-    # Attrition table exists.
-    assert (out_dir / "attrition.csv").exists()
+    # Attrition table exists AND decomposes the Liu day filter into its funnel
+    # (input -> Tair -> +VPD -> +PPFD) plus the min_valid_days threshold.
+    attrition = pd.read_csv(out_dir / "attrition.csv")
+    stages = list(attrition["stage"])
+    assert any("input" in s for s in stages)
+    assert any(s.startswith("Tair>") for s in stages)
+    assert any("VPD" in s for s in stages)
+    assert any("PPFD" in s for s in stages)
+    assert any("min_valid_days>=120" in s for s in stages)
+    # Funnel is monotonically non-increasing in surviving rows.
+    funnel = attrition[~attrition["stage"].str.startswith("min_valid_days")]
+    assert list(funnel["n_rows"]) == sorted(funnel["n_rows"], reverse=True)

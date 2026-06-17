@@ -75,3 +75,64 @@ Manual code review (reviewer subagents did not surface findings; review performe
 - strict= re-injection check: clean.
 **Phase 5 (Standard, 2 rounds) COMPLETE.**
 
+---
+
+## Phase 10 — Palma real-data run (COMPLETE)
+- Deployed module to `/scratch/tmp/yluo2/gsv` (tarball SCP; `.sh` CRLF→LF fixed).
+- Palma Python 3.9.25 pytest (job 42942842): **64 passed**, exit 0 — confirms 3.9 compat.
+- Merge job 42943001 (`--daytime-only --apply-treatment-filter`): COMPLETED, 156 daily CSVs.
+- Analysis job 42943017 (afterok dep): COMPLETED in 53s, 62 CSVs + 22 figures.
+- Canonical commit on Palma: **53a0b4a** (Palma is the primary repo; not pushed to origin — left to user).
+
+### Real-data results (tair15, n_bins=5, min_valid_days=120)
+Attrition: 146 day-filtered sites (40,267 site-days) → 87 (≥120d) → 54 (≥240d) → 35 (≥360d).
+
+| response | SM variant | % SM-dominant | mean ΔSM\|VPD | mean ΔVPD\|SM |
+|---|---|---|---|---|
+| E (sap velocity) | swvl1→4, rootzone | 52–62% | −0.09 to −0.15 | **+0.09 to +0.11** |
+| Gc (Flo 2021) | swvl1→4, rootzone | 8–14% | −0.07 to −0.13 | **−0.34 to −0.39** |
+
+Headline E-vs-Gc dissociation confirmed: the **SM leg is nearly identical** across both
+responses (clean, ~−0.09 to −0.15; deepens with soil depth — swvl3/rootzone strongest),
+while the **VPD leg flips**: positive for E (transpiration demand) vs strongly negative for
+Gc (stomatal closure + the documented Gc∝1/VPD confound). So "does VPD dominate?" depends
+entirely on the response chosen — exactly the design's scientific point.
+
+## Deviation 6: plotting rework — 2-D figures, both legs, leg comparison  [user-requested]
+- **Phase**: post-delivery (user reviewed figures).
+- **Planned**: original plotting showed 1-D marginal curves (response vs single axis), only the SM leg in gradient plots, and no leg-comparison figure.
+- **Issue (user-caught):** 1-D marginals do NOT represent the 2-D nested decoupling; the VPD leg (vpd_given_sm) was computed but never plotted; no figure compared the two legs. The estimator itself was correct (2-D, both legs in CSVs) — only the visuals were wrong. Smoke tests (file-written) never checked plot content, so it slipped past review.
+- **Actual:** reworked plotting.py:
+  - (a2) `plot_cross_site_aggregate` → cross-site mean 2-D heatmap (SM-bin × VPD-bin) with marginal effect bars (SM|VPD per VPD row, VPD|SM per SM col).
+  - (a1) `plot_example_sites` → within-bin line plots: response vs SM-bin one line per VPD-bin (= SM|VPD) and response vs VPD-bin one line per SM-bin (= VPD|SM).
+  - (c) `plot_gradient_violins` → `plot_gradient_groups`: BOTH legs (paired boxes) per group.
+  - NEW `plot_leg_comparison_box` (signed paired boxplots across sites per SM variant) + `plot_leg_comparison_scatter` (|SM|VPD| vs |VPD|SM| with y=x dominance line).
+  - All labels use REAL variable names (E_norm/Gc_norm, swvl*/root_zone_sm, vpd) per user; no generic "ΔResp".
+  - Rewrote the lingering `zip()` in `plot_depth_dominance` so the ruff B905 hook can't re-inject `strict=` (Palma 3.9 safety).
+- **Tests:** test_plotting expanded 4→8 (incl. both-legs-required contract). Full suite 68 passed; local end-to-end smoke = 26 figures, all families present.
+- **Impact on acceptance criteria:** figures criterion now genuinely satisfied (2-D + both legs + comparison).
+- **Approved:** user-requested.
+
+## Deviation 7: post-review hardening — plot-semantics tests + attrition funnel  [user-requested]
+- **Phase**: post-delivery (thorough review, user-requested fixes).
+- **Findings (from review of deployed code vs spec):**
+  - **A (Medium, testing gap):** plotting smoke tests only asserted file-size>0; the pure
+    2-D helpers (`_grid_cell_means`, `_sm_effect_per_vpd`, `_vpd_effect_per_sm`, `_hi_lo`)
+    that encode the decoupling semantics had NO assertions — the same blind spot that let
+    the original 1-D plots pass review.
+  - **B (Low, unlogged spec gap):** `attrition.csv` collapsed the Liu day filter into one
+    `day_filtered` row; spec §5 asks for the funnel (input -> Tair -> +VPD -> +PPFD).
+  - **F (trivial):** dead `Numeric = "float | pd.Series"` alias in conductance.py.
+- **Actual:**
+  - A: +5 helper unit tests in test_plotting.py asserting grid shape/orientation and the
+    low-minus-high (SM) / high-minus-low (VPD) leg signs on hand-built grids.
+  - B: `loader.load_table` gained an optional `attrition_sink`; `_staged_day_counts`
+    records per-site cumulative survival; `run._attrition` emits the 4-stage funnel +
+    min_valid_days. Real-data funnel: 153->151->151->146 sites, terminal day_filtered
+    (146 sites, 40,267 rows) reconciles exactly with the prior collapsed value.
+  - F: alias removed.
+- **Tests:** full suite 69 -> 74 (local 3.14 + Palma 3.9.25 both green). strict= clean.
+- **Impact on acceptance criteria:** figures-semantics now regression-guarded; attrition
+  table now matches spec §5. No estimator/result change.
+- **Approved:** user-requested.
+

@@ -122,6 +122,26 @@ def standardise_site_frame(df: pd.DataFrame, climate_source: ClimateSource) -> p
     return out
 
 
+def _staged_day_counts(std: pd.DataFrame, site: str, tair_min: float) -> dict:
+    """Per-site row survival at each Liu threshold applied cumulatively (AND order:
+    Tair -> +VPD -> +PPFD). ``std`` is the standardised, pre-day-filter frame.
+
+    The input rows are already daytime + treatment-filtered by the upstream merge;
+    these counts decompose the day filter into the funnel the spec asks for. NaNs
+    fail each ``>`` comparison, so they drop out exactly as in ``apply_day_filter``.
+    """
+    m_t = std["tair"] > tair_min
+    m_tv = m_t & (std["vpd"] > VPD_MIN_KPA)
+    m_tvp = m_tv & (std["ppfd"] > PPFD_MIN)
+    return {
+        "site_name": site,
+        "n_input": int(len(std)),
+        "n_tair": int(m_t.sum()),
+        "n_tair_vpd": int(m_tv.sum()),
+        "n_tair_vpd_ppfd": int(m_tvp.sum()),
+    }
+
+
 def apply_day_filter(table: pd.DataFrame, tair_min: float) -> pd.DataFrame:
     """Liu day filter (AND): Tair > tair_min, VPD > 0.5 kPa, PPFD > 500 umol m-2 s-1."""
     before = len(table)
@@ -169,10 +189,14 @@ def load_table(
     climate_source: ClimateSource = "site",
     tair_min: float = 15.0,
     processed_root: Path | None = None,
+    attrition_sink: list | None = None,
 ) -> pd.DataFrame:
     """Full pipeline: per-site daily CSVs -> filtered, normalized site-day table.
 
     Normalization (E_norm, Gc_norm) is computed PER SITE on the day-filtered rows.
+    If ``attrition_sink`` is provided, one per-site staged-survival record (see
+    ``_staged_day_counts``) is appended for each loaded site, letting the caller
+    build the day-filter funnel table.
     """
     daily_dir = resolve_daily_dir(data_dir, processed_root)
     files = [f for f in sorted(daily_dir.glob("*.csv")) if "all_biomes" not in f.name]
@@ -186,6 +210,9 @@ def load_table(
             if raw.empty or "sap_velocity" not in raw.columns:
                 continue
             std = standardise_site_frame(raw, climate_source)
+            if attrition_sink is not None:
+                site = std["site_name"].iloc[0] if len(std) else f.stem
+                attrition_sink.append(_staged_day_counts(std, site, tair_min))
             std = apply_day_filter(std, tair_min=tair_min)
             if std.empty:
                 continue

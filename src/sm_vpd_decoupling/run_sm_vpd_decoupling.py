@@ -14,6 +14,8 @@ import pandas as pd
 
 from src.sm_vpd_decoupling.aggregate import decouple_all_sites, dominance_summary
 from src.sm_vpd_decoupling.loader import (
+    PPFD_MIN,
+    VPD_MIN_KPA,
     load_table,
 )
 from src.sm_vpd_decoupling.plotting import (
@@ -36,9 +38,32 @@ SM_VARIANTS = ("swvl1", "swvl2", "swvl3", "swvl4", "root_zone_sm")
 RESPONSES = ("E_norm", "Gc_norm")
 
 
-def _attrition(table: pd.DataFrame, min_valid_days_list: list[int]) -> pd.DataFrame:
-    """Sites & rows surviving each downstream threshold (post day-filter table)."""
-    rows = [{"stage": "day_filtered", "n_sites": table["site_name"].nunique(), "n_rows": len(table)}]
+def _attrition(
+    table: pd.DataFrame,
+    min_valid_days_list: list[int],
+    day_funnel: list[dict] | None = None,
+    tair_min: float = T_MIN_PRIMARY,
+) -> pd.DataFrame:
+    """Sites & rows surviving each filter stage.
+
+    With ``day_funnel`` (per-site staged counts from ``load_table``), the Liu day
+    filter is decomposed into the spec's funnel: input (post daytime + treatment
+    merge) -> Tair -> +VPD -> +PPFD. The post-filter ``min_valid_days`` thresholds
+    follow. Without it, falls back to a single collapsed ``day_filtered`` row.
+    """
+    rows: list[dict] = []
+    if day_funnel:
+        f = pd.DataFrame(day_funnel)
+        stages = [
+            ("input (daytime + treatment-filtered merge)", "n_input"),
+            (f"Tair>{tair_min:g}", "n_tair"),
+            (f"+ VPD>{VPD_MIN_KPA:g}", "n_tair_vpd"),
+            (f"+ PPFD>{PPFD_MIN:g} (day_filtered)", "n_tair_vpd_ppfd"),
+        ]
+        for label, col in stages:
+            rows.append({"stage": label, "n_sites": int((f[col] > 0).sum()), "n_rows": int(f[col].sum())})
+    else:
+        rows.append({"stage": "day_filtered", "n_sites": table["site_name"].nunique(), "n_rows": len(table)})
     per_site_days = table.groupby("site_name").size()
     for mvd in min_valid_days_list:
         rows.append(
@@ -65,8 +90,11 @@ def run_analysis(
     out = Path(out_dir)
     (out / "figures").mkdir(parents=True, exist_ok=True)
 
-    table = load_table(data_dir, climate_source=climate_source, tair_min=tair_min)
-    _attrition(table, min_valid_days_list).to_csv(out / "attrition.csv", index=False)
+    day_funnel: list[dict] = []
+    table = load_table(data_dir, climate_source=climate_source, tair_min=tair_min, attrition_sink=day_funnel)
+    _attrition(table, min_valid_days_list, day_funnel=day_funnel, tair_min=tair_min).to_csv(
+        out / "attrition.csv", index=False
+    )
 
     depth_rows: list[dict] = []
     for response in RESPONSES:

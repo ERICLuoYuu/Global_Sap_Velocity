@@ -73,3 +73,31 @@ def test_run_analysis_end_to_end(tmp_path):
     # Funnel is monotonically non-increasing in surviving rows.
     funnel = attrition[~attrition["stage"].str.startswith("min_valid_days")]
     assert list(funnel["n_rows"]) == sorted(funnel["n_rows"], reverse=True)
+
+
+def test_figures_rendered_at_every_bin_count(tmp_path):
+    # Every figure family must be emitted at EACH bin count, with an _nbins{N}
+    # tag, so quintile and decile views never collide or silently drop one.
+    daily = tmp_path / "daily"
+    daily.mkdir()
+    for i, s in enumerate(["A", "B", "C"]):
+        _write_site_csv(daily / f"{s}_daily.csv", s, seed=i)
+    out_dir = tmp_path / "out"
+    run_analysis(
+        data_dir=str(daily),
+        out_dir=str(out_dir),
+        climate_source="site",
+        tair_min=15.0,
+        n_bins_list=[5, 10],
+        min_valid_days_list=[120],
+        make_figures=True,
+    )
+    figs = out_dir / "figures"
+    for nb in (5, 10):
+        assert (figs / f"grid_E_norm_swvl1_nbins{nb}.png").exists()
+        assert (figs / f"aggline_E_norm_root_zone_sm_nbins{nb}.png").exists()
+        assert (figs / f"compare_box_E_norm_nbins{nb}.png").exists()
+        assert (figs / f"depth_E_norm_nbins{nb}.png").exists()
+        assert (figs / f"grad_Gc_norm_pft_nbins{nb}.png").exists()
+    # No legacy un-suffixed figure names linger.
+    assert not (figs / "grid_E_norm_swvl1.png").exists()

@@ -136,3 +136,26 @@ entirely on the response chosen — exactly the design's scientific point.
   table now matches spec §5. No estimator/result change.
 - **Approved:** user-requested.
 
+## Deviation 8: figures at every bin count + Tair>5 sensitivity run  [user-requested]
+- **Phase**: post-delivery (user-requested).
+- **Findings:**
+  - All figures were rendered at quintiles only: `_make_figures` hard-coded
+    `nb = n_bins_list[0]` (=5). The decile (10-bin) sweep was computed into
+    depth_profile.csv / per_site CSVs but never plotted (spec reports BOTH 5 and 10).
+  - The Tair>5 C sensitivity tier (spec day-filter row) was wired but never executed
+    (only tair15/ existed).
+- **Actual:**
+  - `_make_figures` now loops over every value in `n_bins_list`; all figure
+    filenames carry an `_nbins{N}` tag (renames the prior un-suffixed 5-bin files).
+    min_valid_days stays at the primary value; full mvd sweep remains in the CSV.
+  - `job_sm_vpd_decoupling.sh` parametrized via `TAIR_MIN`/`OUTDIR` env (one script,
+    both tiers) + idempotent `rm -f figures/*.png` clean step. Tair>5 launched with
+    `--export=ALL,TAIR_MIN=5.0,OUTDIR=.../tair5`. Same merged_decoupling input; only
+    the day-filter Tair threshold relaxes (includes cold-conifer/boreal days).
+  - +1 integration test asserting every figure family exists at nbins5 AND nbins10
+    and that no legacy un-suffixed name lingers.
+- **Tests:** full suite 74 -> 75 (local 3.14 + Palma 3.9.25). strict= clean.
+- **Impact on acceptance criteria:** "both 5 and 10 bins reported" now true for FIGURES
+  (was CSV-only); Tair>5 sensitivity tier produced. No estimator/result change.
+- **Approved:** user-requested.
+

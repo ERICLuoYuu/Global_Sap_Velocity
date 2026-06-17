@@ -126,67 +126,72 @@ def run_analysis(
 
 
 def _make_figures(table, depth, out, n_bins_list, min_valid_days_list):
+    """Render every figure family at EACH bin count in ``n_bins_list`` (quintiles
+    AND deciles), tagging filenames with ``_nbins{nb}``. ``min_valid_days`` is held
+    at the primary (first) value; the full mvd sweep stays in depth_profile.csv."""
     figdir = out / "figures"
-    nb, mvd = n_bins_list[0], min_valid_days_list[0]
+    mvd = min_valid_days_list[0]
     example_sites = select_example_sites(table, n=4)
     for response in RESPONSES:
-        # (a2) cross-site 2-D decoupling heatmap (+ marginal effect bars) per SM variant,
-        # and assemble per-site effects across all SM variants for the comparison box.
-        per_variant = []
-        for sm_col in SM_VARIANTS:
-            plot_cross_site_aggregate(
-                table,
-                response=response,
-                sm_col=sm_col,
-                n_bins=nb,
-                out_path=str(figdir / f"grid_{response}_{sm_col}.png"),
-            )
-            plot_aggregate_lines(
-                table,
-                response=response,
-                sm_col=sm_col,
-                n_bins=nb,
-                out_path=str(figdir / f"aggline_{response}_{sm_col}.png"),
-            )
-            eff_v = decouple_all_sites(table, sm_col=sm_col, response=response, n_bins=nb, min_valid_days=mvd)
-            per_variant.append(eff_v.assign(sm_variant=sm_col))
-        combined = pd.concat(per_variant, ignore_index=True)
-
-        # (a1) example-site within-bin lines on the root-zone SM axis
-        plot_example_sites(
-            table,
-            sites=example_sites,
-            response=response,
-            sm_col="root_zone_sm",
-            n_bins=nb,
-            out_path=str(figdir / f"examples_{response}.png"),
-        )
-
-        # (b) depth dominance
-        sub = depth[(depth["response"] == response) & (depth["n_bins"] == nb) & (depth["min_valid_days"] == mvd)]
-        if not sub.empty:
-            plot_depth_dominance(sub, response=response, out_path=str(figdir / f"depth_{response}.png"))
-
-        # leg comparison: signed paired boxplots (all SM variants) + magnitude scatter (root-zone)
-        plot_leg_comparison_box(combined, response=response, out_path=str(figdir / f"compare_box_{response}.png"))
-        rz = combined[combined["sm_variant"] == "root_zone_sm"]
-        plot_leg_comparison_scatter(
-            rz,
-            response=response,
-            sm_col="root_zone_sm",
-            out_path=str(figdir / f"compare_scatter_{response}.png"),
-        )
-
-        # (c) per-covariate gradients showing BOTH decoupled legs (root-zone)
-        for grp in ("pft", "biome", "aridity", "canopy_height"):
-            if grp in rz.columns:
-                plot_gradient_groups(
-                    rz,
-                    group_col=grp,
+        for nb in n_bins_list:
+            tag = f"{response}_nbins{nb}"
+            # (a2) cross-site 2-D decoupling heatmap + within-bin lines per SM variant,
+            # and assemble per-site effects across all SM variants for the comparison box.
+            per_variant = []
+            for sm_col in SM_VARIANTS:
+                plot_cross_site_aggregate(
+                    table,
                     response=response,
-                    sm_col="root_zone_sm",
-                    out_path=str(figdir / f"grad_{response}_{grp}.png"),
+                    sm_col=sm_col,
+                    n_bins=nb,
+                    out_path=str(figdir / f"grid_{response}_{sm_col}_nbins{nb}.png"),
                 )
+                plot_aggregate_lines(
+                    table,
+                    response=response,
+                    sm_col=sm_col,
+                    n_bins=nb,
+                    out_path=str(figdir / f"aggline_{response}_{sm_col}_nbins{nb}.png"),
+                )
+                eff_v = decouple_all_sites(table, sm_col=sm_col, response=response, n_bins=nb, min_valid_days=mvd)
+                per_variant.append(eff_v.assign(sm_variant=sm_col))
+            combined = pd.concat(per_variant, ignore_index=True)
+
+            # (a1) example-site within-bin lines on the root-zone SM axis
+            plot_example_sites(
+                table,
+                sites=example_sites,
+                response=response,
+                sm_col="root_zone_sm",
+                n_bins=nb,
+                out_path=str(figdir / f"examples_{tag}.png"),
+            )
+
+            # (b) depth dominance (at this bin count, primary min_valid_days)
+            sub = depth[(depth["response"] == response) & (depth["n_bins"] == nb) & (depth["min_valid_days"] == mvd)]
+            if not sub.empty:
+                plot_depth_dominance(sub, response=response, out_path=str(figdir / f"depth_{tag}.png"))
+
+            # leg comparison: signed paired boxplots (all SM variants) + magnitude scatter (root-zone)
+            plot_leg_comparison_box(combined, response=response, out_path=str(figdir / f"compare_box_{tag}.png"))
+            rz = combined[combined["sm_variant"] == "root_zone_sm"]
+            plot_leg_comparison_scatter(
+                rz,
+                response=response,
+                sm_col="root_zone_sm",
+                out_path=str(figdir / f"compare_scatter_{tag}.png"),
+            )
+
+            # (c) per-covariate gradients showing BOTH decoupled legs (root-zone)
+            for grp in ("pft", "biome", "aridity", "canopy_height"):
+                if grp in rz.columns:
+                    plot_gradient_groups(
+                        rz,
+                        group_col=grp,
+                        response=response,
+                        sm_col="root_zone_sm",
+                        out_path=str(figdir / f"grad_{response}_{grp}_nbins{nb}.png"),
+                    )
 
 
 def main() -> None:

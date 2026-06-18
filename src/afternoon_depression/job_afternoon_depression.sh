@@ -51,6 +51,7 @@ python src/afternoon_depression/run_afternoon_depression.py \
     --tair-min 5.0 \
     --min-daily-sf 0.0 \
     --min-am-pm-ratio 0.10 \
+    --gc-winsor-top-frac 0.01 \
     --min-valid-days 120 \
     --n-bins 10 \
     --rf-models 100

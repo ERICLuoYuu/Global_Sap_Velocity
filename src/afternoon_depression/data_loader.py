@@ -189,6 +189,38 @@ def apply_morning_flow_filter(table: pd.DataFrame, min_am_pm_ratio: float = 0.10
     return out
 
 
+def apply_gc_winsor_filter(table: pd.DataFrame, top_frac: float = 0.01) -> pd.DataFrame:
+    """Drop the global top ``top_frac`` of site-days by max(sf_am, sf_pm) — Gc winsorisation.
+
+    Flo-2021 Gc = SFD/VPD explodes when a daytime hour pairs near-zero VPD with non-zero
+    sap flow (observed up to ~1.6e17 mol m⁻² s⁻¹ per sapwood area). These artifacts sit
+    ABOVE an ~11-order-of-magnitude discontinuity in the Gc distribution (p99 ≈ 1.1e4 vs
+    p99.7 ≈ 2.8e15), so winsorising the heaviest ``top_frac`` of site-days excises the
+    explosion tail with negligible loss of physical data — at top_frac=0.01 everything
+    removed is ≥ ~100× the median.
+
+    GLOBAL, not per-site: the explosion is concentrated at a few humid sites, so a per-site
+    cut would wrongly drop physically valid high-Gc days from clean sites. Whole site-days
+    are dropped *after* the AM/PM means are formed, so the morning/afternoon contrast of
+    every retained day stays balanced (unlike a per-hour VPD floor, which deletes morning
+    hours preferentially). ``top_frac <= 0`` disables it (the sap-velocity path).
+    """
+    if top_frac <= 0 or table.empty or not {"sf_am", "sf_pm"}.issubset(table.columns):
+        return table
+    mag = table[["sf_am", "sf_pm"]].abs().max(axis=1)
+    cutoff = float(mag.quantile(1.0 - top_frac))
+    before = len(table)
+    out = table[mag <= cutoff].copy()
+    logger.info(
+        "Gc winsor (drop global top %.3g%% by max|gc_am,gc_pm|, cutoff %.4g): %d → %d site-days",
+        100 * top_frac,
+        cutoff,
+        before,
+        len(out),
+    )
+    return out
+
+
 def load_site_day_table(
     hourly_dir: Path,
     climate_source: ClimateSource = "era5",
@@ -197,6 +229,7 @@ def load_site_day_table(
     min_daily_sf: float = 0.0,
     min_window_hours: int = 2,
     min_am_pm_ratio: float = 0.10,
+    gc_winsor_top_frac: float = 0.01,
 ) -> pd.DataFrame:
     """Full pipeline: hourly CSVs → filtered per-site-day ΔSF/C_SF table.
 
@@ -205,6 +238,10 @@ def load_site_day_table(
     conductance). For ``"gc"`` the AM/PM means, ``delta_sf`` (= ΔGc) and ``centroid``
     are all computed on Gc; the column names stay ``sf_*``/``delta_sf`` so every
     downstream consumer (decoupling, RF, plotting) works unchanged.
+
+    For ``"gc"`` ONLY, the global top ``gc_winsor_top_frac`` of site-days by Gc magnitude
+    are winsorised out at the end (the 1/VPD divide-by-near-zero artifact tail); the
+    sap-velocity path never sees this step.
     """
     hourly = prepare_hourly(hourly_dir, climate_source, response=response)
     table = build_site_day_table(
@@ -218,4 +255,7 @@ def load_site_day_table(
         min_window_hours=min_window_hours,
     )
     table = apply_day_filters(table, tair_min=tair_min, min_daily_sf=min_daily_sf)
-    return apply_morning_flow_filter(table, min_am_pm_ratio=min_am_pm_ratio)
+    table = apply_morning_flow_filter(table, min_am_pm_ratio=min_am_pm_ratio)
+    if response == "gc":
+        table = apply_gc_winsor_filter(table, top_frac=gc_winsor_top_frac)
+    return table

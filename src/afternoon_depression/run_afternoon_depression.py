@@ -66,7 +66,13 @@ def build_summary(effects: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _verdict(effects: pd.DataFrame, rf: dict | None, rf_sd_scope: str = "site", response: str = "sf") -> str:
+def _verdict(
+    effects: pd.DataFrame,
+    rf: dict | None,
+    rf_sd_scope: str = "site",
+    response: str = "sf",
+    gc_winsor_top_frac: float = 0.01,
+) -> str:
     is_gc = response == "gc"
     dx = "ΔGc" if is_gc else "ΔSF"
     metric = "canopy conductance (Gc)" if is_gc else "transpiration"
@@ -97,6 +103,15 @@ def _verdict(effects: pd.DataFrame, rf: dict | None, rf_sd_scope: str = "site", 
             "*within* VPD) and the **Tair|VPD** leg are unaffected and are the interpretable results — "
             "read the SM–VPD contrast off the SM|VPD value, not the VPD|SM value."
         )
+        if gc_winsor_top_frac and gc_winsor_top_frac > 0:
+            lines.append(
+                f"\n> **Artifact removal.** The global top {gc_winsor_top_frac * 100:.3g}% of site-days by Gc "
+                "magnitude were winsorised out before analysis. Gc = SFD/VPD blows up when a daytime hour pairs "
+                "near-zero VPD with non-zero sap flow (up to ~1.6×10¹⁷ mol m⁻² s⁻¹), producing a tail that sits "
+                "above an ~11-order-of-magnitude discontinuity in the distribution (p99 ≈ 1.1×10⁴). The cut is "
+                "GLOBAL (not per-site — the explosion is concentrated at a few humid sites) and drops whole "
+                "site-days, so AM/PM comparability is preserved."
+            )
     lines.append(
         f"\n_Caveats: afternoon depression of {metric} is partly hydraulic (capacitance/hysteresis), "
         "not purely stomatal; effects are per-site percentile-binned then aggregated; residual "
@@ -131,6 +146,7 @@ def run(args: argparse.Namespace) -> None:
         min_daily_sf=args.min_daily_sf,
         min_window_hours=args.min_window_hours,
         min_am_pm_ratio=args.min_am_pm_ratio,
+        gc_winsor_top_frac=args.gc_winsor_top_frac,
     )
     if table.empty:
         logger.error("Empty site-day table after filtering — nothing to analyse.")
@@ -288,7 +304,13 @@ def run(args: argparse.Namespace) -> None:
     except Exception as e:  # plotting must not sink a completed analysis
         logger.warning("Plotting step failed (%s); CSV outputs are intact.", e)
 
-    report = _verdict(effects, rf, rf_sd_scope=args.rf_sd_scope, response=args.response)
+    report = _verdict(
+        effects,
+        rf,
+        rf_sd_scope=args.rf_sd_scope,
+        response=args.response,
+        gc_winsor_top_frac=args.gc_winsor_top_frac,
+    )
     (out_dir / "REPORT.md").write_text(report, encoding="utf-8")
     logger.info("\n%s", report)
 
@@ -320,6 +342,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Drop days where SF_AM < ratio*SF_PM (bounds ΔSF≥(1-1/ratio)·100%%; Liu S1#3 analog). 0 disables.",
     )
     p.add_argument("--min-window-hours", type=int, default=2, help="Min valid hours per AM/PM window.")
+    p.add_argument(
+        "--gc-winsor-top-frac",
+        type=float,
+        default=0.01,
+        help="GC ONLY: drop the global top fraction of site-days by Gc magnitude (default 0.01 = top 1%%), "
+        "removing the 1/VPD divide-by-near-zero artifact tail above the ~11-order discontinuity. 0 disables. "
+        "No effect on --response sf.",
+    )
     p.add_argument(
         "--min-valid-days", type=int, default=120, help="Min site-days to include a site (Text S1 #1 analog)."
     )

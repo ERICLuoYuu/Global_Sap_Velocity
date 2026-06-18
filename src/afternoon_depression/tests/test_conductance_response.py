@@ -15,7 +15,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.afternoon_depression.data_loader import load_site_day_table, prepare_hourly
+from src.afternoon_depression.data_loader import (
+    apply_gc_winsor_filter,
+    load_site_day_table,
+    prepare_hourly,
+)
 from src.afternoon_depression.diurnal_metrics import vpd_from_era5
 from src.sm_vpd_decoupling.conductance import canopy_conductance
 
@@ -105,6 +109,44 @@ def test_load_site_day_table_response_slot_holds_gc(tmp_path) -> None:
     # response slots are NOT identical even on the same sap-flow series.
     merged = sf_tab.merge(gc_tab, on=["site_name", "solar_date"], suffixes=("_sf", "_gc"))
     assert not np.allclose(merged["delta_sf_sf"], merged["delta_sf_gc"], rtol=1e-3)
+
+
+@pytest.mark.unit
+def test_winsor_filter_drops_global_top_frac() -> None:
+    # 99 physical days + 1 exploded (1/VPD divide-by-near-zero). Top-1% winsor drops the explosion.
+    df = pd.DataFrame(
+        {
+            "site_name": ["S"] * 100,
+            "sf_am": [100.0] * 99 + [1e16],
+            "sf_pm": [90.0] * 100,
+        }
+    )
+    out = apply_gc_winsor_filter(df, top_frac=0.01)
+    assert len(out) == 99
+    assert out["sf_am"].max() < 1e6  # the explosion is gone
+    # the cut uses max(sf_am, sf_pm): a single explosion in the PM window is caught too
+    df2 = pd.DataFrame({"site_name": ["S"] * 100, "sf_am": [100.0] * 100, "sf_pm": [90.0] * 99 + [5e15]})
+    out2 = apply_gc_winsor_filter(df2, top_frac=0.01)
+    assert len(out2) == 99
+    assert (out2["sf_pm"] < 1e6).all()
+
+
+@pytest.mark.unit
+def test_winsor_disabled_with_zero_frac() -> None:
+    df = pd.DataFrame({"site_name": ["S"] * 10, "sf_am": [1e16] + [100.0] * 9, "sf_pm": [90.0] * 10})
+    assert len(apply_gc_winsor_filter(df, top_frac=0.0)) == 10  # disabled → nothing dropped
+    assert len(apply_gc_winsor_filter(df.iloc[0:0], top_frac=0.01)) == 0  # empty in → empty out
+
+
+@pytest.mark.unit
+def test_sf_path_ignores_winsor(tmp_path) -> None:
+    # Even with an aggressive winsor fraction, response="sf" must be byte-for-byte unchanged.
+    _write_site_csv(tmp_path, "SITE_A", n_days=40, seed=7)
+    base = load_site_day_table(tmp_path, climate_source="era5", response="sf", tair_min=5.0)
+    aggressive = load_site_day_table(
+        tmp_path, climate_source="era5", response="sf", tair_min=5.0, gc_winsor_top_frac=0.5
+    )
+    pd.testing.assert_frame_equal(base, aggressive)
 
 
 @pytest.mark.unit

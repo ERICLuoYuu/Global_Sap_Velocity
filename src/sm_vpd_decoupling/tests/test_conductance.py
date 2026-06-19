@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 import pandas as pd
+
 from src.sm_vpd_decoupling.conductance import (
     ETA,
     T0_K,
@@ -20,13 +21,25 @@ def test_sfd_unit_conversion():
 
 
 def test_canopy_conductance_matches_flo_eqn2():
-    # Independently recompute Flo 2021 Eqn 2 for T=20C, VPD=1 kPa, h=0,
-    # sap_velocity=1 cm3 cm-2 h-1.
-    t, vpd, h, sv = 20.0, 1.0, 0.0, 1.0
-    sfd = sfd_to_kg_m2_s(sv)
-    expected = (115.8 + 0.4236 * t) * (sfd / vpd) * (ETA * T0_K / (T0_K + t)) * math.exp(0.00012 * h)
-    got = canopy_conductance(sv, t, vpd, h)
-    assert math.isclose(got, expected, rel_tol=1e-9)
+    # Hand-computed reference (NOT echoing the implementation): T=20C, VPD=1 kPa,
+    # h=0, sap_velocity=1 cm3 cm-2 h-1.
+    #   sfd   = 1e-3*1e4/3600           = 2.777778e-3 kg m-2 s-1
+    #   K_G   = 115.8 + 0.4236*20       = 124.272 kPa m3 kg-1
+    #   n_air = 44.6 * 273/(273+20)     = 41.5556 mol m-3   (sea level, h=0)
+    #   Gc    = 124.272 * 2.777778e-3 * 41.5556 = 14.345 mol m-2 s-1
+    got = canopy_conductance(1.0, 20.0, 1.0, 0.0)
+    assert math.isclose(got, 14.345, rel_tol=1e-3)
+
+
+def test_canopy_conductance_decreases_with_elevation():
+    # Physical check (independent of the formula): lower barometric pressure at
+    # altitude -> lower molar air density -> LOWER molar conductance. A 2000 m
+    # site must give a smaller Gc than an otherwise identical sea-level site.
+    g_sea = canopy_conductance(1.0, 20.0, 1.0, 0.0)
+    g_alt = canopy_conductance(1.0, 20.0, 1.0, 2000.0)
+    assert g_alt < g_sea
+    # magnitude: exp(-0.00012*2000) = exp(-0.24) ~= 0.7866
+    assert math.isclose(g_alt / g_sea, math.exp(-0.24), rel_tol=1e-6)
 
 
 def test_canopy_conductance_inverse_vpd_property():

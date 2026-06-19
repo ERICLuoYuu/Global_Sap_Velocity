@@ -63,14 +63,18 @@ def test_canopy_conductance_nan_tair_series_propagates_per_row():
 
 
 def test_canopy_conductance_large_altitude_is_finite_and_correct():
-    """Very large altitude (10 000 m) stays finite; exp(0.00012*10000) ≈ 3.32."""
+    """Very large altitude (10 000 m) stays finite and SHRINKS Gc.
+
+    Barometric pressure correction: exp(-0.00012*10000) = exp(-1.2) ≈ 0.301, so a
+    10 km site has ~30% of the sea-level molar conductance, not 3.3x.
+    """
     h = 10_000.0
     t, vpd, sv = 20.0, 1.0, 1.0
-    sfd = sfd_to_kg_m2_s(sv)
-    expected = (115.8 + 0.4236 * t) * (sfd / vpd) * (ETA * T0_K / (T0_K + t)) * math.exp(0.00012 * h)
+    g_sea = canopy_conductance(sv, t, vpd, 0.0)
     got = canopy_conductance(sv, t, vpd, h)
     assert np.isfinite(got)
-    assert math.isclose(got, expected, rel_tol=1e-9)
+    assert got < g_sea  # high altitude -> lower density -> lower Gc
+    assert math.isclose(got / g_sea, math.exp(-1.2), rel_tol=1e-6)
 
 
 # ---------------------------------------------------------------------------

@@ -5,9 +5,14 @@ Flo, V., Martinez-Vilalta, J., et al. (2021). "Climate and functional traits
 jointly mediate tree water-use strategies." New Phytologist 231(2): 617-630,
 doi:10.1111/nph.17404, Eqn 2 (after Phillips & Oren 1998).
 
-    G_Asw = (115.8 + 0.4236*T) * (SFD/VPD) * (eta*T0/(T0+T)) * exp(0.00012*h)
+    G_Asw = (115.8 + 0.4236*T) * (SFD/VPD) * (eta*T0/(T0+T)) * exp(-0.00012*h)
 
 with SFD in kg m-2_Asw s-1, T in degC, VPD in kPa, h = altitude (m).
+
+The eta*T0/(T0+T) term is the molar air density at SEA-LEVEL pressure; the
+exp(-0.00012*h) factor corrects it for the barometric pressure DECREASE with
+altitude (scale height ~8400 m), so molar density -- and hence molar conductance
+-- falls with elevation. (Same correction as feature_engineering.py n_air.)
 
 NOTE: Gc is proportional to 1/VPD. Binning Gc BY VPD therefore induces a
 spurious negative Gc-VPD relationship (Oren et al. 1999). The SM leg of the
@@ -42,5 +47,5 @@ def canopy_conductance(sap_velocity, tair_c, vpd_kpa, altitude_m):
         vpd = vpd.where(vpd > 0)
     elif vpd <= 0:
         return float("nan")
-    gc = (115.8 + 0.4236 * tair_c) * (sfd / vpd) * (ETA * T0_K / (T0_K + tair_c)) * np.exp(0.00012 * altitude_m)
+    gc = (115.8 + 0.4236 * tair_c) * (sfd / vpd) * (ETA * T0_K / (T0_K + tair_c)) * np.exp(-0.00012 * altitude_m)
     return gc

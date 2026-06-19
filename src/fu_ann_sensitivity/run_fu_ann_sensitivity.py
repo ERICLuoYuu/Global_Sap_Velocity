@@ -116,7 +116,7 @@ def run_analysis(
     for response in responses:
         for sm in sm_variants:
             predictors_z = ["tair_z", "vpd_z", f"{sm}_z", "ppfd_z"]
-            per_site, n_dropped, median_r = fit_site_sensitivities(
+            fit = fit_site_sensitivities(
                 table_z,
                 response=f"{response}_z",
                 sm_col=f"{sm}_z",
@@ -126,13 +126,16 @@ def run_analysis(
                 n_repeats=n_repeats,
                 r_threshold=r_threshold,
             )
+            per_site = fit.per_site
             perf_rows.append(
                 {
                     "response": response,
                     "sm_variant": sm,
                     "n_sites": len(per_site),
-                    "n_dropped": n_dropped,
-                    "median_r": median_r,
+                    "n_trained": fit.n_trained,
+                    "n_dropped_r": fit.n_dropped_r,
+                    "n_insufficient_days": fit.n_insufficient_days,
+                    "median_r": fit.median_r,
                 }
             )
             pd.DataFrame([{k: p[k] for k in ("site", "pft", "r", "n_days")} for p in per_site]).to_csv(

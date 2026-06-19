@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
 from src.fu_ann_sensitivity.aggregate import (
     aggregate_at_nbins,
     fit_site_sensitivities,
@@ -95,7 +96,7 @@ def _zscored_multisite_table():
 
 
 def test_fit_drops_low_r_site():
-    per_site, n_dropped, median_r = fit_site_sensitivities(
+    out = fit_site_sensitivities(
         _zscored_multisite_table(),
         response="E_z",
         sm_col="sm_z",
@@ -105,16 +106,17 @@ def test_fit_drops_low_r_site():
         n_repeats=2,
         r_threshold=0.5,
     )
-    kept = {p["site"] for p in per_site}
+    kept = {p["site"] for p in out.per_site}
     assert "noise" not in kept  # pure-noise site fails r<0.5
-    assert n_dropped >= 1
-    for p in per_site:
+    assert out.n_dropped_r >= 1
+    assert out.n_trained == 3  # all 3 sites have 200 days >= 20
+    for p in out.per_site:
         assert p["d_sm"].shape == (2, 200)  # (n_models, n_rows)
 
 
 def test_fit_skips_sites_below_min_days():
     df = _zscored_multisite_table()
-    per_site, _, _ = fit_site_sensitivities(
+    out = fit_site_sensitivities(
         df,
         response="E_z",
         sm_col="sm_z",
@@ -123,4 +125,6 @@ def test_fit_skips_sites_below_min_days():
         min_valid_days=10_000,
         n_repeats=2,
     )
-    assert per_site == []
+    assert out.per_site == []
+    assert out.n_insufficient_days == 3  # all 3 sites fail the day gate
+    assert out.n_trained == 0

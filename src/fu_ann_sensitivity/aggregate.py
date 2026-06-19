@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,24 @@ logger = logging.getLogger(__name__)
 
 MIN_SITES_TTEST = 5  # min finite per-site values before a bin's t-test is meaningful
 P_THRESHOLD = 0.05
+
+
+@dataclass(frozen=True)
+class FitOutcome:
+    """Result of ``fit_site_sensitivities`` with the full attrition cascade.
+
+    ``per_site`` are the kept site bundles. The counts make the funnel auditable
+    (Fu reports the whole cascade): of the sites in the table, ``n_insufficient_days``
+    failed the >= min_valid_days gate (never trained), ``n_trained`` were trained,
+    and of those ``n_dropped_r`` were dropped for test-set r < threshold. So
+    ``len(per_site) == n_trained - n_dropped_r``. ``median_r`` is over trained sites.
+    """
+
+    per_site: list
+    n_trained: int
+    n_dropped_r: int
+    n_insufficient_days: int
+    median_r: float
 
 
 def fit_site_sensitivities(
@@ -53,10 +72,11 @@ def fit_site_sensitivities(
     axes ``sm_vals``/``vpd_vals``.
     """
     needed = list(dict.fromkeys([response, *predictors, sm_col, vpd_col]))
-    per_site, dropped, rs = [], 0, []
+    per_site, dropped, insufficient, rs = [], 0, 0, []
     for site, sdf in table.groupby(site_col):
         sub = sdf.dropna(subset=needed)
         if len(sub) < min_valid_days:
+            insufficient += 1
             continue
         X = sub[predictors].to_numpy(dtype=np.float64)
         y = sub[response].to_numpy(dtype=np.float64)
@@ -79,8 +99,21 @@ def fit_site_sensitivities(
             }
         )
     median_r = float(np.median(rs)) if rs else float("nan")
-    logger.info("fit_site_sensitivities: kept %d sites, dropped %d (median r=%.3f)", len(per_site), dropped, median_r)
-    return per_site, dropped, median_r
+    logger.info(
+        "fit_site_sensitivities: kept %d / trained %d (dropped r<thr %d; insufficient-days %d); median r=%.3f",
+        len(per_site),
+        len(rs),
+        dropped,
+        insufficient,
+        median_r,
+    )
+    return FitOutcome(
+        per_site=per_site,
+        n_trained=len(rs),
+        n_dropped_r=dropped,
+        n_insufficient_days=insufficient,
+        median_r=median_r,
+    )
 
 
 def _sig_mask(stack: np.ndarray, min_sites: int) -> np.ndarray:

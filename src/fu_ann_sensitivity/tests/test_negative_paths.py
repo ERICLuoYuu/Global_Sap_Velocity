@@ -42,7 +42,7 @@ def test_aggregate_empty_per_site_raises():
 
 def test_fit_drops_all_sites_when_threshold_unreachable():
     # r can never reach 1.1 -> every trained site is dropped.
-    per_site, n_dropped, _ = fit_site_sensitivities(
+    out = fit_site_sensitivities(
         _zscored_multisite_table(),
         response="E_z",
         sm_col="sm_z",
@@ -52,8 +52,9 @@ def test_fit_drops_all_sites_when_threshold_unreachable():
         n_repeats=2,
         r_threshold=1.1,
     )
-    assert per_site == []
-    assert n_dropped == 3
+    assert out.per_site == []
+    assert out.n_dropped_r == 3
+    assert out.n_trained == 3
 
 
 def test_load_table_missing_dir_raises(tmp_path):

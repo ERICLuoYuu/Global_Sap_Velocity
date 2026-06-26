@@ -3,9 +3,11 @@
 
 All figures honour the 2-D nested-binning structure of the Liu et al. (2020)
 estimator: the soil-moisture effect is read WITHIN VPD bins and the VPD effect
-WITHIN soil-moisture bins. Labels use the real variable names passed in (the
-response column, e.g. ``E_norm``/``Gc_norm``; the SM-variant column, e.g.
-``swvl1``/``root_zone_sm``; and ``vpd``) rather than generic placeholders.
+WITHIN soil-moisture bins. The data columns passed in (the response column, e.g.
+``E_norm``/``Gc_norm``; the SM-variant column, e.g. ``swvl1``/``root_zone_sm``;
+and ``vpd``) drive data access, while axis/title text is mapped to consistent,
+human-readable labels via ``src.plot_labels`` (``E*`` -> "sap flow",
+``root_zone_sm`` -> "weighted mean sm", ERA5 layers -> depth ranges).
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from src.plot_labels import response_label, sm_label
 from src.sm_vpd_decoupling.decoupling import MIN_BIN_COUNT, assign_percentile_bins
 
 logger = logging.getLogger(__name__)
@@ -89,18 +92,19 @@ def select_example_sites(table, n=4, sm_col="root_zone_sm"):
 def _plot_within_bin(ax_sm, ax_vpd, grid, response, sm_col, title_prefix=""):
     """Left axis: response vs SM bin, one line per VPD bin (= {sm_col} | vpd).
     Right axis: response vs VPD bin, one line per SM bin (= vpd | {sm_col})."""
+    rlab, slab = response_label(response), sm_label(sm_col)
     n = max(grid.shape[0], grid.shape[1])
     cmap = plt.get_cmap("viridis")
     denom = max(1, n - 1)
     for i, r in enumerate(grid.index):
         ax_sm.plot(grid.columns, grid.loc[r].values, "o-", color=cmap(i / denom), label=f"{int(r)}")
-    ax_sm.set_xlabel(f"{sm_col} percentile bin")
-    ax_sm.set_ylabel(response)
-    ax_sm.set_title(f"{title_prefix}{response} vs {sm_col} | vpd", fontsize=9)
+    ax_sm.set_xlabel(f"{slab} percentile bin")
+    ax_sm.set_ylabel(rlab)
+    ax_sm.set_title(f"{title_prefix}{rlab} vs {slab} | vpd", fontsize=9)
     for j, c in enumerate(grid.columns):
         ax_vpd.plot(grid.index, grid[c].values, "s-", color=cmap(j / denom), label=f"{int(c)}")
     ax_vpd.set_xlabel("vpd percentile bin")
-    ax_vpd.set_title(f"{title_prefix}{response} vs vpd | {sm_col}", fontsize=9)
+    ax_vpd.set_title(f"{title_prefix}{rlab} vs vpd | {slab}", fontsize=9)
 
 
 def plot_example_sites(table, sites, response, sm_col, n_bins, out_path):
@@ -114,7 +118,7 @@ def plot_example_sites(table, sites, response, sm_col, n_bins, out_path):
         grid = _grid_cell_means(g, sm_col, response, n_bins)
         _plot_within_bin(axes[r][0], axes[r][1], grid, response, sm_col, title_prefix=f"{site}: ")
     axes[0][0].legend(title="vpd bin", fontsize=7, ncol=2)
-    axes[0][1].legend(title=f"{sm_col} bin", fontsize=7, ncol=2)
+    axes[0][1].legend(title=f"{sm_label(sm_col)} bin", fontsize=7, ncol=2)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -147,23 +151,24 @@ def plot_cross_site_aggregate(table, response, sm_col, n_bins, out_path):
     ax_main = fig.add_subplot(gs[1, 0])
     ax_right = fig.add_subplot(gs[1, 1])
 
+    rlab, slab = response_label(response), sm_label(sm_col)
     im = ax_main.imshow(mean_grid.values, origin="lower", aspect="auto", cmap="viridis")
-    ax_main.set_xlabel(f"{sm_col} percentile bin")
+    ax_main.set_xlabel(f"{slab} percentile bin")
     ax_main.set_ylabel("vpd percentile bin")
-    fig.colorbar(im, ax=ax_main, orientation="horizontal", fraction=0.046, pad=0.16, label=f"mean {response}")
+    fig.colorbar(im, ax=ax_main, orientation="horizontal", fraction=0.046, pad=0.16, label=f"mean {rlab}")
 
     vpd_eff = _vpd_effect_per_sm(mean_grid)
     ax_top.bar(range(len(vpd_eff)), vpd_eff, color=_VPD_COLOR)
     ax_top.axhline(0, color="grey", lw=0.6)
     ax_top.set_xticks([])
-    ax_top.set_ylabel(f"vpd | {sm_col}", fontsize=8)
-    ax_top.set_title(f"{response}: {sm_col} x vpd decoupling grid", fontsize=10)
+    ax_top.set_ylabel(f"vpd | {slab}", fontsize=8)
+    ax_top.set_title(f"{rlab}: {slab} x vpd decoupling grid", fontsize=10)
 
     sm_eff = _sm_effect_per_vpd(mean_grid)
     ax_right.barh(range(len(sm_eff)), sm_eff, color=_SM_COLOR)
     ax_right.axvline(0, color="grey", lw=0.6)
     ax_right.set_yticks([])
-    ax_right.set_xlabel(f"{sm_col} | vpd", fontsize=8)
+    ax_right.set_xlabel(f"{slab} | vpd", fontsize=8)
 
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -205,9 +210,10 @@ def plot_aggregate_lines(table, response, sm_col, n_bins, out_path):
         c = cmap(i / denom)
         axes[0].plot(xs, mean[i, :], "o-", color=c, label=f"{i}")
         axes[0].fill_between(xs, mean[i, :] - se[i, :], mean[i, :] + se[i, :], color=c, alpha=0.15)
-    axes[0].set_xlabel(f"{sm_col} percentile bin")
-    axes[0].set_ylabel(f"{response} (cross-site mean)")
-    axes[0].set_title(f"{response} vs {sm_col} | vpd  (mean +/- SE across sites)", fontsize=9)
+    rlab, slab = response_label(response), sm_label(sm_col)
+    axes[0].set_xlabel(f"{slab} percentile bin")
+    axes[0].set_ylabel(f"{rlab} (cross-site mean)")
+    axes[0].set_title(f"{rlab} vs {slab} | vpd  (mean +/- SE across sites)", fontsize=9)
     axes[0].legend(title="vpd bin", fontsize=7, ncol=2)
 
     # right: response vs VPD bin, one line per SM bin (columns of the grid)
@@ -216,8 +222,8 @@ def plot_aggregate_lines(table, response, sm_col, n_bins, out_path):
         axes[1].plot(xs, mean[:, j], "s-", color=c, label=f"{j}")
         axes[1].fill_between(xs, mean[:, j] - se[:, j], mean[:, j] + se[:, j], color=c, alpha=0.15)
     axes[1].set_xlabel("vpd percentile bin")
-    axes[1].set_title(f"{response} vs vpd | {sm_col}  (mean +/- SE across sites)", fontsize=9)
-    axes[1].legend(title=f"{sm_col} bin", fontsize=7, ncol=2)
+    axes[1].set_title(f"{rlab} vs vpd | {slab}  (mean +/- SE across sites)", fontsize=9)
+    axes[1].legend(title=f"{slab} bin", fontsize=7, ncol=2)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -227,14 +233,14 @@ def plot_aggregate_lines(table, response, sm_col, n_bins, out_path):
 def plot_depth_dominance(depth_df, response, out_path):
     """(b) % of sites where SM dominates, across SM depth variants."""
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.bar(depth_df["sm_variant"], depth_df["pct_sm_dominant"])
+    ax.bar([sm_label(v) for v in depth_df["sm_variant"]], depth_df["pct_sm_dominant"])
     for x in range(len(depth_df)):
         pct = float(depth_df["pct_sm_dominant"].iloc[x])
         n = depth_df["n_sites"].iloc[x]
         ax.text(x, pct + 1, f"n={n}", ha="center", fontsize=8)
     ax.axhline(50, color="grey", ls=":")
     ax.set_ylabel("% sites SM-dominant")
-    ax.set_title(f"soil-moisture vs vpd dominance by depth ({response})")
+    ax.set_title(f"soil-moisture vs vpd dominance by depth ({response_label(response)})")
     ax.set_ylim(0, 100)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -283,13 +289,14 @@ def plot_gradient_groups(effects, group_col, response, sm_col, out_path):
     ax.axhline(0, color="grey", ls=":")
     ax.set_xticks(range(len(groups)))
     ax.set_xticklabels(groups, rotation=30, ha="right")
-    ax.set_ylabel(f"{response} effect (high-low)")
-    ax.set_title(f"{response}: decoupled effects by {group_col}  ({sm_col})")
+    rlab, slab = response_label(response), sm_label(sm_col)
+    ax.set_ylabel(f"{rlab} effect (high-low)")
+    ax.set_title(f"{rlab}: decoupled effects by {group_col}  ({slab})")
     handles = [
         plt.Rectangle((0, 0), 1, 1, color=_SM_COLOR, alpha=0.6),
         plt.Rectangle((0, 0), 1, 1, color=_VPD_COLOR, alpha=0.6),
     ]
-    ax.legend(handles, [f"{sm_col} | vpd", f"vpd | {sm_col}"], fontsize=8)
+    ax.legend(handles, [f"{slab} | vpd", f"vpd | {slab}"], fontsize=8)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -330,9 +337,9 @@ def plot_leg_comparison_box(combined, response, out_path):
             )
     ax.axhline(0, color="grey", ls=":")
     ax.set_xticks(range(len(variants)))
-    ax.set_xticklabels(variants, rotation=20, ha="right")
-    ax.set_ylabel(f"{response} effect (per-site, high-low)")
-    ax.set_title(f"{response}: soil-moisture vs vpd decoupled effects across sites")
+    ax.set_xticklabels([sm_label(v) for v in variants], rotation=20, ha="right")
+    ax.set_ylabel(f"{response_label(response)} effect (per-site, high-low)")
+    ax.set_title(f"{response_label(response)}: soil-moisture vs vpd decoupled effects across sites")
     handles = [
         plt.Rectangle((0, 0), 1, 1, color=_SM_COLOR, alpha=0.6),
         plt.Rectangle((0, 0), 1, 1, color=_VPD_COLOR, alpha=0.6),
@@ -358,9 +365,10 @@ def plot_leg_comparison_scatter(effects, response, sm_col, out_path):
     n_vpd = int((x >= y).sum())
     ax.set_xlim(0, top)
     ax.set_ylim(0, top)
-    ax.set_xlabel(f"| vpd | {sm_col} |")
-    ax.set_ylabel(f"| {sm_col} | vpd |")
-    ax.set_title(f"{response} ({sm_col}): SM-dominant={n_sm}, VPD-dominant={n_vpd}")
+    rlab, slab = response_label(response), sm_label(sm_col)
+    ax.set_xlabel(f"| vpd | {slab} |")
+    ax.set_ylabel(f"| {slab} | vpd |")
+    ax.set_title(f"{rlab} ({slab}): SM-dominant={n_sm}, VPD-dominant={n_vpd}")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

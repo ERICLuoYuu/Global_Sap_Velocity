@@ -24,6 +24,7 @@ from src.fu_ann_sensitivity.plotting import (
     plot_pft_panels,
     plot_sensitivity_heatmap,
 )
+from src.plot_labels import response_label, sm_label
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +72,13 @@ def _make_figures(agg: dict, per_site, out: Path, response: str, sm: str, n_bins
     plot_sensitivity_heatmap(
         agg["sm_map"],
         agg["sm_sig"],
-        f"Sensitivity of {response} to SWC ({sm}, {n_bins}x{n_bins})",
+        f"Sensitivity of {response_label(response)} to SM ({sm_label(sm)}, {n_bins}x{n_bins})",
         out / f"fig2_{response}_{sm}_SWC_nbins{n_bins}.png",
     )
     plot_sensitivity_heatmap(
         agg["vpd_map"],
         agg["vpd_sig"],
-        f"Sensitivity of {response} to VPD ({sm}, {n_bins}x{n_bins})",
+        f"Sensitivity of {response_label(response)} to VPD ({sm_label(sm)}, {n_bins}x{n_bins})",
         out / f"fig2_{response}_{sm}_VPD_nbins{n_bins}.png",
     )
     plot_dual_legs(agg["by_sm_bin"], agg["by_vpd_bin"], response, out / f"fig3_{tag}.png")
@@ -160,7 +161,7 @@ def run_analysis(
 
 def main(argv=None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    p = argparse.ArgumentParser(description="Fu et al. 2022 ANN SWC/VPD sensitivity for E and Gc.")
+    p = argparse.ArgumentParser(description="Fu et al. 2022 ANN SM/VPD sensitivity for sap flow (E) and Gc.")
     p.add_argument(
         "--data-dir",
         default=DEFAULT_DATA_DIR,

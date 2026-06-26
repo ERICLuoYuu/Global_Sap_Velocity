@@ -81,7 +81,7 @@ def plot_driver_responses(
     title_note: str = "",
     agg: str = "mean",
     resp_label: str = "ΔSF",
-    metric_name: str = "transpiration",
+    metric_name: str = "sap flow",
 ) -> None:
     """Fig 1b/e/h analog: ΔSF and diurnal centroid vs fixed-width-binned VPD/Tair/SM.
 
@@ -238,7 +238,7 @@ def plot_decoupling_lines(
 
 
 def plot_effect_distributions(
-    effects: pd.DataFrame, out_path: Path, resp_label: str = "ΔSF", metric_name: str = "transpiration"
+    effects: pd.DataFrame, out_path: Path, resp_label: str = "ΔSF", metric_name: str = "sap flow"
 ) -> None:
     """Fig 2d analog: per-site distributions of the four decoupled effects."""
     cols = [c for c in _EFFECTS if c in effects.columns]

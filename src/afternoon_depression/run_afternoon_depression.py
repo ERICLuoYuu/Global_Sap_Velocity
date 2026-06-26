@@ -75,7 +75,7 @@ def _verdict(
 ) -> str:
     is_gc = response == "gc"
     dx = "ΔGc" if is_gc else "ΔSF"
-    metric = "canopy conductance (Gc)" if is_gc else "transpiration"
+    metric = "canopy conductance (Gc)" if is_gc else "sap flow"
     med = {e: float(effects[e].median()) for e in _EFFECTS if e in effects.columns}
     vpd_vs_t, t_vs_v = med.get("vpd_given_tair"), med.get("tair_given_vpd")
     vpd_vs_s, s_vs_v = med.get("vpd_given_sm"), med.get("sm_given_vpd")
@@ -136,7 +136,7 @@ def run(args: argparse.Namespace) -> None:
 
     # Figure/verdict labels for the chosen response (defaults reproduce the sf strings).
     resp_label = "ΔGc" if args.response == "gc" else "ΔSF"
-    metric_name = "canopy conductance (Gc)" if args.response == "gc" else "transpiration"
+    metric_name = "canopy conductance (Gc)" if args.response == "gc" else "sap flow"
 
     table = load_site_day_table(
         hourly_dir,

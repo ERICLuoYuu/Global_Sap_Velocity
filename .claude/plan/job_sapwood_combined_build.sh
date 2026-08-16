@@ -123,39 +123,64 @@ check("sites whose flags and data disagree", len(misaligned), 0)
 if misaligned:
     print("        first few:", misaligned[:5])
 
-print("Criterion 6 -- converted medians inside a plausible band")
-# Two thresholds, because they mean different things. Outside [1e-4, 1e4] is
-# arithmetically impossible for this quantity and fails the build. Outside
-# [0.01, 100] is merely suspicious -- it is a screen for review, and failing the
-# build on it would mean a legitimately low-flow stand could never ship.
-outliers, impossible = [], []
-for site, entry in manifest["sites"].items():
-    if entry["route"] != "converted":
-        continue
+print("Criterion 6 -- converted magnitudes inside the band the native sites define")
+# NOT the all-hours median. Sap flow is zero all night, and the fraction of a
+# record that is night varies by site, latitude and how much winter was logged.
+# Once a site passes ~40% exact zeros the 50th percentile falls INTO the zero
+# block, so the all-hours median becomes a step function of the zero fraction
+# rather than a measure of flux. That is not hypothetical: it is what the first
+# version of this check did, and it flagged CZE_BK1 (43.7% zeros) and CZE_RAJ
+# (40.6%) while passing CZE_BIK (31.2%) -- sites whose daytime magnitudes are
+# ordinary. See the deviations log, 2026-08-16.
+#
+# So screen on two statistics night cannot move, and calibrate the band against
+# the 181 NATIVE sites, which are measured rather than derived and therefore
+# define what this quantity actually looks like.
+import numpy as np
+
+
+def magnitudes(site):
     frame = pd.read_csv(out / f"{site}_sapf_data.csv", low_memory=False)
     trees = [c for c in frame.columns if "TIMESTAMP" not in c.upper()]
     if not trees:
+        return None
+    vals = frame[trees].apply(pd.to_numeric, errors="coerce").stack().dropna()
+    if vals.empty:
+        return None
+    v = vals.to_numpy(dtype=float)
+    pos = v[v > 0]
+    if not pos.size:
+        return None
+    return float(np.median(pos)), float(np.percentile(v, 90))
+
+
+native_stats, converted_stats = {}, {}
+for site, entry in manifest["sites"].items():
+    m = magnitudes(site)
+    if m is None:
         continue
-    med = frame[trees].stack().median()
-    if pd.isna(med):
-        continue
-    med = float(med)
-    if not (1e-4 <= med <= 1e4):
-        impossible.append((site, round(med, 6)))
-    elif not (0.01 <= med <= 100):
-        outliers.append((site, round(med, 6)))
+    (native_stats if entry["route"] == "native" else converted_stats)[site] = m
+
+ref = np.array([m[0] for m in native_stats.values()])
+lo, hi = float(np.percentile(ref, 1)), float(np.percentile(ref, 99))
+print(f"  native reference (n={len(native_stats)}): median(>0) 1st pct={lo:.4f}, 99th pct={hi:.4f}")
+
+impossible, outliers = [], []
+for site, (nz, p90) in converted_stats.items():
+    if not (1e-4 <= nz <= 1e4):
+        impossible.append((site, round(nz, 6)))
+    elif not (lo <= nz <= hi):
+        outliers.append((site, round(nz, 4), round(p90, 3)))
 check("converted sites outside the impossible band [1e-4, 1e4]", len(impossible), 0)
 if impossible:
     print("        offenders:", impossible)
 if outliers:
-    print(f"  [WARN] {len(outliers)} converted site(s) outside the review band [0.01, 100]:")
-    for site, med in outliers:
-        print(f"           {site}: median {med}")
-    print("         Not a build failure. These need a provenance check upstream --")
-    print("         their sapwood areas are plausible, so the anomaly is in the")
-    print("         plant-scale flux they were divided from.")
+    print(f"  [WARN] {len(outliers)} converted site(s) outside the native 1-99 pct band:")
+    for site, nz, p90 in outliers:
+        print(f"           {site}: median(>0)={nz} p90={p90}")
+    print("         Not a build failure -- a low-flow stand is allowed to exist.")
 else:
-    print("  [OK ] all converted medians inside the review band [0.01, 100]")
+    print("  [OK ] every converted site's median(>0) lies inside the native 1-99 pct band")
 
 print("Manifest provenance")
 print("  asw_model:", manifest["asw_model"].get("taxon_refinement"), "offsets:", manifest["asw_model"].get("taxon_offsets"))

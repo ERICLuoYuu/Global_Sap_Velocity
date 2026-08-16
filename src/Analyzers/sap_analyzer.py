@@ -14,12 +14,20 @@ parent_dir = str(Path(__file__).parent.parent.parent)
 print(parent_dir)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
-from path_config import PathConfig
-
-from src.Analyzers.mannual_removal_processor import RemovalLogProcessor
-from src.gap_filling.config import GapFillingConfig  # noqa: F811
-from src.gap_filling.filler import GapFiller  # noqa: F811
-from src.tools import adjust_time_to_local, create_timezone_mapping
+from path_config import PathConfig  # noqa: E402
+from src.Analyzers.mannual_removal_processor import RemovalLogProcessor  # noqa: E402
+from src.gap_filling.config import GapFillingConfig  # noqa: E402, F811
+from src.gap_filling.filler import GapFiller  # noqa: E402, F811
+from src.qc_flags import (  # noqa: E402
+    Mechanism,
+    QcFlagConfig,
+    RunReport,
+    SiteFlagOutcome,
+    apply_mask,
+    build_mask,
+    count_masked,
+)
+from src.tools import adjust_time_to_local, create_timezone_mapping  # noqa: E402
 
 
 class SapFlowAnalyzer:
@@ -28,11 +36,22 @@ class SapFlowAnalyzer:
     """
 
     def __init__(
-        self, paths: PathConfig = None, scale: str = "sapwood", gap_filling_config: GapFillingConfig | None = None
+        self,
+        paths: PathConfig = None,
+        scale: str = "sapwood",
+        gap_filling_config: GapFillingConfig | None = None,
+        qc_config: QcFlagConfig | None = None,
     ):
         self.paths = paths if paths is not None else PathConfig(scale=scale)
         self.data_dir = self.paths.sap_data_dir
         self.data_outlier_removed_dir = self.paths.sap_outliers_removed_dir
+
+        # --- QC flag support (see src/qc_flags) ---
+        self.qc_config = qc_config if qc_config is not None else QcFlagConfig()
+        self.qc_report = RunReport()
+        self._last_mechanism = Mechanism.NONE
+        self._last_masked_counts = {}
+        self._last_present_counts = {}
 
         # Dictionaries are initialized but will be cleared after each batch.
         self.sapf_raw_data = {}
@@ -429,7 +448,7 @@ class SapFlowAnalyzer:
                 time_zone = tz_df["env_time_zone"].iloc[0]
                 timestep = tz_df["env_timestep"].iloc[0]
                 df["TIMESTAMP_LOCAL"] = df["TIMESTAMP"].apply(
-                    lambda ts: adjust_time_to_local(ts, time_zone, self.timezone_map)
+                    lambda ts, tz=time_zone: adjust_time_to_local(ts, tz, self.timezone_map)
                 )
                 site_md_file = file.parent / f"{file.stem.replace('_sapf_data', '_site_md')}.csv"
                 site_md = pd.read_csv(site_md_file)
@@ -463,8 +482,31 @@ class SapFlowAnalyzer:
                         self.sapflow_data[location] = {}
                     self.sapflow_data[location][plant_type] = df_processed
 
+                    self.qc_report.add(
+                        SiteFlagOutcome(
+                            site=location,
+                            kind="sapf",
+                            mechanism=self._last_mechanism,
+                            masked_counts=self._last_masked_counts,
+                            present_counts=self._last_present_counts,
+                            skipped_reason=None,
+                        )
+                    )
+
             except Exception as e:
+                # A site landing here is recorded as unaccounted rather than
+                # disappearing into one line of stdout -- criterion 2.
                 print(f"Error loading {file.name}: {str(e)}")
+                self.qc_report.add(
+                    SiteFlagOutcome(
+                        site=location,
+                        kind="sapf",
+                        mechanism=Mechanism.NONE,
+                        masked_counts={},
+                        present_counts={},
+                        skipped_reason=None,
+                    )
+                )
 
     def _process_sapflow_data(
         self,
@@ -493,14 +535,6 @@ class SapFlowAnalyzer:
 
         # Convert string "NA" to numpy NaN
         df = df.replace("NA", np.nan)
-
-        # Define sap flow variables (all non-timestamp columns)
-        SAP_FLOW_VARIABLES = [
-            col
-            for col in df.columns
-            if col not in ["TIMESTAMP", "solar_TIMESTAMP", "TIMESTAMP_LOCAL", "lat", "long"]
-            and "Unnamed:" not in str(col)
-        ]
 
         # Convert numeric columns to float, with error handling
         numeric_cols = [
@@ -548,36 +582,50 @@ class SapFlowAnalyzer:
             print("No duplicates found in timestamps")
 
         # Apply flag-based filtering
+        # --- Quality control -------------------------------------------------
+        # Internal sites ship no sapf_flags at all, so `mechanism` here is only
+        # ever SAPFLUXNET_FLAGS or NONE -- the in-file *_qc columns exist on the
+        # env side, not the sap side. The shared code path is used anyway, so
+        # the two analyzers cannot drift apart on what RANGE_WARN means.
+        mechanism = Mechanism.SAPFLUXNET_FLAGS if flags is not None else Mechanism.NONE
+        self._last_mechanism = mechanism
         if flags is not None:
             flags = flags.set_index("TIMESTAMP").sort_index()
             if flags.index.duplicated().any():
                 flags = flags[~flags.index.duplicated(keep="first")]
 
-            data_cols = [col for col in df.columns if col not in ["solar_TIMESTAMP", "TIMESTAMP_LOCAL", "lat", "long"]]
-            output_dir = self.paths.sap_filtered_dir / "TEST"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            for col in data_cols:
-                flag_col = [fcol for fcol in flags.columns if col in fcol]
-                if flag_col:
-                    warn_mask = flags[flag_col[0]].astype(str).str.contains("RANGE_WARN", na=False)
-                    negative_sap_mask = df[col] < 0
-                    warn_mask = warn_mask & ~negative_sap_mask
-                    df.loc[df[col] < 0, col] = np.nan
-                    print(f"Filtering negative values in {col}: {negative_sap_mask.sum()} values set to NaN")
-                    if warn_mask.any():
-                        print(f"\nFiltering {warn_mask.sum()} values in {col} due to warnings")
-                        df.loc[warn_mask, [col, "solar_TIMESTAMP"]].to_csv(output_dir / f"{col}_flagged.csv")
-                    df.loc[warn_mask, col] = np.nan
+        output_dir = self.paths.sap_filtered_dir / "TEST"
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-            filter_path = output_dir / f"{location}_{plant_type}_filtered.csv"
-            df.to_csv(filter_path, index=True)
-            print(f"Saved filtered data to {filter_path}")
+        mask = build_mask(df, flags, mechanism, self.qc_config)
+
+        # D-2: this clamp and the filtered/ export below both used to sit inside
+        # `if flags is not None`. Negative sap flow is physically impossible
+        # whatever the archive says about a cell, so gating its removal on the
+        # presence of a flag file meant all 24 flagless sites kept theirs -- and
+        # produced no filtered/ file either. Neither step depends on flags.
+        for col in mask.columns:
+            negative_sap_mask = df[col] < 0
+            mask[col] = mask[col] & ~negative_sap_mask
+            if negative_sap_mask.any():
+                print(f"Filtering negative values in {col}: {negative_sap_mask.sum()} values set to NaN")
+            df.loc[negative_sap_mask, col] = np.nan
+
+        self._last_masked_counts, self._last_present_counts = count_masked(mask, df)
+        for col in mask.columns:
+            warn_mask = mask[col]
+            if warn_mask.any():
+                print(f"\nFiltering {warn_mask.sum()} values in {col} due to warnings")
+                df.loc[warn_mask, [col, "solar_TIMESTAMP"]].to_csv(output_dir / f"{col}_flagged.csv")
+        df = apply_mask(df, mask)
+
+        filter_path = output_dir / f"{location}_{plant_type}_filtered.csv"
+        df.to_csv(filter_path, index=True)
+        print(f"Saved filtered data to {filter_path}")
 
         try:
             # --- Parameters ---
             pre_timewindow = self._get_timewindow(30 * 24 * 60 * 60, df.index)
-            DEFAULT_WINDOW_POINTS = pre_timewindow if pre_timewindow < len(df) else len(df)
-            DEFAULT_N_STD = 3
 
             DAY_SAPFLOW_WINDOW_POINTS = pre_timewindow if pre_timewindow < len(df) else len(df)
             DAY_SAPFLOW_N_STD = 3
@@ -919,6 +967,7 @@ class SapFlowAnalyzer:
                     if solar_ts is None:
                         del mask_df_out["solar_TIMESTAMP"]
                     import pandas as _pd
+
                     _pd.DataFrame(mask_df_out, index=df.index).to_csv(
                         gap_masks_dir / f"{col}_gap_filled.csv", index_label="timestamp"
                     )
@@ -972,7 +1021,6 @@ class SapFlowAnalyzer:
             Baseline-corrected series
         """
         corrected = series.copy()
-        night_mask = ~day_mask
 
         if method == "nighttime_quantile":
             # Use nighttime quantile as baseline (more robust than min)
@@ -1062,7 +1110,7 @@ class SapFlowAnalyzer:
         days_failed_peak = 0
         days_removed = 0
 
-        for date_obj, group in grouped:
+        for _date_obj, group in grouped:
             if group["val"].dropna().empty:
                 continue
 
@@ -1377,7 +1425,7 @@ class SapFlowAnalyzer:
         # Print overall summary
         print("-" * 60)
         if not summary_df.empty and "removed" in summary_df.columns:
-            removed_df = summary_df[summary_df["removed"] == True]
+            removed_df = summary_df[summary_df["removed"]]
             if not removed_df.empty:
                 total_days_any_removed = removed_df.groupby("date").size().shape[0]
             else:
@@ -1425,7 +1473,7 @@ class SapFlowAnalyzer:
             try:
                 timesteps = pd.to_datetime(timesteps)
             except Exception as e:
-                raise ValueError(f"Could not convert 'timesteps_data' to datetime objects: {e}")
+                raise ValueError(f"Could not convert 'timesteps_data' to datetime objects: {e}") from e
 
         if len(timesteps) < 2:
             raise ValueError(

@@ -189,6 +189,83 @@ def test_a_second_run_reproduces_the_first_byte_for_byte(stub_paths: Path) -> No
 
 
 @pytest.mark.integration
+def test_a_rebuild_that_routes_fewer_sites_does_not_leave_the_old_ones_behind(stub_paths: Path) -> None:
+    """``--force`` rebuilds *over* a directory; it does not replace it.
+
+    Nothing overwrites a site the new run does not write -- those files are
+    simply not written again -- so the directory ends up holding the union of
+    every build ever run there while MANIFEST.json describes only the last. The
+    existing suite exercises only the growing direction (skip-internal, then
+    full), where the union and the last build happen to coincide.
+
+    This is the shrinking direction, and it is the one that matters: a consumer
+    globbing the directory would read internal sites that the manifest, the
+    provenance record and the ``corpora.internal_included`` flag all deny are
+    there.
+    """
+    _run(stub_paths)
+    out = _out(stub_paths)
+    assert (out / "INT_SAP_sapf_data.csv").exists()
+    assert (out / "INT_PLANT_sapf_data.csv").exists()
+
+    _run(stub_paths, force=True, skip_internal=True)
+    manifest = json.loads((out / MANIFEST_NAME).read_text(encoding="utf-8"))
+
+    assert set(manifest["sites"]) == {"EXT_BOTH", "EXT_PLANT", "EXT_SAP"}
+    assert manifest["corpora"]["internal_included"] is False
+    assert not list(out.glob("INT_*"))
+    assert manifest["summary"]["files_written"] == len(list(out.glob("*.csv")))
+
+
+@pytest.mark.integration
+def test_a_site_that_stops_being_convertible_is_removed_rather_than_left_stale(stub_paths: Path) -> None:
+    """ESP_GDN's shape again, but arriving on a rebuild.
+
+    A site skipped for want of a usable area is absent from the manifest. If a
+    previous build wrote it, its files stay -- and they hold the *old* areas,
+    which is worse than either having it or not: the product would carry a site
+    the manifest disowns, divided by numbers the current ASW model never
+    produced.
+    """
+    _run(stub_paths)
+    out = _out(stub_paths)
+    assert (out / "EXT_PLANT_sapf_data.csv").exists()
+
+    write_site(
+        stub_paths / "csv/plant_asw_filled",
+        "EXT_PLANT",
+        ["EXT_PLANT_Psy_Jt_1", "EXT_PLANT_Psy_Jt_2"],
+        areas={"EXT_PLANT_Psy_Jt_1": None, "EXT_PLANT_Psy_Jt_2": None},
+        kinds=("plant_md",),
+    )
+    _run(stub_paths, force=True)
+
+    manifest = json.loads((out / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert "EXT_PLANT" in manifest["skipped"]
+    assert list(out.glob("EXT_PLANT_*")) == []
+
+
+@pytest.mark.integration
+def test_a_rebuild_leaves_files_that_are_not_ours_alone(stub_paths: Path) -> None:
+    """Pruning removes stale corpus members, not everything it finds.
+
+    The output directory is somewhere a person may reasonably keep a note or a
+    derived table beside the product. Only ``{site}_{kind}.csv`` for a known kind
+    is ours to delete; anything else is left where it is.
+    """
+    _run(stub_paths)
+    out = _out(stub_paths)
+    (out / "README.md").write_text("how this corpus was built\n", encoding="utf-8")
+    (out / "my_summary.csv").write_text("site,n\nEXT_SAP,1\n", encoding="utf-8")
+
+    _run(stub_paths, force=True, skip_internal=True)
+
+    assert (out / "README.md").read_text(encoding="utf-8") == "how this corpus was built\n"
+    assert (out / "my_summary.csv").exists()
+    assert not list(out.glob("INT_*"))
+
+
+@pytest.mark.integration
 def test_the_manifest_is_written_last(stub_paths: Path) -> None:
     """Its absence is the only signal that a run was interrupted."""
     _run(stub_paths)

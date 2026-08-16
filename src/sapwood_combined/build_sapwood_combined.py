@@ -16,7 +16,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from src.sapwood_combined.assembly import assemble_site
+from src.sapwood_combined.assembly import FILE_KINDS, assemble_site, prune_unclaimed
 from src.sapwood_combined.manifest import build_manifest, write_manifest
 from src.sapwood_combined.membership import (
     EXTERNAL,
@@ -135,7 +135,14 @@ def run(
         print("[ASW model] UNKNOWN -- {}".format(model.get("reason")))
 
     if dry_run:
-        bytes_in = sum(f.stat().st_size for r in routes for f in r.source_dir.glob(f"{r.site}_*.csv"))
+        # Exact filenames, not glob(f"{r.site}_*.csv"). A site whose code is a
+        # prefix of another's would sweep in its neighbour's files and inflate
+        # the estimate -- the same over-match that made the build's criterion 1b
+        # flag five correct sites. No such pair exists inside a single source
+        # directory today (measured: 0 across all four), which is exactly why
+        # this would go unnoticed until one does.
+        candidates = (r.source_dir / f"{r.site}_{k}.csv" for r in routes for k in FILE_KINDS)
+        bytes_in = sum(f.stat().st_size for f in candidates if f.exists())
         print(f"[Dry run] would write {len(routes)} site(s), about {bytes_in / 1e9:.2f} GB, to {out_dir}")
         print("[Dry run] nothing written")
         return 0
@@ -162,6 +169,19 @@ def run(
                 f"  ({outcome.skipped_reason})" if outcome.skipped_reason else "",
             )
         )
+
+    # Before the manifest, so the manifest is still the last thing written and
+    # its absence still marks an interrupted run. A --force rebuild writes over
+    # the previous product but never removes what it does not write, so without
+    # this the directory keeps every site any earlier build put there while the
+    # manifest describes only this one.
+    pruned = prune_unclaimed(out_dir, outcomes)
+    if pruned:
+        print(f"\n[Pruned] {len(pruned)} file(s) left by an earlier build that this run does not write")
+        for name in pruned[:10]:
+            print(f"          {name}")
+        if len(pruned) > 10:
+            print(f"          ... and {len(pruned) - 10} more")
 
     manifest = build_manifest(outcomes, asw_model=model, corpora_included=[c.origin for c in corpora])
     path = write_manifest(out_dir, manifest)

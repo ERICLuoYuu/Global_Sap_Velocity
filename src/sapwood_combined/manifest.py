@@ -29,16 +29,6 @@ MANIFEST_NAME = "MANIFEST.json"
 _FLAG_KINDS = ("sapf_flags", "env_flags")
 
 
-def _corpora_block(corpora_included: Iterable[str] | None, written: list[SiteOutcome]) -> dict[str, object]:
-    """Record which source corpora were included in the build."""
-    if corpora_included is None:
-        corpora_included = []
-    return {
-        "included": sorted(corpora_included),
-        "n_sites": len(written),
-    }
-
-
 def _flags_available(written: Iterable[SiteOutcome]) -> dict[str, object]:
     """Which sites carry QC flag files, and which legitimately do not.
 

@@ -94,13 +94,44 @@ check("sites whose kinds disagree with disk", len(mismatched), 0)
 if mismatched:
     print("        first few:", mismatched[:5])
 
-print("Criterion 2 -- every plant_md declares sapwood scale")
+print("Criterion 1c -- the directory holds nothing the manifest does not claim")
+# Criterion 1b asks whether each site the manifest lists is on disk. This asks
+# the other direction, which is the one a rebuild breaks: --force writes over a
+# directory rather than replacing it, so a site an earlier build wrote and this
+# one does not is left behind, unlisted and indistinguishable from a member.
+# assembly.prune_unclaimed now removes those, and this is the check that proves
+# it ran.
+claimed = {"MANIFEST.json"}
+for site, entry in manifest["sites"].items():
+    for kind in entry["kinds"]:
+        claimed.add(f"{site}_{kind}.csv")
+on_disk = {p.name for p in out.iterdir()}
+check("files on disk that the manifest does not claim", len(on_disk - claimed), 0)
+if on_disk - claimed:
+    print("        first few:", sorted(on_disk - claimed)[:5])
+
+print("Criterion 2 -- the SOURCE of every native site is already at sapwood scale")
+# Reading pl_sap_units back out of the OUTPUT proves nothing: assembly.py
+# assigns it. That version of this check could not fail in any state of the
+# world, which is why it never did. The falsifiable question is about the input
+# -- did the file we copied verbatim actually claim to be sapwood-scale before
+# we wrote that claim onto it? assembly._check_already_at_sapwood_scale now
+# refuses the build if not; this is the independent confirmation.
+csv_root = out.parent
+internal_root = Path("Sapflow-internal/Sapflow_SAPFLUXNET_format_unitcon")
 bad_units = []
-for md_path in out.glob("*_plant_md.csv"):
-    units = set(pd.read_csv(md_path, usecols=["pl_sap_units"])["pl_sap_units"])
+for site, entry in manifest["sites"].items():
+    if entry["route"] != "native":
+        continue
+    root = csv_root / "sapwood" if entry["origin"] == "external" else internal_root / "sapwood"
+    src = root / f"{site}_plant_md.csv"
+    if not src.exists():
+        bad_units.append((site, "<source plant_md missing>"))
+        continue
+    units = set(pd.read_csv(src, usecols=["pl_sap_units"])["pl_sap_units"].dropna().astype(str))
     if units != {"cm3 cm-2 h-1"}:
-        bad_units.append((md_path.name, units))
-check("plant_md files not at sapwood scale", len(bad_units), 0)
+        bad_units.append((site, sorted(units)))
+check("native sites whose source is not at sapwood scale", len(bad_units), 0)
 if bad_units:
     print("        first few:", bad_units[:5])
 

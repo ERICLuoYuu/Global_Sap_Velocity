@@ -112,6 +112,70 @@ def test_an_unaligned_flags_file_is_refused_even_on_the_copy_path(corpus: Path, 
         assemble_site(_routes(corpus)["EXT_PLANT"], out)
 
 
+@pytest.mark.unit
+def test_an_unaligned_flags_file_is_refused_on_the_native_route_too(corpus: Path, tmp_path: Path) -> None:
+    """A native site is copied verbatim, which is exactly why it needs checking.
+
+    The converted route validates flags against data and raises; the native route
+    used to copy both without looking, so 181 of the corpus's 226 sites passed
+    through the one guard that was never applied to them. Nothing downstream can
+    detect the result: :mod:`src.Analyzers.sap_analyzer` pairs the two files by
+    column name, and a tree present in one but not the other silently loses its
+    QC record or acquires someone else's.
+    """
+    sapf_flags_frame(["EXT_SAP_Psy_Jt_1", "EXT_SAP_Psy_Jt_GHOST"]).to_csv(
+        corpus / "csv/sapwood/EXT_SAP_sapf_flags.csv", index=False
+    )
+    out = tmp_path / "combined"
+    out.mkdir()
+    with pytest.raises(ValueError, match="disagree"):
+        assemble_site(_routes(corpus)["EXT_SAP"], out)
+
+
+# --------------------------------------------------------------------------
+# Scale failures
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_native_site_whose_metadata_denies_being_at_sapwood_scale_raises(corpus: Path, tmp_path: Path) -> None:
+    """Presence in the sapwood directory is a claim, and claims get checked.
+
+    The native route *assigns* ``pl_sap_units = cm3 cm-2 h-1`` rather than
+    verifying it, so a plant-scale series filed under ``csv/sapwood/`` would be
+    relabelled instead of refused -- and would then sit in the product roughly
+    100x too large under a header asserting otherwise. That is the same failure
+    :mod:`src.sapwood_combined.conversion` exists to prevent, arriving by the one
+    route that does no arithmetic.
+
+    It also makes the assertion checkable at all: a test that reads
+    ``pl_sap_units`` back out of the output cannot fail while the code writes it
+    unconditionally.
+    """
+    write_site(
+        corpus / "csv/sapwood_asw_filled",
+        "EXT_SAP",
+        ["EXT_SAP_Psy_Jt_1"],
+        units="cm3 h-1",
+        kinds=("plant_md",),
+    )
+    out = tmp_path / "combined"
+    out.mkdir()
+    with pytest.raises(ValueError, match="cm3 h-1"):
+        assemble_site(_routes(corpus)["EXT_SAP"], out)
+
+
+@pytest.mark.unit
+def test_a_native_site_whose_metadata_states_no_units_at_all_raises(corpus: Path, tmp_path: Path) -> None:
+    """Silence is not consent: assigning a unit no one declared is the same hole."""
+    md = metadata_frame("EXT_SAP", ["EXT_SAP_Psy_Jt_1"], units="cm3 cm-2 h-1").drop(columns=["pl_sap_units"])
+    md.to_csv(corpus / "csv/sapwood_asw_filled/EXT_SAP_plant_md.csv", index=False)
+    out = tmp_path / "combined"
+    out.mkdir()
+    with pytest.raises(ValueError, match="pl_sap_units"):
+        assemble_site(_routes(corpus)["EXT_SAP"], out)
+
+
 # --------------------------------------------------------------------------
 # Membership failures
 # --------------------------------------------------------------------------

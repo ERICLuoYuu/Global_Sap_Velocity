@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -112,6 +113,41 @@ def place_file(src: Path, dst: Path, link: bool = False) -> None:
     shutil.copy2(str(src), str(dst))
 
 
+def prune_unclaimed(out_dir: Path, outcomes: Iterable[SiteOutcome]) -> tuple[str, ...]:
+    """Delete corpus files an earlier build left that this one does not write.
+
+    ``--force`` rebuilds *over* a directory rather than replacing it. Files the
+    new run writes are overwritten; files it does not write are simply left, so
+    the directory accumulates the union of every build ever run there while
+    MANIFEST.json describes only the last. Two ways that happens in practice:
+    a full build followed by a ``--skip-internal`` one, and a site that has since
+    lost its last usable sapwood area and is now skipped. In both the leftovers
+    are not merely stale, they are *disowned* -- a consumer globbing the
+    directory reads sites the manifest, the provenance block and
+    ``corpora.internal_included`` all deny are present.
+
+    Deletion is scoped by name: only ``{something}_{kind}.csv`` for a kind in
+    :data:`FILE_KINDS` can be removed, so a note, a README or a derived table
+    kept beside the product is left alone rather than assumed to be ours. Under
+    ``--link`` the entries removed are hard links, so unlinking them frees the
+    name without touching the source file they share an inode with.
+
+    Returns the names removed, so the caller can report them. A rebuild that
+    prunes nothing is the normal case and says nothing.
+    """
+    out_dir = Path(out_dir)
+    claimed = {f"{o.site}_{kind}.csv" for o in outcomes if o.was_written for kind in o.kinds}
+    removed = []
+    for path in sorted(out_dir.glob("*.csv")):
+        if path.name in claimed:
+            continue
+        if not any(path.name.endswith(f"_{kind}.csv") for kind in FILE_KINDS):
+            continue
+        path.unlink()
+        removed.append(path.name)
+    return tuple(removed)
+
+
 def _read_csv(path: Path) -> pd.DataFrame:
     # dtype=str on timestamps is handled inside conversion; here we only need the
     # frame to survive the round trip, so let pandas infer and keep NA tokens.
@@ -135,6 +171,39 @@ def _present_kinds(route: SiteRoute) -> tuple[str, ...]:
     return tuple(k for k in FILE_KINDS if (route.source_dir / f"{route.site}_{k}.csv").exists())
 
 
+def _check_already_at_sapwood_scale(route: SiteRoute, md: pd.DataFrame) -> None:
+    """Refuse a 'native' site whose own metadata does not claim sapwood scale.
+
+    Being in the sapwood flavour directory is a claim about the series, and this
+    is where it gets tested. Without it the route simply *assigns* the sapwood
+    unit, so a plant-scale file misfiled under ``csv/sapwood/`` would be
+    relabelled rather than refused, and would sit in the product roughly 100x too
+    large under a header asserting otherwise -- the exact failure
+    :mod:`src.sapwood_combined.conversion` exists to prevent, arriving by the one
+    route that does no arithmetic.
+
+    It is also what makes the claim checkable. Reading ``pl_sap_units`` back out
+    of the output cannot fail while the code writes it unconditionally, so both
+    the integration test and the build's acceptance criterion 2 were asserting a
+    constant. Measured 2026-08-16 across ``sapwood_asw_filled/``: 181/181 native
+    sites already declare ``cm3 cm-2 h-1``, so this refuses nothing we hold.
+    """
+    if UNITS_COL not in md.columns:
+        raise ValueError(
+            f"{route.site}: {route.asw_md_path.name} has no {UNITS_COL!r} column, so nothing states "
+            "the series is at sapwood scale. Assigning the unit anyway would make the product's "
+            "central claim unverifiable."
+        )
+    declared = sorted(set(md[UNITS_COL].dropna().astype(str)) - {SAPWOOD_UNITS})
+    if declared:
+        raise ValueError(
+            f"{route.site} is routed as native because it appears in the sapwood corpus, but its "
+            f"metadata declares {declared} rather than {SAPWOOD_UNITS!r}. Refusing to relabel it: "
+            "if the series really is at plant scale it must be divided by a sapwood area, not "
+            "renamed."
+        )
+
+
 def _assemble_native(route: SiteRoute, out_dir: Path, link: bool) -> SiteOutcome:
     """Copy verbatim, but take plant_md from the filled-ASW directory.
 
@@ -144,6 +213,20 @@ def _assemble_native(route: SiteRoute, out_dir: Path, link: bool) -> SiteOutcome
     ``pl_sapw_area_filled`` should not have to know which route a site took.
     """
     kinds = _present_kinds(route)
+
+    md = _read_csv(route.asw_md_path)
+    _check_already_at_sapwood_scale(route, md)
+
+    # The converted route validates flags against data and raises. Copying
+    # verbatim is not a reason to skip the check -- it is the reason it was
+    # missing, and it left 181 of 226 sites outside the one guard that protects
+    # the pairing sap_analyzer relies on.
+    if "sapf_flags" in kinds and "sapf_data" in kinds:
+        check_flags_columns(
+            pd.read_csv(route.source_dir / f"{route.site}_sapf_flags.csv", nrows=0).columns,
+            pd.read_csv(route.source_dir / f"{route.site}_sapf_data.csv", nrows=0).columns,
+        )
+
     for kind in kinds:
         if kind == "plant_md":
             continue
@@ -153,7 +236,6 @@ def _assemble_native(route: SiteRoute, out_dir: Path, link: bool) -> SiteOutcome
             link,
         )
 
-    md = _read_csv(route.asw_md_path)
     md[UNITS_COL] = SAPWOOD_UNITS
     md[CONVERSION_COL] = NATIVE
     md.to_csv(out_dir / f"{route.site}_plant_md.csv", index=False, float_format=FLOAT_FORMAT)

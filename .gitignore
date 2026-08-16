@@ -50,6 +50,13 @@ outputs/
 __pycache__/
 *.pyc
 *.csv
+
+# The manual-QC removal log is source, not data: ~300 reviewed decisions that
+# exist nowhere else. It sat untracked until 2026-08-16, which meant it was
+# absent from Palma and every run there applied zero manual removals. Negated
+# here rather than force-added so it cannot silently fall out again.
+!removal_log.csv
+!removal_log.pending_review.csv
 *.png
 *.jpeg
 *.tif

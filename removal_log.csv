@@ -1,0 +1,353 @@
+entry_id,location,plant_type,column,start_time,end_time,issue_category,removal_type,notes,decision_date,reviewer
+3,AUS_CAN,ST2_MIX_sapf_data,AUS_CAN_ST2_MIX_Ame_Js_1,,,excessive variability during nighttime,column_entire,,2025-12-04,Yu
+1,AUS_CAN,ST2_MIX_sapf_data,AUS_CAN_ST2_MIX_Ame_Js_10,,,excessive variability during nighttime,column_entire,,2025-12-04,Yu
+2,AUS_CAN,ST2_MIX_sapf_data,AUS_CAN_ST2_MIX_Ame_Js_25,,,excessive variability during nighttime,column_entire,,2025-12-04,Yu
+5,AUS_CAN,ST3_ACA_sapf_data,AUS_CAN_ST3_ACA_Ame_Js_1,,,excessive variability during nighttime,column_entire,,2025-12-04,Yu
+4,AUS_CAN,ST3_ACA_sapf_data,AUS_CAN_ST3_ACA_Ame_Js_10,,,excessive variability during nighttime,column_entire,,2025-12-04,Yu
+6,AUS_CAN,ST3_ACA_sapf_data,AUS_CAN_ST3_ACA_Ame_Js_11,,,excessive variability during nighttime,column_entire,,2025-12-04,Yu
+301,AUS_ELL,HB_HIG_sapf_data,AUS_ELL_HB_HIG_Edi_Js_3,,,,column_entire,,,
+300,AUS_ELL,HB_HIG_sapf_data,AUS_ELL_HB_HIG_Era_Js_2,,,,column_entire,,,
+9,AUS_ELL,MB_MOD_sapf_data,AUS_ELL_MB_MOD_Era_Js_1,,,,column_entire,,,
+10,AUS_ELL,UNB_sapf_data,AUS_ELL_UNB_Era_Js_2,,,,column_entire,,,
+302,AUT_PAT,KRU_sapf_data,AUT_PAT_KRU_Pce_Js_1,,,,column_entire,,,
+303,AUT_PAT,KRU_sapf_data,AUT_PAT_KRU_Pce_Js_2,2007-04-22 00:00:00,2007-05-09 00:00:00,,period,,,
+304,AUT_PAT,KRU_sapf_data,AUT_PAT_KRU_Pce_Js_3,,,,column_entire,,,
+97,CAN_TUR,P39_POS_sapf_data,CAN_TUR_P39_POS_Pst_Js_12,2015-02-11 00:00:00,2016-03-01 00:00:00,,period,,2025-12-13,Yu
+98,CAN_TUR,P39_POS_sapf_data,CAN_TUR_P39_POS_Pst_Js_15,,,,column_entire,,2025-12-13,Yu
+99,CAN_TUR,P39_POS_sapf_data,CAN_TUR_P39_POS_Pst_Js_18,,,,column_entire,,2025-12-13,Yu
+100,CAN_TUR,P39_POS_sapf_data,CAN_TUR_P39_POS_Pst_Js_19,2015-12-31 00:00:00,2016-06-19 00:00:00,,period,,2025-12-13,Yu
+95,CAN_TUR,P39_POS_sapf_data,CAN_TUR_P39_POS_Pst_Js_3,,,,column_entire,,2025-12-13,Yu
+96,CAN_TUR,P39_POS_sapf_data,CAN_TUR_P39_POS_Pst_Js_9,,,,column_entire,,2025-12-13,Yu
+82,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_1,,,,column_entire,,2025-12-15,Yu
+88,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_11,,,,column_entire,,2025-12-15,Yu
+89,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_12,,,,column_entire,,2025-12-15,Yu
+90,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_14,,,,column_entire,,2025-12-15,Yu
+91,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_15,,,,column_entire,,2025-12-15,Yu
+92,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_19,,,,column_entire,,2025-12-15,Yu
+83,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_2,,,,column_entire,,2025-12-15,Yu
+93,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_21,,,,column_entire,,2025-12-15,Yu
+84,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_6,,,,column_entire,,2025-12-15,Yu
+85,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_7,,,,column_entire,,2025-12-15,Yu
+86,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_8,,,,column_entire,,2025-12-15,Yu
+87,CAN_TUR,P39_PRE_sapf_data,CAN_TUR_P39_PRE_Pst_Js_9,,,,column_entire,,2025-12-15,Yu
+105,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_1,,,,column_entire,,2025-12-15,Yu
+113,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_10,,,,column_entire,,2025-12-15,Yu
+114,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_11,,,,column_entire,,2025-12-15,Yu
+115,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_12,,,,column_entire,,2025-12-15,Yu
+116,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_14,,,,column_entire,,2025-12-15,Yu
+117,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_15,,,,column_entire,,2025-12-15,Yu
+118,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_16,,,,column_entire,,2025-12-15,Yu
+106,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_2,,,,column_entire,,2025-12-15,Yu
+107,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_3,,,,column_entire,,2025-12-15,Yu
+108,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_4,,,,column_entire,,2025-12-15,Yu
+109,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_5,,,,column_entire,,2025-12-15,Yu
+110,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_7,,,,column_entire,,2025-12-15,Yu
+111,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_8,,,,column_entire,,2025-12-15,Yu
+112,CAN_TUR,P74_sapf_data,CAN_TUR_P74_Pst_Js_9,,,,column_entire,,2025-12-15,Yu
+405,CHE_DAV,sapf_data,CHE_DAV_Pab_Js_10,,,,column_entire,,,
+404,CHE_DAV,sapf_data,CHE_DAV_Pab_Js_3,,,,column_entire,,,
+401,CHE_DAV,sapf_data,CHE_DAV_Pab_Js_6,,,,column_entire,,,
+402,CHE_DAV,sapf_data,CHE_DAV_Pab_Js_7,,,,column_entire,,,
+403,CHE_DAV,sapf_data,CHE_DAV_Pab_Js_9,,,,column_entire,,,
+412,CHE_LAE,sapf_data,CHE_LAE_Apl_Js_19,,,,column_entire,,,
+411,CHE_LAE,sapf_data,CHE_LAE_Fex_Js_18,,,,column_entire,,,
+407,CHE_LAE,sapf_data,CHE_LAE_Fsy_Js_2,,,,column_entire,,,
+408,CHE_LAE,sapf_data,CHE_LAE_Pab_Js_11,,,,column_entire,,,
+409,CHE_LAE,sapf_data,CHE_LAE_Pab_Js_15,,,,column_entire,,,
+410,CHE_LAE,sapf_data,CHE_LAE_Pab_Js_16,,,,column_entire,,,
+7,CHN_ARG,GWD_sapf_data,CHN_ARG_GWD_Peu_Js_1,2013-04-30 00:00:00,2013-05-17 00:00:00,reversed dirunal pattern,period,,2025-12-15,Yu
+8,CHN_ARG,GWD_sapf_data,CHN_ARG_GWD_Peu_Js_2,2013-04-30 00:00:00,2013-05-17 00:00:00,reversed dirunal pattern,period,,2025-12-15,Yu
+305,CZE_LIZ,LES_sapf_data,CZE_LIZ_LES_Pab_Jt_1,,,,column_entire,,,
+306,CZE_LIZ,LES_sapf_data,CZE_LIZ_LES_Pab_Jt_2,,,,column_entire,,,
+307,CZE_LIZ,LES_sapf_data,CZE_LIZ_LES_Pab_Jt_3,,,,column_entire,,,
+308,CZE_LIZ,LES_sapf_data,CZE_LIZ_LES_Pab_Jt_4,,,,column_entire,,,
+309,CZE_LIZ,LES_sapf_data,CZE_LIZ_LES_Pab_Jt_5,,,,column_entire,,,
+310,CZE_LIZ,LES_sapf_data,CZE_LIZ_LES_Pab_Jt_6,,,,column_entire,,,
+424,CZE_RAJ,sapf_data,CZE_RAJ_Pab_Jt_1,,,,column_entire,,,
+423,CZE_RAJ,sapf_data,CZE_RAJ_Pab_Jt_15,,,,column_entire,,,
+425,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_18,,,,column_entire,,,
+260,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_21,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+261,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_25,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+262,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_26,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+263,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_27,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+264,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_30,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+265,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_32,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+266,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_33,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+267,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_36,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+268,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_37,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+269,CZE_STN,sapf_data,CZE_STN_Fsy_Jt_38,2016-05-04 12:41:00,2016-05-04 23:59:59,post-outage recovery block delivered twice with conflicting values,period,27 h outage 2016-05-03 09:50 to 2016-05-04 12:40; the recovery afternoon was then delivered twice (rows at :00 and at :01) with 494 of 620 shared cells disagreeing; neither copy is trustworthy - roughness 0.094 and 0.162 vs 0.051-0.058 on neighbouring days and both read ~1.4 at night vs 87/197/310 on 05-02/05-05/05-06; dropping the whole block rather than choosing a copy,2026-08-12,Yu
+413,DEU_HOH,sapf_data,DEU_HOH_Fsy_Js_11,2023-01-01 00:00:00,2024-01-01 00:00:00,sensor rejected at review; no sensor level in corpus,period,"Converted to tree level 2026-08-16. Originally sensor-level: SF082_20_N_1 (1 of 2 probes on this tree, carrying 70.8% of its rows). The corpus has no sensor level -- Stage 1 averages probes into one series per tree -- so the rejected signal cannot be removed from the mean; the tree goes instead.",2026-08-16,Yu
+414,DEU_HOH,sapf_data,DEU_HOH_Qpe_Js_18,,,sensor rejected at review; no sensor level in corpus,column_entire,"Converted to tree level 2026-08-16. Originally sensor-level: SF185_20_NW_2, SF185_20_NW_1 (2 of 5 probes on this tree, carrying 63.5% of its rows). The corpus has no sensor level -- Stage 1 averages probes into one series per tree -- so the rejected signal cannot be removed from the mean; the tree goes instead.",2026-08-16,Yu
+416,DEU_HOH,sapf_data,DEU_HOH_Qpe_Js_23,,,sensor rejected at review; no sensor level in corpus,column_entire,"Converted to tree level 2026-08-16. Originally sensor-level: SF194_20_N_2 (1 of 4 probes on this tree, carrying 40.2% of its rows). The corpus has no sensor level -- Stage 1 averages probes into one series per tree -- so the rejected signal cannot be removed from the mean; the tree goes instead.",2026-08-16,Yu
+417,DEU_HOH,sapf_data,DEU_HOH_Qpe_Js_28,,,sensor rejected at review; no sensor level in corpus,column_entire,"Converted to tree level 2026-08-16. Originally sensor-level: SF301_20_NNE_1, SF301_20_NNE_2 (2 of 4 probes on this tree, carrying 79.4% of its rows). The corpus has no sensor level -- Stage 1 averages probes into one series per tree -- so the rejected signal cannot be removed from the mean; the tree goes instead.",2026-08-16,Yu
+325,ESP_CAN,sapf_data,ESP_CAN_Aun_Js_21,,,,column_entire,,,
+326,ESP_CAN,sapf_data,ESP_CAN_Pha_Js_10,,,,column_entire,,,
+11,ESP_CAN,sapf_data,ESP_CAN_Pha_Js_8,2011-09-21 00:00:00,2011-10-25 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+319,ESP_CAN,sapf_data,ESP_CAN_Pha_Js_8,2012-06-15 00:00:00,2012-09-30 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+12,ESP_CAN,sapf_data,ESP_CAN_Pha_Js_9,2011-09-21 00:00:00,2011-10-25 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+320,ESP_CAN,sapf_data,ESP_CAN_Pha_Js_9,2012-06-06 00:00:00,2012-09-30 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+324,ESP_CAN,sapf_data,ESP_CAN_Pha_Js_9,,,,column_entire,,,
+327,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_11,,,,column_entire,,,
+328,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_12,,,,column_entire,,,
+13,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_13,2011-10-13 00:00:00,2011-10-25 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+321,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_13,2012-09-15 00:00:00,2012-09-21 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+330,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_14,,,,column_entire,,,
+14,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_16,2011-10-21 00:00:00,2011-10-25 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+15,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_17,2011-10-22 00:00:00,2011-10-25 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+322,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_17,2011-11-04 00:00:00,2011-11-06 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+323,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_17,2012-09-15 00:00:00,2012-09-20 00:00:00,wrong seasonal pattern,period,,2025-12-15,Yu
+331,ESP_CAN,sapf_data,ESP_CAN_Qil_Js_17,,,,column_entire,,,
+329,ESP_CAN,sapf_data,ESP_CAN_Qpu_Js_5,,,,column_entire,,,
+16,ESP_GUA,VAL_sapf_data,ESP_GUA_VAL_Qpy_Jt_13,,,wrong seasonal pattern,column_entire,,2025-12-15,Yu
+17,ESP_GUA,VAL_sapf_data,ESP_GUA_VAL_Qpy_Jt_14,,,wrong seasonal pattern,column_entire,,2025-12-15,Yu
+18,ESP_GUA,VAL_sapf_data,ESP_GUA_VAL_Qpy_Jt_15,,,wrong seasonal pattern,column_entire,,2025-12-15,Yu
+51,ESP_MAJ,MAI_sapf_data,ESP_MAJ_MAI_Qro_Js_1,2016-03-30 00:00:00,2018-01-08 00:00:00,nosiy data,period,,2025-12-04,Yu
+52,ESP_MAJ,MAI_sapf_data,ESP_MAJ_MAI_Qro_Js_2,2015-10-09 00:00:00,2018-01-08 00:00:00,nosiy data,period,,2025-12-04,Yu
+53,ESP_MAJ,MAI_sapf_data,ESP_MAJ_MAI_Qro_Js_3,2015-06-12 00:00:00,2017-03-24 00:00:00,nosiy data,period,,2025-12-04,Yu
+54,ESP_MAJ,MAI_sapf_data,ESP_MAJ_MAI_Qro_Js_4,2015-10-06 00:00:00,2018-01-08 00:00:00,nosiy data,period,,2025-12-04,Yu
+55,ESP_MAJ,MAI_sapf_data,ESP_MAJ_MAI_Qro_Js_5,2015-10-06 00:00:00,2018-01-08 00:00:00,nosiy data,period,,2025-12-04,Yu
+56,ESP_MAJ,MAI_sapf_data,ESP_MAJ_MAI_Qro_Js_6,2015-06-25 00:00:00,2015-10-06 00:00:00,nosiy data,period,,2025-12-04,Yu
+388,ESP_MAJ,MAI_sapf_data,ESP_MAJ_MAI_Qro_Js_6,2016-03-30 00:00:00,2018-01-07 00:00:00,nosiy data,period,,2025-12-04,Yu
+57,ESP_MAJ,NOR_LM1_sapf_data,ESP_MAJ_NOR_LM1_Qro_Js_1,2015-10-06 00:00:00,2018-01-08 00:00:00,nosiy data,period,,2025-12-04,Yu
+58,ESP_MAJ,NOR_LM1_sapf_data,ESP_MAJ_NOR_LM1_Qro_Js_2,2015-10-06 00:00:00,2018-01-08 00:00:00,nosiy data,period,,2025-12-04,Yu
+59,ESP_MAJ,NOR_LM1_sapf_data,ESP_MAJ_NOR_LM1_Qro_Js_3,2015-10-06 00:00:00,2018-01-08 00:00:00,nosiy data,period,,2025-12-04,Yu
+60,ESP_MAJ,NOR_LM1_sapf_data,ESP_MAJ_NOR_LM1_Qro_Js_4,2015-10-30 00:00:00,2017-02-28 00:00:00,nosiy data,period,,2025-12-04,Yu
+61,ESP_MAJ,NOR_LM1_sapf_data,ESP_MAJ_NOR_LM1_Qro_Js_5,2015-10-06 00:00:00,2018-01-08 00:00:00,nosiy data,period,,2025-12-04,Yu
+62,ESP_MAJ,NOR_LM1_sapf_data,ESP_MAJ_NOR_LM1_Qro_Js_6,2015-08-16 00:00:00,2018-01-07 00:00:00,nosiy data,period,,2025-12-04,Yu
+19,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_1,2010-07-27 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+332,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_1,2011-07-10 00:00:00,2011-11-07 00:00:00,,period,,2025-12-15,Yu
+333,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_1,2012-07-22 00:00:00,2012-10-18 00:00:00,,period,,2025-12-15,Yu
+334,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_1,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+28,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_10,2010-08-28 00:00:00,2010-08-31 00:00:00,,period,,2025-12-15,Yu
+358,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_10,2011-07-18 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+359,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_10,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+360,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_10,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+29,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_11,2010-08-28 00:00:00,2010-08-30 00:00:00,,period,,2025-12-15,Yu
+361,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_11,2011-07-18 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+362,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_11,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+363,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_11,2013-07-29 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+30,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_12,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+364,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_12,2011-07-18 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+365,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_12,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+366,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_12,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+31,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_13,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+367,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_13,2011-07-18 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+368,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_13,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+369,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_13,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+32,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_14,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+370,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_14,2011-07-18 00:00:00,2012-03-21 00:00:00,,period,,2025-12-15,Yu
+371,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_14,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+372,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_14,2013-07-29 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+33,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_15,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+373,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_15,2011-07-18 00:00:00,2013-03-20 00:00:00,,period,,2025-12-15,Yu
+374,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_15,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+34,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_16,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+375,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_16,2011-07-18 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+376,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_16,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+377,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_16,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+35,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_17,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+378,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_17,2011-07-18 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+379,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_17,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+380,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_17,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+36,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_18,2011-07-18 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+381,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_18,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+382,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_18,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+37,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_19,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+383,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_19,2011-07-18 00:00:00,2011-12-27 00:00:00,,period,,2025-12-15,Yu
+384,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_19,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+385,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_19,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+20,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_2,2010-07-24 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+335,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_2,2011-07-07 00:00:00,2011-10-24 00:00:00,,period,,2025-12-15,Yu
+336,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_2,2012-04-07 00:00:00,2012-05-09 00:00:00,,period,,2025-12-15,Yu
+337,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_2,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+38,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_20,2013-07-10 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+39,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_21,2012-07-31 00:00:00,2012-09-29 00:00:00,,period,,2025-12-15,Yu
+386,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_21,2013-08-01 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+40,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_22,2012-07-31 00:00:00,2012-09-29 00:00:00,,period,,2025-12-15,Yu
+387,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_22,2013-08-01 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+21,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_3,2010-07-27 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+338,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_3,2011-07-18 00:00:00,2011-10-23 00:00:00,,period,,2025-12-15,Yu
+339,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_3,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+340,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_3,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+22,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_4,2010-08-28 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+341,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_4,2011-07-18 00:00:00,2011-10-23 00:00:00,,period,,2025-12-15,Yu
+342,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_4,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+343,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_4,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+23,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_5,2010-08-28 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+344,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_5,2011-07-18 00:00:00,2011-11-01 00:00:00,,period,,2025-12-15,Yu
+345,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_5,2012-07-21 00:00:00,2012-09-06 00:00:00,,period,,2025-12-15,Yu
+346,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_5,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+24,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_6,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+347,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_6,2011-07-07 00:00:00,2012-01-30 00:00:00,,period,,2025-12-15,Yu
+348,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_6,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+349,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_6,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+25,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_7,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+350,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_7,2011-07-18 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+351,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_7,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+352,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_7,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+26,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_8,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+353,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_8,2011-12-08 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+354,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_8,2013-08-06 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+27,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_9,2010-08-11 00:00:00,2010-09-18 00:00:00,,period,,2025-12-15,Yu
+355,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_9,2011-07-18 00:00:00,2012-01-31 00:00:00,,period,,2025-12-15,Yu
+356,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_9,2012-07-21 00:00:00,2013-03-07 00:00:00,,period,,2025-12-15,Yu
+357,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Psy_Js_9,2013-07-30 00:00:00,2013-10-03 00:00:00,,period,,2025-12-15,Yu
+41,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Qil_Js_23,2011-08-31 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+42,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Qil_Js_24,2011-08-31 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+43,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Qil_Js_25,2011-08-31 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+44,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Qil_Js_26,2011-08-31 00:00:00,2012-01-31 00:00:00,,period,,2025-12-15,Yu
+45,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Qil_Js_27,2011-10-01 00:00:00,2012-02-01 00:00:00,,period,,2025-12-15,Yu
+46,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Qil_Js_28,2011-08-11 00:00:00,2011-11-02 00:00:00,,period,,2025-12-15,Yu
+47,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Qil_Js_29,,,,column_entire,,2025-12-15,Yu
+48,ESP_TIL,MIX_sapf_data,ESP_TIL_MIX_Qil_Js_31,2011-08-31 00:00:00,2012-02-01 00:00:00,,period,,2025-12-15,Yu
+66,FRA_PUE,sapf_data,FRA_PUE_Qil_Js_10,2013-01-01 00:00:00,2015-12-30 00:00:00,,period,,2025-12-15,Yu
+67,FRA_PUE,sapf_data,FRA_PUE_Qil_Js_11,2013-01-01 00:00:00,2015-12-30 00:00:00,,period,,2025-12-15,Yu
+68,FRA_PUE,sapf_data,FRA_PUE_Qil_Js_13,2013-01-01 00:00:00,2015-12-30 00:00:00,,period,,2025-12-15,Yu
+69,FRA_PUE,sapf_data,FRA_PUE_Qil_Js_14,2013-01-01 00:00:00,2015-12-30 00:00:00,,period,,2025-12-15,Yu
+70,FRA_PUE,sapf_data,FRA_PUE_Qil_Js_15,2013-01-01 00:00:00,2015-12-30 00:00:00,,period,,2025-12-15,Yu
+71,FRA_PUE,sapf_data,FRA_PUE_Qil_Js_16,2013-01-01 00:00:00,2015-12-30 00:00:00,,period,,2025-12-15,Yu
+72,FRA_PUE,sapf_data,FRA_PUE_Qil_Js_17,2013-01-01 00:00:00,2015-12-30 00:00:00,,period,,2025-12-15,Yu
+73,FRA_PUE,sapf_data,FRA_PUE_Qil_Js_18,2013-01-01 00:00:00,2015-12-30 00:00:00,,period,,2025-12-15,Yu
+419,ITA_CP2,sapf_data,ITA_CP2_Qil_Js_1,,,,column_entire,,,
+420,ITA_CP2,sapf_data,ITA_CP2_Qil_Js_2,,,,column_entire,,,
+421,ITA_CP2,sapf_data,ITA_CP2_Qil_Js_5,,,,column_entire,,,
+75,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_1,2015-03-04 00:00:00,2015-05-16 00:00:00,,period,,2025-12-15,Yu
+389,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_1,2015-09-28 00:00:00,2016-06-05 00:00:00,,period,,2025-12-15,Yu
+390,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_1,2016-10-05 00:00:00,2016-12-31 00:00:00,,period,,2025-12-15,Yu
+76,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_2,2015-03-04 00:00:00,2015-05-16 00:00:00,,period,,2025-12-15,Yu
+391,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_2,2015-09-28 00:00:00,2016-06-05 00:00:00,,period,,2025-12-15,Yu
+392,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_2,2016-10-05 00:00:00,2016-12-31 00:00:00,,period,,2025-12-15,Yu
+77,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_3,2015-03-04 00:00:00,2015-05-16 00:00:00,,period,,2025-12-15,Yu
+393,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_3,2015-09-28 00:00:00,2016-06-05 00:00:00,,period,,2025-12-15,Yu
+394,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_3,2016-10-05 00:00:00,2016-12-31 00:00:00,,period,,2025-12-15,Yu
+78,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_4,2015-03-04 00:00:00,2015-05-16 00:00:00,,period,,2025-12-15,Yu
+395,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_4,2015-09-28 00:00:00,2016-06-05 00:00:00,,period,,2025-12-15,Yu
+396,ITA_TOR,sapf_data,ITA_TOR_Lde_Js_4,2016-10-05 00:00:00,2016-12-31 00:00:00,,period,,2025-12-15,Yu
+426,NOR_HUR,sapf_data,NOR_HUR_Pab_Jt_1,2023-01-01 00:00:00,2023-12-31 00:00:00,,period,,,
+427,NOR_HUR,sapf_data,NOR_HUR_Pab_Jt_2,2023-01-01 00:00:00,2023-12-31 00:00:00,,period,,,
+428,NOR_HUR,sapf_data,NOR_HUR_Pab_Jt_3,2023-01-01 00:00:00,2023-12-31 00:00:00,,period,,,
+429,NOR_HUR,sapf_data,NOR_HUR_Pab_Jt_4,2023-01-01 00:00:00,2023-12-31 00:00:00,,period,,,
+430,NOR_HUR,sapf_data,NOR_HUR_Pab_Jt_5,2023-01-01 00:00:00,2023-12-31 00:00:00,,period,,,
+431,NOR_HUR,sapf_data,NOR_HUR_Pab_Jt_6,2023-01-01 00:00:00,2023-12-31 00:00:00,,period,,,
+397,SWE_NOR,ST1_AF1_sapf_data,SWE_NOR_ST1_AF1_Pab_Jt_11,,,,column_entire,,2025-12-16,Yu
+398,SWE_NOR,ST1_AF1_sapf_data,SWE_NOR_ST1_AF1_Pab_Jt_4,,,,column_entire,,2025-12-17,Yu
+399,SWE_NOR,ST1_AF1_sapf_data,SWE_NOR_ST1_AF1_Pab_Jt_5,,,,column_entire,,2025-12-18,Yu
+400,SWE_NOR,ST1_AF1_sapf_data,SWE_NOR_ST1_AF1_Pab_Jt_6,,,,column_entire,,2025-12-19,Yu
+120,SWE_NOR,ST1_AF1_sapf_data,SWE_NOR_ST1_AF1_Pab_Jt_8,,,,column_entire,,2025-12-15,Yu
+121,SWE_NOR,ST1_AF1_sapf_data,SWE_NOR_ST1_AF1_Psy_Jt_10,,,,column_entire,,2025-12-15,Yu
+127,SWE_SKY,68Y_sapf_data,SWE_SKY_68Y_Pab_Jt_11,,,,column_entire,,2025-12-15,Yu
+124,SWE_SKY,68Y_sapf_data,SWE_SKY_68Y_Pab_Jt_5,,,,column_entire,,2025-12-15,Yu
+125,SWE_SKY,68Y_sapf_data,SWE_SKY_68Y_Pab_Jt_6,,,,column_entire,,2025-12-15,Yu
+123,SWE_SKY,68Y_sapf_data,SWE_SKY_68Y_Psy_Jt_1,,,,column_entire,,2025-12-15,Yu
+128,SWE_SKY,68Y_sapf_data,SWE_SKY_68Y_Psy_Jt_12,,,,column_entire,,2025-12-15,Yu
+126,SWE_SKY,68Y_sapf_data,SWE_SKY_68Y_Psy_Jt_7,,,,column_entire,,2025-12-15,Yu
+311,USA_BNZ,BLA_sapf_data,USA_BNZ_BLA_Pma_Js_1,,,,column_entire,,,
+312,USA_BNZ,BLA_sapf_data,USA_BNZ_BLA_Pma_Js_2,2012-06-10 00:00:00,2013-06-05 00:00:00,,period,,,
+313,USA_BNZ,BLA_sapf_data,USA_BNZ_BLA_Pma_Js_3,2012-06-10 00:00:00,2013-06-05 00:00:00,,period,,,
+314,USA_BNZ,BLA_sapf_data,USA_BNZ_BLA_Pma_Js_4,2012-06-10 00:00:00,2013-06-05 00:00:00,,period,,,
+315,USA_BNZ,BLA_sapf_data,USA_BNZ_BLA_Pma_Js_5,2012-06-10 00:00:00,2013-06-05 00:00:00,,period,,,
+316,USA_BNZ,BLA_sapf_data,USA_BNZ_BLA_Pma_Js_6,,,,column_entire,,,
+139,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Aba_Js_138,,,,column_entire,,2025-12-24,Yu
+133,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Aba_Js_34,,,,column_entire,,2025-12-18,Yu
+134,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Aba_Js_50,,,,column_entire,,2025-12-19,Yu
+136,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Aba_Js_79,,,,column_entire,,2025-12-21,Yu
+140,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Aru_Js_125,,,,column_entire,,2025-12-25,Yu
+141,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Asa_Js_134,,,,column_entire,,2025-12-26,Yu
+130,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Bpa_Js_20,,,,column_entire,,2025-12-15,Yu
+138,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Ptr_Js_131,,,,column_entire,,2025-12-23,Yu
+132,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Ptr_Js_26,,,,column_entire,,2025-12-17,Yu
+135,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Ptr_Js_78,,,,column_entire,,2025-12-20,Yu
+137,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Ptr_Js_92,,,,column_entire,,2025-12-22,Yu
+131,USA_CHE,ASP_sapf_data,USA_CHE_ASP_Toc_Js_24,,,,column_entire,,2025-12-16,Yu
+143,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Aru_Js_11,,,,column_entire,,2025-12-16,Yu
+144,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Aru_Js_12,,,,column_entire,,2025-12-16,Yu
+146,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Lst_Js_10,,,,column_entire,,2025-12-16,Yu
+145,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Lst_Js_9,,,,column_entire,,2025-12-16,Yu
+150,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Ltu_Js_22,,,,column_entire,,2025-12-16,Yu
+151,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Ltu_Js_23,,,,column_entire,,2025-12-16,Yu
+152,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Ltu_Js_24,,,,column_entire,,2025-12-16,Yu
+153,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Ltu_Js_25,,,,column_entire,,2025-12-16,Yu
+147,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Qsp_Js_18,,,,column_entire,,2025-12-16,Yu
+148,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Qsp_Js_19,,,,column_entire,,2025-12-16,Yu
+149,USA_HIL,HF1_POS_sapf_data,USA_HIL_HF1_POS_Qsp_Js_20,,,,column_entire,,2025-12-16,Yu
+164,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Pri_Js_11,,,,column_entire,,2025-12-16,Yu
+169,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qco_Js_10,,,,column_entire,,2025-12-16,Yu
+155,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qmo_Js_1,,,,column_entire,,2025-12-16,Yu
+156,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qmo_Js_2,,,,column_entire,,2025-12-16,Yu
+157,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qmo_Js_3,,,,column_entire,,2025-12-16,Yu
+158,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qmo_Js_4,,,,column_entire,,2025-12-16,Yu
+159,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qmo_Js_5,,,,column_entire,,2025-12-16,Yu
+160,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qmo_Js_6,,,,column_entire,,2025-12-16,Yu
+161,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qmo_Js_7,,,,column_entire,,2025-12-16,Yu
+165,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qve_Js_12,,,,column_entire,,2025-12-16,Yu
+166,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qve_Js_13,,,,column_entire,,2025-12-16,Yu
+167,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qve_Js_14,,,,column_entire,,2025-12-16,Yu
+318,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qve_Js_15,,,,column_entire,,,
+168,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qve_Js_17,,,,column_entire,,2025-12-16,Yu
+162,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qve_Js_8,,,,column_entire,,2025-12-16,Yu
+317,USA_SIL,OAK_1PR_sapf_data,USA_SIL_OAK_1PR_Qve_Js_9,,,,column_entire,,,
+191,USA_SIL,OAK_2PR_sapf_data,USA_SIL_OAK_2PR_Qmo_Jt_3,,,,column_entire,,2025-12-16,Yu
+192,USA_SIL,OAK_2PR_sapf_data,USA_SIL_OAK_2PR_Qmo_Jt_4,,,,column_entire,,2025-12-16,Yu
+193,USA_SIL,OAK_2PR_sapf_data,USA_SIL_OAK_2PR_Qmo_Jt_5,,,,column_entire,,2025-12-16,Yu
+196,USA_SIL,OAK_2PR_sapf_data,USA_SIL_OAK_2PR_Qve_Jt_10,,,,column_entire,,2025-12-16,Yu
+197,USA_SIL,OAK_2PR_sapf_data,USA_SIL_OAK_2PR_Qve_Jt_11,,,,column_entire,,2025-12-16,Yu
+194,USA_SIL,OAK_2PR_sapf_data,USA_SIL_OAK_2PR_Qve_Jt_8,,,,column_entire,,2025-12-16,Yu
+195,USA_SIL,OAK_2PR_sapf_data,USA_SIL_OAK_2PR_Qve_Jt_9,,,,column_entire,,2025-12-16,Yu
+172,USA_TNB,sapf_data,USA_TNB_Aru_Js_3,,,,column_entire,,2025-12-16,Yu
+173,USA_TNB,sapf_data,USA_TNB_Qfa_Js_7,,,,column_entire,,2025-12-16,Yu
+174,USA_TNB,sapf_data,USA_TNB_Qve_Js_5,,,,column_entire,,2025-12-16,Yu
+175,USA_TNB,sapf_data,USA_TNB_Qve_Js_6,,,,column_entire,,2025-12-16,Yu
+181,USA_TNO,sapf_data,USA_TNO_Aru_Js_2,,,,column_entire,,2025-12-16,Yu
+182,USA_TNO,sapf_data,USA_TNO_Aru_Js_3,,,,column_entire,,2025-12-17,Yu
+178,USA_TNO,sapf_data,USA_TNO_Qpr_Js_7,,,,column_entire,,2025-12-16,Yu
+179,USA_TNO,sapf_data,USA_TNO_Qpr_Js_8,,,,column_entire,,2025-12-16,Yu
+180,USA_TNO,sapf_data,USA_TNO_Qru_Js_9,,,,column_entire,,2025-12-16,Yu
+184,USA_TNY,sapf_data,USA_TNY_Aru_Js_3,,,,column_entire,,2025-12-17,Yu
+185,USA_TNY,sapf_data,USA_TNY_Ltu_Js_5,,,,column_entire,,2025-12-17,Yu
+186,USA_TNY,sapf_data,USA_TNY_Pse_Js_8,,,,column_entire,,2025-12-17,Yu
+212,USA_UMB,CON_sapf_data,USA_UMB_CON_Aru_Js_29,,,,column_entire,,2025-12-19,Yu
+220,USA_UMB,CON_sapf_data,USA_UMB_CON_Aru_Js_52,,,,column_entire,,2025-12-19,Yu
+221,USA_UMB,CON_sapf_data,USA_UMB_CON_Aru_Js_56,,,,column_entire,,2025-12-19,Yu
+214,USA_UMB,CON_sapf_data,USA_UMB_CON_Bpa_Js_33,,,,column_entire,,2025-12-19,Yu
+215,USA_UMB,CON_sapf_data,USA_UMB_CON_Bpa_Js_37,,,,column_entire,,2025-12-19,Yu
+216,USA_UMB,CON_sapf_data,USA_UMB_CON_Bpa_Js_39,,,,column_entire,,2025-12-19,Yu
+210,USA_UMB,CON_sapf_data,USA_UMB_CON_Pgr_Js_22,,,,column_entire,,2025-12-19,Yu
+211,USA_UMB,CON_sapf_data,USA_UMB_CON_Pgr_Js_27,,,,column_entire,,2025-12-19,Yu
+213,USA_UMB,CON_sapf_data,USA_UMB_CON_Pgr_Js_30,,,,column_entire,,2025-12-19,Yu
+218,USA_UMB,CON_sapf_data,USA_UMB_CON_Pgr_Js_48,,,,column_entire,,2025-12-19,Yu
+206,USA_UMB,CON_sapf_data,USA_UMB_CON_Pst_Js_1,,,,column_entire,,2025-12-19,Yu
+208,USA_UMB,CON_sapf_data,USA_UMB_CON_Pst_Js_14,,,,column_entire,,2025-12-19,Yu
+217,USA_UMB,CON_sapf_data,USA_UMB_CON_Pst_Js_43,,,,column_entire,,2025-12-19,Yu
+219,USA_UMB,CON_sapf_data,USA_UMB_CON_Pst_Js_50,,,,column_entire,,2025-12-19,Yu
+207,USA_UMB,CON_sapf_data,USA_UMB_CON_Pst_Js_6,,,,column_entire,,2025-12-19,Yu
+209,USA_UMB,CON_sapf_data,USA_UMB_CON_Qru_Js_16,,,,column_entire,,2025-12-19,Yu
+229,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Aru_Js_14,,,,column_entire,,2025-12-16,Yu
+230,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Aru_Js_16,,,,column_entire,,2025-12-16,Yu
+231,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Aru_Js_17,,,,column_entire,,2025-12-16,Yu
+224,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Aru_Js_3,,,,column_entire,,2025-12-16,Yu
+238,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Fgr_Js_30,,,,column_entire,,2025-12-16,Yu
+239,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Fgr_Js_31,,,,column_entire,,2025-12-16,Yu
+240,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Fgr_Js_32,,,,column_entire,,2025-12-16,Yu
+243,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Fgr_Js_37,,,,column_entire,,2025-12-16,Yu
+244,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Fgr_Js_40,,,,column_entire,,2025-12-16,Yu
+245,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Fgr_Js_41,,,,column_entire,,2025-12-16,Yu
+233,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Pst_Js_21,,,,column_entire,,2025-12-16,Yu
+234,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Pst_Js_23,,,,column_entire,,2025-12-16,Yu
+235,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Pst_Js_25,,,,column_entire,,2025-12-16,Yu
+236,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Pst_Js_26,,,,column_entire,,2025-12-16,Yu
+225,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Pst_Js_5,,,,column_entire,,2025-12-16,Yu
+227,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Pst_Js_8,,,,column_entire,,2025-12-16,Yu
+228,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Pst_Js_9,,,,column_entire,,2025-12-16,Yu
+232,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_20,,,,column_entire,,2025-12-16,Yu
+237,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_27,,,,column_entire,,2025-12-16,Yu
+241,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_35,,,,column_entire,,2025-12-16,Yu
+242,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_36,,,,column_entire,,2025-12-16,Yu
+246,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_44,,,,column_entire,,2025-12-16,Yu
+247,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_46,,,,column_entire,,2025-12-16,Yu
+248,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_51,,,,column_entire,,2025-12-16,Yu
+249,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_54,,,,column_entire,,2025-12-16,Yu
+226,USA_UMB,GIR_sapf_data,USA_UMB_GIR_Qru_Js_7,,,,column_entire,,2025-12-16,Yu
+201,USA_WVF,sapf_data,USA_WVF_Pse_Js_4,,,,column_entire,,2025-12-16,Yu
+202,USA_WVF,sapf_data,USA_WVF_Qal_Js_6,,,,column_entire,,2025-12-17,Yu
+203,USA_WVF,sapf_data,USA_WVF_Qru_Js_7,,,,column_entire,,2025-12-18,Yu
+204,USA_WVF,sapf_data,USA_WVF_Qru_Js_8,,,,column_entire,,2025-12-19,Yu

@@ -302,8 +302,13 @@ averaged into. Justified by contamination, not convenience:
 | 301 | `DEU_HOH_Qpe_Js_28` | 4 | 2 | **79.4%** |
 
 What survives aggregation is majority-bad in three of four, so dropping the tree
-is the honest reading rather than an over-removal. Cost: 4 of DEU_HOH's 28
-trees, 14% of the site. Each converted row's `notes` records the original sensor
+is the honest reading rather than an over-removal. Cost: ~~4 of DEU_HOH's 28
+trees, 14% of the site~~ — **corrected 2026-08-17 from the validation run: 3
+whole trees plus one tree's 2023 season, so the site ends with 25 trees carrying
+data, not 24.** Tree 082's row is a `period` row and keeps its bounds (as the
+next paragraph says), so it retains 14,988 of its 19,587 records. The two claims
+were inconsistent with each other from the day they were written; only measuring
+the output caught it. Each converted row's `notes` records the original sensor
 names, the probe count and the share, so the provenance survives the conversion.
 The 082 row keeps its `period` bounds — conversion changed the *level*, not the
 window.
@@ -797,10 +802,24 @@ test did not itself produce.
     act, for any cause. **Met** (job 46188462, 0 of 352). Any future row that
     names a sensor rather than a tree fails this immediately, which is the
     property that was missing when 33 rows sat unnoticed.
-13b. **The 4 converted tree removals actually fire.** In the validation run,
-    `DEU_HOH_Qpe_Js_18`, `_Qpe_Js_23`, `_Qpe_Js_28` are absent from the Stage-3
-    output and `DEU_HOH_Fsy_Js_11` is empty across 2023 — checked against the
-    output, not against the removal report. DEU_HOH ends with 24 usable trees.
+13b. **The 4 converted tree removals actually fire. MET — with two corrections
+    to this criterion's own wording, 2026-08-17 (job 46192753).** Measured
+    against the output, not the removal report, as required.
+
+    - `DEU_HOH_Qpe_Js_18`, `_Qpe_Js_23`, `_Qpe_Js_28`: **0 non-null of 82,778**,
+      from 23,930 / 16,312 / 15,960 in the raw. ~~absent from the Stage-3
+      output~~ — they are **present as headers and entirely NaN** in
+      `outliers_removed`, because `apply_removals` blanks a `column_entire`
+      rather than dropping it, and are absent from the `daily/` file one stage
+      later. The removal fires; "absent" named the wrong artifact.
+    - `DEU_HOH_Fsy_Js_11`: **0 non-null in 2023, 14,988 outside it.** Exact.
+    - ~~DEU_HOH ends with 24 usable trees~~ → **25**. 28 columns, 3 fully
+      blanked. The fourth conversion is a `period` row and keeps its bounds, so
+      that tree retains 14,988 of its 19,587 records (76.5%) and is still
+      usable. This also corrects §2d, which claims both that the 082 row "keeps
+      its `period` bounds" and that the cost is "4 of DEU_HOH's 28 trees" —
+      those cannot both hold. **The cost is 3 trees plus one tree's 2023
+      season**, not 4 trees.
 13c. **DEU_HAR keeps all 10 trees.** The deletion of its 10 log rows must change
     nothing: `DEU_HAR`'s Stage-3 output is byte-identical to a run before this
     change. This is the check that would have caught converting group B by

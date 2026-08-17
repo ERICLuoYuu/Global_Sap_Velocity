@@ -747,6 +747,21 @@ test did not itself produce.
 3. **Env QC completes for all 24 flagless sites.** Today the number is 0.
 4. **No regression.** For the 202 external sites, every Stage-3 output file is
    byte-identical to the pre-change run. Target: 0 files differ.
+
+   *Scope correction, 2026-08-17.* The first pass scored this on **8 of the 202**
+   — `job_qc_validate.sh` says so in a comment ("chosen small so the comparison
+   completes"), but the narrowing never left that file: the deviations row, the
+   commit message and the run report all recorded "411 of 411 external output
+   files byte-identical" without saying the 411 files came from 8 sites. 411 is
+   a file count, not a site count. Re-scored over all 202 by
+   `job_qc_full_ext.sh`, which derives the site list from the corpus (`ls
+   *_env_flags.csv`) rather than a pasted constant, so it cannot drift from the
+   census. Note what the sample does *not* threaten: the masking **decision** is
+   already measured corpus-wide by criteria 6, 7 and 15b, and D-5 measured
+   `columns_exact_absent = 0` across all 202. The residual risk the sample
+   leaves is in the surrounding plumbing — dtypes, export gating, row order —
+   which is exactly what the byte gate exists to catch and exactly what the
+   `CHN_YIN_ST3_DRO` int64/float64 finding turned out to be.
 5. **QC columns are not variables.** No `*_qc` column appears in any env QC
    output — outliers-removed, standardized, or daily.
 6. **Propagation — at the 19 ICOS sites only.** `ppfd_in` is masked on exactly

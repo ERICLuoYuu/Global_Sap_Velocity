@@ -796,7 +796,7 @@ test did not itself produce.
    Criterion 4 is complete at 202/202, not 201/202.
 
    *The scored set had a hole, found the same day and closed.* This comparison
-   first reported 14,476 files as 14,274: `is_scored` matched a site code as a
+   first reported 14,274 identical files rather than the 14,476 above: `is_scored` matched a site code as a
    basename **prefix**, and the env exporter writes `daily_{SITE}_env_data.csv`,
    so one real Stage-3 output per external site — 202 in all — was scored by
    **neither** population and went unmeasured for the whole exercise. They are

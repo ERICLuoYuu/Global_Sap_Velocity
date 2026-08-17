@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=qcextrad
-#SBATCH --partition=normal
+#SBATCH --partition=long
 #SBATCH --array=0-23
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
-#SBATCH --time=48:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --output=/scratch/tmp/yluo2/gsv/logs/qcextrad_%A_%a.out
 #SBATCH --error=/scratch/tmp/yluo2/gsv/logs/qcextrad_%A_%a.err
 

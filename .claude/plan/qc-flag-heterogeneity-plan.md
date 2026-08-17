@@ -745,6 +745,20 @@ test did not itself produce.
    outcome carries either masked counts or a skip reason. Zero sites reach the
    bare `except`.
 3. **Env QC completes for all 24 flagless sites.** Today the number is 0.
+
+   *Measured corpus-wide, 2026-08-17 (job 46228827).* Daily env outputs across
+   the two full-corpus arms: **before 202, after 225**. The 202 present in both
+   are exactly the 202 external sites, byte-identical; the **23** that appear
+   only in the new run are every internal site except `SWE_NOR`, which is the
+   deliberate skip (no env variables at all). So the criterion holds at **23 of
+   24, with the 24th skipped for a stated reason** — env QC had genuinely never
+   completed for a single internal site. The earlier "8 -> 11" figure was the
+   same fact on the 12-site sample.
+
+   These files were found by an audit of what *neither* site list scored, not by
+   the criterion-4 comparison: they are named `daily_{SITE}_env_data.csv`, and
+   the comparer matched site codes as a basename **prefix**, so the `daily_`
+   prefix hid all 202 of them. Fixed to a substring match.
 4. **No regression.** For the 202 external sites, every Stage-3 output file is
    byte-identical to the pre-change run. Target: 0 files differ.
 
@@ -765,9 +779,9 @@ test did not itself produce.
 
    *Re-scored, 2026-08-17.* Both arms re-run over the **whole corpus**, one site
    per array task (`job_qc_full226.sh before|after`, 226 tasks each), compared by
-   `job_qc_compare225.sh` (job 46228406, 10 min on 1 cpu). Result: **14,274 of
-   14,274 external output files byte-identical, 0 differing, across 202 of 202
-   external sites** — 34.7x the files and 25x the sites of the first pass. 1,601
+   `job_qc_compare225.sh` (job 46228406, 10 min on 1 cpu). Result: **14,476 of
+   14,476 external output files byte-identical, 0 differing, across 202 of 202
+   external sites** — 35.2x the files and 25x the sites of the first pass. 1,601
    files are no longer written, **all verified header-only** (the D-6 fix), and
    **0** files appear at an external site that did not exist before. The one
    defect the 8-site sample had caught (`CHN_YIN_ST3_DRO` int64/float64) recurs
@@ -780,6 +794,22 @@ test did not itself produce.
    **all 202** externals — verified by checking that every code in `ls
    *_env_flags.csv` is represented by at least one output file in both arms.
    Criterion 4 is complete at 202/202, not 201/202.
+
+   *The scored set had a hole, found the same day and closed.* This comparison
+   first reported 14,476 files as 14,274: `is_scored` matched a site code as a
+   basename **prefix**, and the env exporter writes `daily_{SITE}_env_data.csv`,
+   so one real Stage-3 output per external site — 202 in all — was scored by
+   **neither** population and went unmeasured for the whole exercise. They are
+   byte-identical, so no verdict ever moved, but the scored set was not what it
+   claimed to be. Found by auditing what neither site list matched (job
+   46228812): **439** such files, **417 identical, 22 differing**, and all 22 are
+   `stage3_summary.json` — the harness's own record, at 22 internal chunks. The
+   arithmetic now closes with nothing unexplained: whole-tree differing **384 =
+   362 internal outputs + 22 internal summaries + 0 external**. The matcher now
+   tests substrings, which over-matches (`FRA_HES` also catches `FRA_HES_HE1`
+   files) — the safe direction for a gate, because a file scored under two
+   populations reports its difference in both, while a file scored under none
+   reports it nowhere.
 5. **QC columns are not variables.** No `*_qc` column appears in any env QC
    output — outliers-removed, standardized, or daily.
 6. **Propagation — at the 19 ICOS sites only.** `ppfd_in` is masked on exactly

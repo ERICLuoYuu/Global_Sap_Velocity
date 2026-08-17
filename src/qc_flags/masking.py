@@ -129,13 +129,19 @@ def apply_mask(data: pd.DataFrame, mask: pd.DataFrame) -> pd.DataFrame:
         if column not in out.columns:
             continue
         selector = mask[column].reindex(out.index, fill_value=False).fillna(False).astype(bool)
-        if not selector.any():
-            continue
-        # `.where` rather than `.loc[...] = np.nan`: a variable whose values all
-        # happen to be integral is read as int64, and assigning NaN into it
-        # emits a FutureWarning in pandas 2.x and will raise in 3.0. `.where`
-        # upcasts cleanly.
-        out[column] = out[column].where(~selector)
+        # A maskable column is float-valued, whether or not anything is masked
+        # today. The old code got this by accident -- it assigned NaN through
+        # `.loc` unconditionally, which upcast int64 to float64 even when the
+        # mask was empty -- and the accident is load-bearing: `precip` at
+        # CHN_YIN_ST3_DRO is integral, so skipping the upcast rewrote every
+        # `0.0` as `0` and changed two delivered files without changing a
+        # single value. Done explicitly here, both to keep those files
+        # byte-identical and to avoid the `.loc`-assign-NaN path, which is
+        # deprecated in pandas 2.x and raises in 3.0.
+        if pd.api.types.is_integer_dtype(out[column]):
+            out[column] = out[column].astype(float)
+        if selector.any():
+            out[column] = out[column].where(~selector)
     return out
 
 

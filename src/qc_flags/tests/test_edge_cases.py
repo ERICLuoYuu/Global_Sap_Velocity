@@ -113,6 +113,26 @@ class TestQcDtypeVariation:
 
 
 class TestIntegerVariableDtype:
+    def test_a_maskable_int_column_becomes_float_even_when_nothing_is_masked(self, index):
+        # Byte-identity with the pre-change pipeline depends on this. The old
+        # code assigned NaN through `.loc` unconditionally, which upcast int64
+        # to float64 whether or not the mask had any True in it. Preserving the
+        # int dtype instead rewrote every `0.0` as `0` and changed two
+        # delivered files at CHN_YIN_ST3_DRO without changing a value.
+        data = pd.DataFrame({"precip": [0, 0, 0, 0], "precip_qc": [0, 0, 0, 0]}, index=index)
+        mask = build_mask(data, None, Mechanism.QC_COLUMNS, QcFlagConfig())
+        assert not mask["precip"].any()
+        out = apply_mask(data, mask)
+        assert out["precip"].dtype == float
+        assert list(out["precip"]) == [0.0, 0.0, 0.0, 0.0]
+
+    def test_a_column_outside_the_mask_keeps_its_int_dtype(self, index):
+        # The upcast applies to maskable variables only -- QC columns and other
+        # passengers must come through untouched.
+        data = pd.DataFrame({"ta": [1.0] * 4, "ta_qc": [0, 0, 0, 0]}, index=index)
+        out = apply_mask(data, build_mask(data, None, Mechanism.QC_COLUMNS, QcFlagConfig()))
+        assert pd.api.types.is_integer_dtype(out["ta_qc"])
+
     def test_masking_an_int_column_does_not_raise(self, index):
         # A variable whose values are all integral is read as int64; assigning
         # NaN into it warns in pandas 2.x and will raise in 3.0.

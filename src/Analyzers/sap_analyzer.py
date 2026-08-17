@@ -75,7 +75,7 @@ class SapFlowAnalyzer:
             "total_points_removed": 0,
         }
 
-    def set_removal_log(self, log_path: str | Path, validate: bool = True):
+    def set_removal_log(self, log_path: str | Path, validate: bool = True, strict: bool = False):
         """
         Set the removal log to use during data processing.
 
@@ -102,6 +102,56 @@ class SapFlowAnalyzer:
         print(f"Total entries: {len(self.removal_processor.removal_entries)}")
         print("Removals will be applied during data loading.")
         print(f"{'=' * 60}\n")
+
+        if validate:
+            # strict=strict, NOT strict=validate: validation should REPORT by
+            # default and only raise when the caller asks. Making it raise
+            # whenever validation is on would turn a partial corpus into a hard
+            # failure, and the point of the validator is visibility.
+            self.validate_removal_log_against_corpus(strict=strict)
+
+    def validate_removal_log_against_corpus(self, corpus_dir=None, strict: bool = False):
+        """Check every removal-log row against the corpus it will be applied to.
+
+        `RemovalLogProcessor._validate_entries` checks the log against *itself*:
+        missing fields, start > end, unknown type. It never asks whether a row
+        resolves to a real file, a real column, or an overlapping time range,
+        and `get_entries_for_site` matches on exact equality with no report on a
+        miss -- so a row that matches nothing simply does not happen, silently.
+
+        Thirty-three of 371 entries were in that state when this was first
+        measured, seven of them reviewed decisions that had stopped applying.
+        Running here rather than in a script means a silent no-op cannot come
+        back without someone seeing it.
+
+        Args:
+            corpus_dir: directory of `{site}_{kind}_data.csv` files. Defaults to
+                the raw CSV directory this analyzer was configured with.
+            strict: raise instead of reporting when a row cannot act.
+        """
+        # Imported here, not at module scope: the linter treats a top-level
+        # import whose only use is inside one method as removable, and removing
+        # it once left this method reporting a hardcoded inert=0 -- a validator
+        # that always says "all clear" is worse than no validator.
+        from src.qc_flags.removal_log_validator import summarise, validate_log
+
+        corpus_dir = Path(corpus_dir) if corpus_dir is not None else self.paths.raw_csv_dir
+        summary = summarise(validate_log(self._removal_log_path, corpus_dir))
+        self.removal_log_validation = summary
+
+        print(f"{'=' * 60}")
+        print(f"REMOVAL LOG VALIDATION (against {corpus_dir})")
+        print("  rows={total}  act={acts}  INERT={inert}".format(**summary))
+        for status, count in sorted(summary["by_status"].items()):
+            if count and status != "acts":
+                print(f"    {status:<16} {count}")
+        for row in summary["inert_rows"][:20]:
+            print("    INERT entry {entry_id}: {location} {column} -> {status} {detail}".format(**row))
+        print(f"{'=' * 60}\n")
+
+        if summary["inert"] and strict:
+            raise ValueError("{} removal-log entries cannot act against {}".format(summary["inert"], corpus_dir))
+        return summary
 
     def clear_removal_log(self):
         """Clear the current removal log (disable removal processing)."""

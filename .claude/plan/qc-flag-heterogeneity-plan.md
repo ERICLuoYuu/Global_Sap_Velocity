@@ -754,7 +754,7 @@ test did not itself produce.
    commit message and the run report all recorded "411 of 411 external output
    files byte-identical" without saying the 411 files came from 8 sites. 411 is
    a file count, not a site count. Re-scored over all 202 by
-   `job_qc_full_ext.sh`, which derives the site list from the corpus (`ls
+   `job_qc_compare225.sh`, which derives the site list from the corpus (`ls
    *_env_flags.csv`) rather than a pasted constant, so it cannot drift from the
    census. Note what the sample does *not* threaten: the masking **decision** is
    already measured corpus-wide by criteria 6, 7 and 15b, and D-5 measured
@@ -762,6 +762,24 @@ test did not itself produce.
    leaves is in the surrounding plumbing — dtypes, export gating, row order —
    which is exactly what the byte gate exists to catch and exactly what the
    `CHN_YIN_ST3_DRO` int64/float64 finding turned out to be.
+
+   *Re-scored, 2026-08-17.* Both arms re-run over the **whole corpus**, one site
+   per array task (`job_qc_full226.sh before|after`, 226 tasks each), compared by
+   `job_qc_compare225.sh` (job 46228406, 10 min on 1 cpu). Result: **14,274 of
+   14,274 external output files byte-identical, 0 differing, across 202 of 202
+   external sites** — 34.7x the files and 25x the sites of the first pass. 1,601
+   files are no longer written, **all verified header-only** (the D-6 fix), and
+   **0** files appear at an external site that did not exist before. The one
+   defect the 8-site sample had caught (`CHN_YIN_ST3_DRO` int64/float64) recurs
+   nowhere else in the corpus.
+
+   `CZE_LNZ` was still running at compare time (69 trees, ~9 h) and is excluded,
+   which costs this criterion nothing: it ships **no `*_env_flags.csv` and six
+   in-file `*_qc` columns**, so it is one of the 24 internal sites and lies
+   outside this criterion's population entirely. 225 of 226 chunks still covers
+   **all 202** externals — verified by checking that every code in `ls
+   *_env_flags.csv` is represented by at least one output file in both arms.
+   Criterion 4 is complete at 202/202, not 201/202.
 5. **QC columns are not variables.** No `*_qc` column appears in any env QC
    output — outliers-removed, standardized, or daily.
 6. **Propagation — at the 19 ICOS sites only.** `ppfd_in` is masked on exactly

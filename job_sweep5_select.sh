@@ -35,6 +35,13 @@
 # size a wall off it. mlxtend emits results only at the end, so a timeout
 # writes NOTHING; keep the margin.
 #
+# Those wall times are CONTENTION-DEPENDENT, not intrinsic. zen4 nodes are
+# 192-core and Slurm packs three 64-core jobs onto one, so the arms share
+# memory bandwidth with whatever else lands there. Observed spread on the SAME
+# cache and config: 12 h 01 m for a 6..70 path alone-ish on r19n20, versus a
+# STRICTLY SHORTER 6..40 path still running at 18 h on a three-way-packed
+# r13n42. Treat 12 h as a floor, not an estimate.
+#
 # 70 is comfortably past the plateau and has been shown not to bind: on
 # fullyear_fullday_tx the argmax was k=43 (interior), the curve was flat from
 # k=25 (mean_r2 0.5491, identical to the argmax) and DECLINING to 0.5348 by

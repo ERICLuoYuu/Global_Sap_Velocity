@@ -111,7 +111,7 @@ def _parse_args() -> argparse.Namespace:
         "--k_features",
         type=str,
         default="best",
-        help="Target number of features or 'best'.",
+        help="Number of features to stop at, 'min,max' range, 'best', or 'parsimonious'.",
     )
     parser.add_argument(
         "--random_seed",
@@ -132,6 +132,25 @@ def _parse_args() -> argparse.Namespace:
         help="Grid cell size in degrees (only used when --spatial_method=grid).",
     )
     return parser.parse_args()
+
+
+def _parse_k_features(raw: str):
+    """Turn the --k_features string into what mlxtend actually accepts.
+
+    argparse hands us a string so that "best" and "parsimonious" work, but
+    mlxtend rejects every OTHER string outright -- passing "40" raises
+    AttributeError several minutes into the run, after the cache has loaded and
+    the CV splits are built. Coerce here, at the boundary, so a numeric cap
+    reaches the selector as an int.
+    """
+    text = str(raw).strip()
+    if text.isdigit():
+        return int(text)
+    if "," in text:
+        low, high = (part.strip() for part in text.split(",", 1))
+        if low.isdigit() and high.isdigit():
+            return (int(low), int(high))
+    return text
 
 
 def _cmd_build_cache(args: argparse.Namespace) -> None:
@@ -180,7 +199,7 @@ def _cmd_run_selection(args: argparse.Namespace) -> None:
         random_seed=args.random_seed,
         n_jobs_sfs=args.n_jobs_sfs,
         n_jobs_xgb=args.n_jobs_xgb,
-        k_features=args.k_features,
+        k_features=_parse_k_features(args.k_features),
         time_scale=args.time_scale,
         output_dir=Path(args.output_dir),
         cache_dir=Path(args.output_dir),

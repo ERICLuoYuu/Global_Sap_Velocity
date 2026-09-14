@@ -211,7 +211,8 @@ def create_spatial_groups(
             unique_cells, cell_indices = np.unique(grid_cell_ids, return_inverse=True)
             cell_data_counts = np.bincount(cell_indices, weights=data_counts)
 
-            sorted_cell_indices = np.argsort(cell_data_counts)[::-1]
+            # stable sort: quicksort reorders TIED counts if the site list changes
+            sorted_cell_indices = np.argsort(cell_data_counts, kind="stable")[::-1]
 
             fold_data_counts = np.zeros(n_groups)
             cell_to_fold = np.zeros(len(unique_cells), dtype=int)
@@ -228,7 +229,8 @@ def create_spatial_groups(
         if data_counts is None or n_groups is None or not balanced:
             groups = np.arange(len(lat))
         else:
-            sorted_indices = np.argsort(data_counts)[::-1]
+            # stable sort: quicksort reorders TIED counts if the site list changes
+            sorted_indices = np.argsort(data_counts, kind="stable")[::-1]
             groups = np.zeros(len(lat), dtype=int) - 1
             fold_data_counts = np.zeros(n_groups)
 
@@ -350,3 +352,133 @@ def parse_args():
         "(G_c undefined at low VPD; 0.6 per Ewers & Oren 2000 for sensitivity).",
     )
     return parser.parse_args()
+
+
+def build_pft_onehot(
+    df: "pd.DataFrame",
+    pft_col: str,
+    site_id: str,
+    pft_columns: list,
+) -> "pd.DataFrame":
+    """One-hot encode the PFT column, dropping rows that never had a PFT.
+
+    Two different situations produce an all-zero one-hot row and only one of
+    them is a defect:
+
+    * **The value is present but unrecognised** -- e.g. the long IGBP name
+      ``'Mixed Forest'`` where the short code ``'MF'`` is expected.
+      ``pd.Categorical`` coerces it to NaN in silence, XGBoost then never splits
+      on PFT, and SHAP reports exactly 0 for every PFT column. This stays fatal.
+
+    * **The value was already missing in the source.** Since the 2026-08-24
+      re-merge, observation-free calendar rows carry a blank ``pft``; they hold
+      neither sap flow nor environmental data, so they carry no target either.
+      Measured across the corpus: 27 sites have such rows and ZERO of those rows
+      hold a target value.
+
+    Conflating the two cost 27 whole sites -- FRA_HES and the four largest CZE
+    stands among them -- because a single blank row rejected the entire site.
+
+    Returns the frame with the one-hot columns joined on, minus rows that had no
+    PFT to begin with.
+    """
+    missing = df[pft_col].isna()
+    if missing.any():
+        logging.info(
+            "  %s: dropping %d of %d rows with no %s (they carry no target)",
+            site_id,
+            int(missing.sum()),
+            len(df),
+            pft_col,
+        )
+        df = df[~missing].copy()
+    if df.empty:
+        raise ValueError(f"Site {site_id}: no row carries a '{pft_col}' value")
+
+    dummies = pd.get_dummies(pd.Categorical(df[pft_col], categories=pft_columns)).astype(int)
+    dummies.index = df.index
+
+    all_zero = dummies.sum(axis=1) == 0
+    if all_zero.any():
+        unrecognised = sorted({str(v) for v in df.loc[all_zero, pft_col].unique()})
+        raise ValueError(
+            f"Site {site_id}: PFT one-hot produced all-zero rows from column "
+            f"'{pft_col}'. Unrecognised value(s): {unrecognised}. Expected values "
+            f"in PFT_COLUMNS = {pft_columns}. Check that merge pipeline emits "
+            f"short IGBP codes."
+        )
+
+    for col in dummies.columns:
+        df[col] = dummies[col]
+    return df
+
+
+def _first_set(args, *names):
+    """First of *names* that ``args`` actually defines, else ``None``.
+
+    ``getattr(args, n, None) or ...`` would be wrong: ``n_groups=0`` is falsy
+    but set, and would fall through to the next name.
+    """
+    for name in names:
+        value = getattr(args, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _as_str(value):
+    """Stringify Paths so the result survives a plain ``json.dump``.
+
+    Five of the six callers pass ``default=str``; ``train_from_cache.py`` does
+    not, and a bare ``Path`` there raises ``TypeError`` at write time.
+    """
+    return None if value is None else str(value)
+
+
+def build_run_provenance(args, selected_features=None, data_dir=None):
+    """Describe how a run was configured, for ``FINAL_config_<run_id>.json``.
+
+    Every trainer recorded ``feature_names`` -- the FINAL, post-engineering,
+    post-one-hot list -- but never the *inputs* that produced it: which
+    selected-features JSON was passed, and how sites were grouped into folds.
+    Two runs differing only in ``--spatial_split_method`` (one group per SITE
+    vs a 0.05 deg grid, worth +0.145 pooled R2 through co-location leakage)
+    wrote configs identical apart from their scores, so a finished run could
+    not be told apart from another by its own config.
+
+    Fields are read with ``getattr(..., None)`` because the six callers do not
+    share a parser: five build their own ``ArgumentParser`` and only the main
+    ML trainer imports :func:`parse_args`. The DL and autoML parsers define no
+    ``--grid_size``; ``train_from_cache`` takes its groups from the FFS cache
+    and defines none of the spatial flags. A flag that is absent must record
+    ``None``, never raise -- this runs *after* the model is fitted, so an
+    ``AttributeError`` here would discard the entire run.
+
+    Args:
+        args: The parsed ``argparse.Namespace``.
+        selected_features: The resolved feature list the run actually used
+            (the trainers' ``used_cols``), including the target column if the
+            trainer prepended it. ``None`` if the caller has no such list.
+        data_dir: The directory the run actually read, after the
+            ``--data_dir``-or-``PathConfig`` fallback has been resolved.
+
+    Returns:
+        A dict with ``selected_features``, ``selected_features_path`` and a
+        ``split_config`` block, ready to splat into a ``final_config`` literal.
+    """
+    return {
+        "selected_features": None if selected_features is None else list(selected_features),
+        "selected_features_path": _as_str(getattr(args, "selected_features", None)),
+        "split_config": {
+            "spatial_split_method": _first_set(args, "spatial_split_method"),
+            "n_groups": _first_set(args, "n_groups", "n_splits"),
+            "grid_size": _first_set(args, "grid_size"),
+            "balanced": _first_set(args, "BALANCED"),
+            "is_stratified": _first_set(args, "IS_STRATIFIED"),
+            "is_shuffle": _first_set(args, "IS_SHUFFLE"),
+            "is_only_day": _first_set(args, "IS_ONLY_DAY"),
+            "split_type": _first_set(args, "SPLIT_TYPE"),
+            "time_scale": _first_set(args, "TIME_SCALE"),
+            "data_dir": _as_str(data_dir),
+        },
+    }

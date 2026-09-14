@@ -45,6 +45,12 @@ def _import_training_helpers() -> tuple:
     return apply_all_feature_engineering, add_time_features, create_spatial_groups
 
 
+#: Column names that can carry a site's vegetation class, in the order they
+#: should be preferred. ``pft`` is the real plant functional type; ``biome`` is
+#: a coarser fallback for sites that never received one.
+PFT_COLUMN_PRIORITY = ("pft", "plant_functional_type", "biome")
+
+
 def load_and_cache_features(
     data_dir: Path,
     cache_path: Path,
@@ -136,8 +142,13 @@ def load_and_cache_features(
 
             lat_col = next((c for c in df.columns if c.lower() in ["lat", "latitude_x"]), None)
             lon_col = next((c for c in df.columns if c.lower() in ["lon", "longitude_x"]), None)
+            # Resolve by walking the PRIORITY LIST, not df.columns. Iterating the
+            # columns hands precedence to whichever name appears first in the CSV,
+            # and in the merged daily files "biome" sits at column 39 and "pft" at
+            # 40 -- so every site was stratified by biome while the logs said PFT.
+            _by_lower = {c.lower(): c for c in df.columns}
             pft_col = next(
-                (c for c in df.columns if c.lower() in ["pft", "plant_functional_type", "biome"]),
+                (_by_lower[name] for name in PFT_COLUMN_PRIORITY if name in _by_lower),
                 None,
             )
             if not (lat_col and lon_col and pft_col):
@@ -146,10 +157,6 @@ def load_and_cache_features(
 
             latitude = df[lat_col].median()
             longitude = df[lon_col].median()
-
-            if site_id.startswith("CZE"):
-                logger.info("Skipping site %s", site_id)
-                continue
 
             df["latitude"] = latitude
             df["longitude"] = longitude

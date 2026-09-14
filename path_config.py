@@ -13,6 +13,8 @@ Usage:
 
     # Or customize
     paths = PathConfig(scale='site', base_data_dir='/my/data')
+    # Or retarget every path from the environment (batch jobs)
+    #   ANALYSIS_SCALE=sapwood_combined python src/Extractors/extract_pft.py
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ class PathConfig:
 
     def __init__(
         self,
-        scale: str = "sapwood",
+        scale: str | None = None,
         base_data_dir: str = "./data",
         base_output_dir: str = "./outputs",
         data_version: str = "0.1.5",
@@ -51,12 +53,15 @@ class PathConfig:
         Initialize path configuration.
 
         Args:
-            scale: Analysis scale ('plant', 'site', 'inverter', etc.)
+            scale: Analysis scale ('plant', 'sapwood', 'sapwood_combined', ...).
+                Passing None reads the ANALYSIS_SCALE environment variable and
+                falls back to 'sapwood', so batch scripts can retarget every
+                path in this class without editing any caller.
             base_data_dir: Root directory for input data
             base_output_dir: Root directory for outputs
             data_version: Version of the dataset
         """
-        self.scale = scale
+        self.scale = scale if scale is not None else os.getenv("ANALYSIS_SCALE", "sapwood")
         self.data_version = data_version
         self.base_data_dir = Path(base_data_dir).resolve()
         self.base_output_dir = Path(base_output_dir).resolve()
@@ -477,12 +482,13 @@ class PathConfig:
 # =============================================================================
 
 
-def get_default_paths(scale: str = "sapwood") -> PathConfig:
+def get_default_paths(scale: str | None = None) -> PathConfig:
     """
     Get default path configuration.
 
     Args:
-        scale: Analysis scale
+        scale: Analysis scale. None (the default) reads $ANALYSIS_SCALE, falling
+            back to "sapwood".
 
     Returns:
         PathConfig instance with default settings

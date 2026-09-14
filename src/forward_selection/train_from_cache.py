@@ -195,6 +195,8 @@ def main() -> None:
     joblib.dump(best_model, str(out_dir / f"FINAL_xgb_{args.run_id}.joblib"))
     joblib.dump(best_scaler, str(out_dir / f"FINAL_scaler_{args.run_id}_feature.pkl"))
 
+    from src.hyperparameter_optimization.training_utils import build_run_provenance
+
     config = {
         "model_type": "xgb",
         "run_id": args.run_id,
@@ -217,6 +219,7 @@ def main() -> None:
             "cache_path": str(args.cache_path),
         },
         "feature_names": sel_names,
+        **build_run_provenance(args, sel_names),
         "random_seed": args.random_seed,
         "split_type": "spatial_stratified",
     }

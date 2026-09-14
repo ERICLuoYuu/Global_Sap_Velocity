@@ -22,10 +22,12 @@ def _make_feature_names() -> list[str]:
 
 class TestMandatoryFeatures:
     def test_mandatory_count(self) -> None:
-        assert len(MANDATORY_FEATURES) == 6
+        # 4 atmospheric-demand terms + soil moisture. Was 6 until
+        # 2026-09-03, when ppfd_in and ext_rad became candidates.
+        assert len(MANDATORY_FEATURES) == 5
 
     def test_mandatory_names(self) -> None:
-        expected = {"sw_in", "ppfd_in", "ta", "vpd", "ws", "ext_rad"}
+        expected = {"sw_in", "ta", "vpd", "ws", "volumetric_soil_water_layer_1"}
         assert set(MANDATORY_FEATURES) == expected
 
 
@@ -111,9 +113,9 @@ class TestGetAllExpectedColumns:
 
     def test_total_count(self) -> None:
         cols = get_all_expected_columns()
-        # 6 mandatory + all candidate columns
+        # every mandatory name + every candidate column, nothing lost or doubled
         total_candidate_cols = sum(len(v) for v in CANDIDATE_FEATURES.values())
-        assert len(cols) == 6 + total_candidate_cols
+        assert len(cols) == len(MANDATORY_FEATURES) + total_candidate_cols
 
 
 class TestEdgeCases:
@@ -148,9 +150,81 @@ class TestEdgeCases:
     def test_build_groups_with_only_mandatory(self) -> None:
         feature_names = list(MANDATORY_FEATURES)
         mandatory_idx, candidate_groups = build_feature_groups(feature_names)
-        assert len(mandatory_idx) == 6
+        assert len(mandatory_idx) == len(MANDATORY_FEATURES)
         assert candidate_groups == []
 
     def test_candidate_count_matches_registry(self) -> None:
         """Total candidate groups should match the OrderedDict length."""
         assert len(CANDIDATE_FEATURES) > 90  # plan says ~100 groups
+
+# ---------------------------------------------------------------------------
+# The registry must be a PARTITION of the column space.
+#
+# mlxtend's SFS takes `feature_groups` (which must cover every column index)
+# together with `fixed_features` (the mandatory indices). build_feature_groups()
+# does no de-duplication, so a name listed in BOTH MANDATORY_FEATURES and
+# CANDIDATE_FEATURES yields a duplicated index, and a name in NEITHER is
+# silently dropped from the design matrix. Neither failure raises on its own --
+# the first can double-count a feature, the second quietly trains a smaller
+# model than the config claims. Both are shape-preserving and invisible in the
+# logs, which is exactly the class of defect that has bitten this pipeline
+# before, so it is asserted here rather than trusted.
+# ---------------------------------------------------------------------------
+
+
+def _partition_error(feature_names):
+    """Return None if mandatory + candidates tile the index space exactly."""
+    mandatory_idx, candidate_groups = build_feature_groups(feature_names)
+    seen = list(mandatory_idx) + [i for g in candidate_groups for i in g]
+    dupes = {i for i in seen if seen.count(i) > 1}
+    orphans = set(range(len(feature_names))) - set(seen)
+    if dupes:
+        return "duplicated: %s" % sorted(feature_names[i] for i in dupes)
+    if orphans:
+        return "orphaned: %s" % sorted(feature_names[i] for i in orphans)
+    return None
+
+
+def test_registry_is_a_partition():
+    names = get_all_expected_columns()
+    assert len(names) == len(set(names)), (
+        "get_all_expected_columns() returned duplicate names: "
+        + str(sorted({n for n in names if names.count(n) > 1}))
+    )
+    err = _partition_error(names)
+    assert err is None, "registry is not a partition of the column space -- " + str(err)
+
+
+def test_partition_check_catches_a_duplicate():
+    """POSITIVE CONTROL. A gate that cannot fail proves nothing.
+
+    Re-listing a mandatory name as its own candidate group is precisely the
+    mistake the swap of ppfd_in/ext_rad for soil moisture could have made, so
+    the check is shown failing on it before it is trusted when it passes.
+    """
+    import src.forward_selection.feature_registry as reg
+
+    victim = reg.MANDATORY_FEATURES[0]
+    original = reg.CANDIDATE_FEATURES
+    broken = type(original)(original)
+    broken[victim] = [victim]
+    reg.CANDIDATE_FEATURES = broken
+    try:
+        err = _partition_error(get_all_expected_columns())
+    finally:
+        reg.CANDIDATE_FEATURES = original
+    assert err is not None and "duplicated" in err, (
+        "the partition check FAILED TO NOTICE a duplicated mandatory name -- "
+        "it cannot be trusted when it passes"
+    )
+
+
+def test_soil_moisture_is_mandatory_and_radiation_proxies_are_not():
+    """Pin the 2026-09-03 intent so a later edit cannot quietly undo it."""
+    assert "volumetric_soil_water_layer_1" in MANDATORY_FEATURES
+    assert "ppfd_in" not in MANDATORY_FEATURES
+    assert "ext_rad" not in MANDATORY_FEATURES
+    assert "sw_in" in MANDATORY_FEATURES, "sw_in stays: it is the retained radiation term"
+    for name in ("ppfd_in", "ext_rad"):
+        assert name in CANDIDATE_FEATURES, name + " must be selectable, not orphaned"
+    assert "volumetric_soil_water_layer_1" not in CANDIDATE_FEATURES

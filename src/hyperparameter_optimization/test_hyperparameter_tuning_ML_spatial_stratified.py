@@ -67,6 +67,7 @@ from src.hyperparameter_optimization.shap_plotting import (  # noqa: E402
 from src.hyperparameter_optimization.target_transformer import TargetTransformer  # noqa: E402
 from src.hyperparameter_optimization.training_utils import (  # noqa: E402
     add_time_features,
+    build_pft_onehot,
     convert_windows_to_numpy,
     create_spatial_groups,
     create_windows_from_segments,
@@ -214,10 +215,6 @@ def main(run_id="default"):
             latitude = df[lat_col].median()
             longitude = df[lon_col].median()
 
-            if site_id.startswith("CZE"):
-                logging.info(f"  Skipping site {site_id} as per rules.")
-                continue
-
             df["latitude"] = latitude
             df["longitude"] = longitude
 
@@ -279,22 +276,9 @@ def main(run_id="default"):
             # Create PFT one-hot columns if requested in selected_features
             requested_pft = [c for c in used_cols if c in PFT_COLUMNS]
             if requested_pft and pft_col and pft_col in df.columns:
-                pft_cat = pd.Categorical(df[pft_col], categories=PFT_COLUMNS)
-                pft_dummies = pd.get_dummies(pft_cat).astype(int)
-                pft_dummies.index = df.index
-                # Fail loudly if pd.Categorical silently NaN-coerced the values (e.g. long
-                # IGBP names like 'Mixed Forest' passed where short codes like 'MF' expected).
-                # Without this guard, PFT one-hot is all-zero per row → XGBoost never splits
-                # on PFT → SHAP = 0 for every PFT column. Silent failure must not happen twice.
-                if (pft_dummies.sum(axis=1) == 0).any():
-                    raise ValueError(
-                        f"Site {site_id}: PFT one-hot produced all-zero rows from column "
-                        f"'{pft_col}'. df['{pft_col}'] unique values = "
-                        f"{list(df[pft_col].unique())}. Expected values in PFT_COLUMNS = "
-                        f"{PFT_COLUMNS}. Check that merge pipeline emits short IGBP codes."
-                    )
-                for col in pft_dummies.columns:
-                    df[col] = pft_dummies[col]
+                # Still fatal when a value is present but unrecognised; rows that
+                # never had a PFT are dropped instead of rejecting the site.
+                df = build_pft_onehot(df, pft_col, site_id, PFT_COLUMNS)
 
             missing_cols = [col for col in used_cols if col not in df.columns]
             if missing_cols:
@@ -339,7 +323,7 @@ def main(run_id="default"):
                     logging.warning(f"  {site_id}: No valid segments after time series segmentation. Skipping.")
             else:
                 site_data_dict[site_id] = df
-                minimum_required_length = 0
+                minimum_required_length = 1  # 0 made the guard unsatisfiable, so it never fired
                 if len(df) < minimum_required_length:
                     logging.warning(f"  Warning: Not enough data after cleaning for site {site_id}. Skipping.")
                     site_data_dict.pop(site_id)
@@ -560,6 +544,12 @@ def main(run_id="default"):
     all_predictions, all_actuals = [], []
     all_test_pfts = []
     all_test_site_ids = []  # Track site IDs for each test prediction
+    # Clean (finite-masked) OOF obs/pred kept aligned with all_test_pfts / all_test_site_ids
+    # so a per-sample OOF CSV can be grouped by PFT/site without misalignment. Note that
+    # all_predictions/all_actuals above are intentionally left UNFILTERED to preserve the
+    # existing pooled-R² behaviour; these two are the aligned-clean counterparts.
+    all_obs_clean = []
+    all_pred_clean = []
     dist_analyzer = FoldDistributionAnalyzer(output_dir=str(plot_dir / "distributions"))
 
     for fold_idx, (train_val_indices, test_indices) in enumerate(split_generator):
@@ -691,6 +681,8 @@ def main(run_id="default"):
         site_ids_test_clean = site_ids_test[finite_mask]  # Track site IDs
         all_test_pfts.extend(pfts_test_clean)
         all_test_site_ids.extend(site_ids_test_clean)  # Collect site IDs
+        all_obs_clean.extend(y_test_clean)  # aligned-clean OOF observations
+        all_pred_clean.extend(preds_clean)  # aligned-clean OOF predictions
 
         fold_test_r2 = r2_score(y_test_clean, preds_clean)
         fold_test_rmse = np.sqrt(mean_squared_error(y_test_clean, preds_clean))
@@ -702,7 +694,14 @@ def main(run_id="default"):
 
         logging.info(f"  Fold {fold_idx + 1} Results -> Test R²: {fold_test_r2:.4f}, Test RMSE: {fold_test_rmse:.4f}")
 
-        best_model.save_model(str(model_dir / f"spatial_{MODEL_TYPE}_fold_{fold_idx + 1}_{run_id}.json"))
+        # save_model() is XGBoost's own serialiser and does not exist on sklearn
+        # estimators, so rf/svm persist through joblib instead.  XGBoost keeps its
+        # .json so nothing downstream that reads those files changes.
+        _fold_stem = f"spatial_{MODEL_TYPE}_fold_{fold_idx + 1}_{run_id}"
+        if hasattr(best_model, "save_model"):
+            best_model.save_model(str(model_dir / f"{_fold_stem}.json"))
+        else:
+            joblib.dump(best_model, model_dir / f"{_fold_stem}.joblib")
 
         # --- Generate Individual Fold Plots ---
         logging.info(f"  Generating plots for Fold {fold_idx + 1}...")
@@ -785,6 +784,23 @@ def main(run_id="default"):
         logging.info(f"  Fold {fold_idx + 1} predictions saved to: {fold_csv_path}")
 
     dist_analyzer.generate_all_plots()
+
+    # --- Consolidated per-sample out-of-fold predictions (aligned with PFT + site) ---
+    # Enables grouping OOF predictions by IGBP PFT for pooled per-PFT performance plots.
+    # Uses the finite-masked, fold-aligned arrays so PFT/site labels never misalign with
+    # observations/predictions (unlike all_predictions/all_actuals which stay unfiltered).
+    if all_obs_clean:
+        oof_df = pd.DataFrame(
+            {
+                "site_id": all_test_site_ids,
+                "pft": all_test_pfts,
+                "observed": all_obs_clean,
+                "predicted": all_pred_clean,
+            }
+        )
+        oof_csv_path = plot_dir / f"oof_predictions_{run_id}.csv"
+        oof_df.to_csv(oof_csv_path, index=False)
+        logging.info(f"Consolidated OOF predictions ({len(oof_df)} rows) saved to: {oof_csv_path}")
 
     # --- Final Results ---
     if all_test_r2_scores:
@@ -1151,6 +1167,8 @@ def main(run_id="default"):
         logging.info(f"Using {len(shap_feature_names)} feature names for SHAP")
 
         # Save config/metadata
+    from src.hyperparameter_optimization.training_utils import build_run_provenance
+
     final_config = {
         "model_type": MODEL_TYPE,
         "run_id": run_id,
@@ -1182,6 +1200,7 @@ def main(run_id="default"):
         },
         "feature_names": final_feature_names,
         "shap_feature_names": shap_feature_names,
+        **build_run_provenance(args, used_cols, data_dir),
         "random_seed": RANDOM_SEED,
         "split_type": SPLIT_TYPE,
         "time_scale": TIME_SCALE,

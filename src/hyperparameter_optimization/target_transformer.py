@@ -10,7 +10,7 @@ import logging
 import numpy as np
 from scipy.special import inv_boxcox
 from scipy.stats import boxcox
-from sklearn.preprocessing import PowerTransformer
+from sklearn.preprocessing import PowerTransformer, StandardScaler
 
 
 class TargetTransformer:
@@ -194,3 +194,53 @@ class TargetTransformer:
 
     def __repr__(self):
         return f"TargetTransformer(method='{self.method}', fitted={self._fitted})"
+
+
+class ScaledTargetPipeline:
+    """A target transform followed by standardisation, with a matching inverse.
+
+    The DL trainer scales labels with a bare ``StandardScaler`` and inverse-
+    transforms predictions straight back into the reported scale.  Composing the
+    same ``log1p`` the ML trainer applies INTO that scaler means the network
+    optimises the transformed target while every downstream line -- metrics,
+    plots, OOF collection -- keeps receiving original-scale values untouched.
+    That is why this is a scaler-shaped object rather than log1p sprinkled
+    through the trainer: the diff stays at two assignments.
+
+    ``TargetTransformer`` flattens its input, so shape is restored explicitly
+    here; ``StandardScaler`` requires 2-D and every call site already passes it.
+
+    Parameters
+    ----------
+    method : str
+        Any :class:`TargetTransformer` method. ``'none'`` makes this exactly
+        equivalent to a bare ``StandardScaler``.
+    """
+
+    def __init__(self, method: str = "log1p"):
+        self.method = method
+        self._target = TargetTransformer(method=method)
+        self._scaler = StandardScaler()
+
+    def _fwd(self, y: np.ndarray) -> np.ndarray:
+        arr = np.asarray(y, dtype=float)
+        return np.asarray(self._target.transform(arr)).reshape(arr.shape)
+
+    def _inv(self, y: np.ndarray) -> np.ndarray:
+        arr = np.asarray(y, dtype=float)
+        return np.asarray(self._target.inverse_transform(arr)).reshape(arr.shape)
+
+    def fit(self, y: np.ndarray) -> "ScaledTargetPipeline":
+        arr = np.asarray(y, dtype=float)
+        self._target.fit(arr)
+        self._scaler.fit(self._fwd(arr))
+        return self
+
+    def transform(self, y: np.ndarray) -> np.ndarray:
+        return self._scaler.transform(self._fwd(y))
+
+    def fit_transform(self, y: np.ndarray) -> np.ndarray:
+        return self.fit(y).transform(y)
+
+    def inverse_transform(self, y: np.ndarray) -> np.ndarray:
+        return self._inv(self._scaler.inverse_transform(np.asarray(y, dtype=float)))

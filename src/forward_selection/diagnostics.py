@@ -18,7 +18,16 @@ def load_results(json_path: Path) -> dict[str, Any]:
     with open(json_path) as f:
         data = json.load(f)
     # Convert step keys back to int
-    for key in ("step_scores", "step_features", "step_pooled_r2", "step_pooled_rmse"):
+    for key in (
+        "step_scores",
+        "step_features",
+        "step_pooled_r2",
+        "step_pooled_rmse",
+        "step_pooled_r2_log",
+        "step_pooled_rmse_log",
+        "step_mean_fold_r2_log",
+        "step_mean_fold_r2_orig",
+    ):
         if key in data:
             data[key] = {int(k): v for k, v in data[key].items()}
     return data

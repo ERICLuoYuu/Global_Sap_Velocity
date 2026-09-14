@@ -371,7 +371,13 @@ class MLOptimizer(BaseOptimizer, BaseEstimator, RegressorMixin):
                 self.logger.info("Refitting model with best parameters on the full dataset.")
                 self.best_estimator_ = self._get_base_model()
                 self.best_estimator_.set_params(**final_params)
-                self.best_estimator_.fit(X, y, verbose=False)
+                # verbose= is an XGBoost fit kwarg; RandomForestRegressor and
+                # SVR reject it outright.  The inner CV loop already branches this
+                # way when fitting each fold, so mirror it here for the refit.
+                if self.model_type == 'xgb':
+                    self.best_estimator_.fit(X, y, verbose=False)
+                else:
+                    self.best_estimator_.fit(X, y)
             else:
                 # --- NO REFIT LOGIC ---
                 # Assign the best model saved from the folds directly.

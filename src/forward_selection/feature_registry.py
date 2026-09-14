@@ -17,12 +17,28 @@ from collections import OrderedDict
 # ---------------------------------------------------------------------------
 MANDATORY_FEATURES: list[str] = [
     "sw_in",
-    "ppfd_in",
     "ta",
     "vpd",
     "ws",
-    "ext_rad",
+    # Soil moisture, top layer. Mandatory from 2026-09-03: the water-SUPPLY leg
+    # was the one driver selection could drop entirely, and arms did drop it,
+    # leaving a demand-only model. Forcing it in makes every arm carry supply
+    # AND demand. This is the sigma-normalised column (bare name), not `_raw`
+    # or `_zscore` -- the same one the merge pipeline and trainer use.
+    "volumetric_soil_water_layer_1",
 ]
+
+# `ppfd_in` and `ext_rad` were mandatory until 2026-09-03. Both are radiation
+# terms nearly collinear with `sw_in`, which stays mandatory, so forcing all
+# three spent three slots on one physical driver. They are ORDINARY CANDIDATES
+# in CANDIDATE_FEATURES below now -- selectable, not forced.
+#
+# This had to be a SWAP, not two independent edits. build_feature_groups() does
+# not de-duplicate, and mlxtend needs feature_groups to be an exact partition of
+# every column index. A name must live in EXACTLY ONE of MANDATORY_FEATURES /
+# CANDIDATE_FEATURES: in both, its index is duplicated; in neither, it is
+# orphaned and silently dropped from the design matrix.
+# test_registry_is_a_partition() fails the build on either mistake.
 
 # ---------------------------------------------------------------------------
 # PFT one-hot column names (always treated as a single group)
@@ -112,7 +128,11 @@ CANDIDATE_FEATURES: OrderedDict[str, list[str]] = OrderedDict(
         ("elevation", ["elevation"]),
         ("LAI", ["LAI"]),
         ("prcip/PET", ["prcip/PET"]),
-        ("volumetric_soil_water_layer_1", ["volumetric_soil_water_layer_1"]),
+        # Traded places with volumetric_soil_water_layer_1 on 2026-09-03,
+        # which is mandatory now. Keep these two here so the registry stays
+        # a partition -- see the note above MANDATORY_FEATURES.
+        ("ppfd_in", ["ppfd_in"]),
+        ("ext_rad", ["ext_rad"]),
         ("soil_temperature_level_1", ["soil_temperature_level_1"]),
         ("day_length", ["day_length"]),  # daily only
         # PFT one-hot = 1 group of 8 columns

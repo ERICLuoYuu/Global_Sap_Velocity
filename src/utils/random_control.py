@@ -65,9 +65,17 @@ class RandomStateManager:
         if hasattr(tf.config.experimental, 'enable_op_determinism'):
             tf.config.experimental.enable_op_determinism()
         
-        # Control threading
-        tf.config.threading.set_inter_op_parallelism_threads(1)
-        tf.config.threading.set_intra_op_parallelism_threads(1)
+        # Control threading.  TensorFlow allows this only before its context
+        # initializes and raises RuntimeError afterwards, so a @deterministic
+        # function called mid-run (get_predictions and create_cnn_lstm_model are
+        # both invoked per CV fold) would abort the whole run here.  The first
+        # set_global_seed happens at import time, before any TF op, so threads=1
+        # is already in force and the skipped repeat would set the same value.
+        try:
+            tf.config.threading.set_inter_op_parallelism_threads(1)
+            tf.config.threading.set_intra_op_parallelism_threads(1)
+        except RuntimeError:
+            self._threading_locked = True
         
         print(f"Global random seed set to {seed_to_use} for reproducibility")
 

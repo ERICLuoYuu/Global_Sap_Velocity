@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Union
 from pathlib import Path
 
 
@@ -61,7 +62,11 @@ class SelectionConfig:
     random_seed: int = 42
     n_jobs_sfs: int = 32
     n_jobs_xgb: int = 4
-    k_features: str = "best"
+    #: Passed straight to mlxtend SFS, which accepts an int (stop at exactly
+    #: this many), a (min, max) tuple, or the strings "best"/"parsimonious".
+    #: A numeric value must NOT arrive as a string -- mlxtend rejects any
+    #: string that is not one of its two keywords.
+    k_features: Union[int, str, tuple] = "best"
     forward: bool = True
     floating: bool = False
     is_only_day: bool = False

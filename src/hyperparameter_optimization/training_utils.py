@@ -351,6 +351,26 @@ def parse_args():
         "trains on full data. For canopy_conductance target pass 0.3 explicitly "
         "(G_c undefined at low VPD; 0.6 per Ewers & Oren 2000 for sensitivity).",
     )
+    from src.feature_contract.definitions import DEFAULT_CONTRACT, DEFAULT_SWC_SCALE, FEATURE_CONTRACTS, SWC_SCALES
+
+    parser.add_argument(
+        "--FEATURE_CONTRACT",
+        type=str,
+        default=DEFAULT_CONTRACT,
+        choices=list(FEATURE_CONTRACTS),
+        help="site: legacy per-site soil-moisture statistics and gauge precip memory. "
+        "servable: climatology-normalised soil moisture and ERA5-Land precip memory, "
+        "reproducible at prediction time; needs a tree built by src.feature_contract.rebuild_daily.",
+    )
+    parser.add_argument(
+        "--SWC_SCALE",
+        type=str,
+        default=DEFAULT_SWC_SCALE,
+        choices=list(SWC_SCALES),
+        help="Scale of every soil-moisture feature, servable contract only. ratio: level columns "
+        "raw / sigma_clim and swc_layer*_norm the climatology z-score. zscore: all from "
+        "(raw - mu_clim) / sigma_clim. raw: all from raw m3/m3.",
+    )
     return parser.parse_args()
 
 
@@ -469,6 +489,8 @@ def build_run_provenance(args, selected_features=None, data_dir=None):
     return {
         "selected_features": None if selected_features is None else list(selected_features),
         "selected_features_path": _as_str(getattr(args, "selected_features", None)),
+        "feature_contract": _first_set(args, "FEATURE_CONTRACT"),
+        "swc_scale": _first_set(args, "SWC_SCALE"),
         "split_config": {
             "spatial_split_method": _first_set(args, "spatial_split_method"),
             "n_groups": _first_set(args, "n_groups", "n_splits"),

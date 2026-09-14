@@ -10,6 +10,19 @@ import logging
 import numpy as np
 import pandas as pd
 
+from src.feature_contract.definitions import (
+    DEFAULT_CONTRACT,
+    DEFAULT_SWC_SCALE,
+    ERA5_DAILY_PRECIP_COL,
+    SERVABLE_CONTRACT,
+    SERVABLE_RAIN_EVENT_MM_PER_DAY,
+    SITE_RAIN_EVENT_THRESHOLD,
+    era5_precip_mm_per_day,
+    rescale_swc_levels,
+    validate_contract,
+    validate_swc_scale,
+)
+
 
 def compute_canopy_conductance(
     sap_velocity: pd.Series,
@@ -106,7 +119,29 @@ def calculate_soil_hydraulics_sr2006(sand, clay, organic_matter, coarse_fragment
     return (theta_wp * (1 - cf_frac), theta_fc * (1 - cf_frac), theta_sat * (1 - cf_frac))
 
 
-def apply_feature_engineering(df, groups, time_scale="daily", verbose=False):
+def _precip_memory_source(df, contract, time_scale):
+    """The series and rain-event threshold behind ``precip_sum_*`` and ``*_since_rain``.
+
+    ``site``      gauge ``precip`` (at daily scale a daily MEAN of hourly mm), event > 0.5.
+    ``servable``  ERA5-Land daily precipitation in mm/day, event > 1 mm. A 0.1 deg
+                  prediction cell has no gauge, so the gauge cannot be the source.
+
+    Returns ``(None, None)`` when the source column is absent, so no feature is emitted.
+    """
+    if contract == SERVABLE_CONTRACT:
+        if time_scale == "hourly":
+            raise NotImplementedError("servable precip_memory is defined for daily data only")
+        if ERA5_DAILY_PRECIP_COL not in df.columns:
+            return None, None
+        return era5_precip_mm_per_day(df[ERA5_DAILY_PRECIP_COL]), SERVABLE_RAIN_EVENT_MM_PER_DAY
+    if "precip" not in df.columns:
+        return None, None
+    return df["precip"], SITE_RAIN_EVENT_THRESHOLD
+
+
+def apply_feature_engineering(
+    df, groups, time_scale="daily", verbose=False, contract=DEFAULT_CONTRACT, swc_scale=DEFAULT_SWC_SCALE
+):
     """
     Apply selected feature engineering groups to a per-site DataFrame.
 
@@ -119,12 +154,22 @@ def apply_feature_engineering(df, groups, time_scale="daily", verbose=False):
     time_scale : str
         'daily' or 'hourly' — adapts rolling window sizes.
     verbose : bool
+    contract : str
+        Feature contract, ``"site"`` (default, legacy) or ``"servable"``; see
+        :mod:`src.feature_contract.definitions`. Changes ``precip_memory``,
+        ``indicators`` and ``root_zone_swc`` only.
+    swc_scale : str
+        ``"ratio"`` (default), ``"zscore"`` or ``"raw"``: the scale of every soil-moisture
+        feature, servable contract only; see
+        :func:`src.feature_contract.definitions.rescale_swc_levels`.
 
     Returns
     -------
     (df, new_feature_names) : tuple
     """
-    df = df.copy()
+    contract = validate_contract(contract)
+    swc_scale = validate_swc_scale(swc_scale, contract)
+    df = rescale_swc_levels(df.copy(), swc_scale)
     new_features = []
 
     # ── interactions ────────────────────────────────────────────────
@@ -205,17 +250,18 @@ def apply_feature_engineering(df, groups, time_scale="daily", verbose=False):
 
     # ── precip_memory ───────────────────────────────────────────────
     if "precip_memory" in groups:
-        if "precip" in df.columns:
-            rain_events = df["precip"] > 0.5
+        _precip, _rain_threshold = _precip_memory_source(df, contract, time_scale)
+        if _precip is not None:
+            rain_events = _precip > _rain_threshold
             no_rain = ~rain_events
             if time_scale == "hourly":
-                df["precip_sum_24h"] = df["precip"].rolling(24, min_periods=1).sum()
-                df["precip_sum_72h"] = df["precip"].rolling(72, min_periods=1).sum()
+                df["precip_sum_24h"] = _precip.rolling(24, min_periods=1).sum()
+                df["precip_sum_72h"] = _precip.rolling(72, min_periods=1).sum()
                 df["hours_since_rain"] = no_rain.groupby(rain_events.cumsum()).cumcount().astype(np.float32)
                 new_features.extend(["precip_sum_24h", "precip_sum_72h", "hours_since_rain"])
             else:
-                df["precip_sum_3d"] = df["precip"].rolling(3, min_periods=1).sum()
-                df["precip_sum_7d"] = df["precip"].rolling(7, min_periods=1).sum()
+                df["precip_sum_3d"] = _precip.rolling(3, min_periods=1).sum()
+                df["precip_sum_7d"] = _precip.rolling(7, min_periods=1).sum()
                 df["days_since_rain"] = no_rain.groupby(rain_events.cumsum()).cumcount().astype(np.float32)
                 new_features.extend(["precip_sum_3d", "precip_sum_7d", "days_since_rain"])
 
@@ -228,7 +274,8 @@ def apply_feature_engineering(df, groups, time_scale="daily", verbose=False):
             (c for c in df.columns if any(x in c.lower() for x in ["volumetric_soil_water", "swc", "sm_"])),
             None,
         )
-        if swc_col:
+        # Quantiles of the site's own record have no grid-cell equivalent: site contract only.
+        if swc_col and contract != SERVABLE_CONTRACT:
             sm_min, sm_max = df[swc_col].quantile([0.05, 0.95])
             df["soil_moisture_rel"] = ((df[swc_col] - sm_min) / (sm_max - sm_min + 0.01)).clip(0, 1)
             df["soil_dry"] = (df["soil_moisture_rel"] < 0.3).astype(np.float32)
@@ -244,11 +291,20 @@ def apply_feature_engineering(df, groups, time_scale="daily", verbose=False):
     if "root_zone_swc" in groups:
         for _layer in [2, 3, 4]:
             swc_col = f"volumetric_soil_water_layer_{_layer}"
-            if swc_col in df.columns:
+            feat = f"swc_layer{_layer}_norm"
+            if contract == SERVABLE_CONTRACT:
+                # ratio: the climatology anomaly (raw - mu_clim) / sigma_clim written into the tree by
+                # src.feature_contract.rebuild_daily. zscore / raw: the level column, already put on
+                # that scale by rescale_swc_levels, so all soil-moisture features share one scale
+                # (under raw this "norm" feature holds m3/m3).
+                _src = f"{swc_col}_zscore" if swc_scale == DEFAULT_SWC_SCALE else swc_col
+                if _src in df.columns:
+                    df[feat] = df[_src]
+                    new_features.append(feat)
+            elif swc_col in df.columns:
                 _vsw = df[swc_col]
                 _vsw_mean = _vsw.mean()
                 _vsw_std = _vsw.std()
-                feat = f"swc_layer{_layer}_norm"
                 df[feat] = (_vsw - _vsw_mean) / _vsw_std if _vsw_std > 1e-10 else 0.0
                 new_features.append(feat)
             st_col = f"soil_temperature_level_{_layer}"
@@ -696,7 +752,11 @@ ALL_FEATURE_GROUPS: list[str] = [
 
 
 def apply_all_feature_engineering(
-    df: pd.DataFrame, time_scale: str = "daily", verbose: bool = False
+    df: pd.DataFrame,
+    time_scale: str = "daily",
+    verbose: bool = False,
+    contract: str = DEFAULT_CONTRACT,
+    swc_scale: str = DEFAULT_SWC_SCALE,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Apply ALL feature engineering unconditionally.
 
@@ -711,15 +771,24 @@ def apply_all_feature_engineering(
     time_scale : str
         'daily' or 'hourly'.
     verbose : bool
+    contract : str
+        ``"site"`` or ``"servable"``, passed to every group; see
+        :mod:`src.feature_contract.definitions`.
+    swc_scale : str
+        ``"ratio"``, ``"zscore"`` or ``"raw"``, passed to every group.
 
     Returns
     -------
     (df, new_feature_names) : tuple
     """
+    contract = validate_contract(contract)
+    swc_scale = validate_swc_scale(swc_scale, contract)
     is_hourly = time_scale == "hourly"
 
     # ── 1. All configurable groups (interactions, rolling, lags, eco-hydro …) ──
-    df, new_features = apply_feature_engineering(df, ALL_FEATURE_GROUPS, time_scale, verbose=False)
+    df, new_features = apply_feature_engineering(
+        df, ALL_FEATURE_GROUPS, time_scale, verbose=False, contract=contract, swc_scale=swc_scale
+    )
 
     # ── 2. Derived scalar features (both scales) ─────────────────────────────
     if "vpd" in df.columns:

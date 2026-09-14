@@ -51,6 +51,8 @@ from path_config import PathConfig  # noqa: E402
 tf.random.set_seed(42)
 np.random.seed(42)
 
+from src.feature_contract.definitions import assert_dataset_contract, validate_swc_scale  # noqa: E402
+
 # Import the hyperparameter optimizer
 from src.hyperparameter_optimization.feature_engineering import (  # noqa: E402
     apply_all_feature_engineering,
@@ -107,6 +109,8 @@ def main(run_id="default"):
     GRID_SIZE = args.grid_size
     R2_METHOD = args.r2_method
     VPD_FILTER = args.vpd_filter
+    FEATURE_CONTRACT = args.FEATURE_CONTRACT
+    SWC_SCALE = validate_swc_scale(args.SWC_SCALE, FEATURE_CONTRACT)
 
     # Initialize target transformer
     target_transformer = TargetTransformer(method=TRANSFORM_METHOD)
@@ -142,6 +146,12 @@ def main(run_id="default"):
         logging.info(f"Using custom data_dir: {data_dir}")
     else:
         data_dir = paths.merged_daytime_only_dir / TIME_SCALE
+
+    # A run may only read a tree built under its own feature contract, checked before any
+    # site loads: a servable run on a legacy tree would take the per-SITE soil-moisture
+    # z-scores as if they were climatological, and nothing downstream could tell.
+    assert_dataset_contract(data_dir.parent, FEATURE_CONTRACT)
+    logging.info(f"Feature contract: {FEATURE_CONTRACT}, swc scale: {SWC_SCALE} (dataset accepted: {data_dir.parent})")
 
     # --- Data Loading and Processing ---
     data_list = sorted(list(data_dir.glob(f"*{TIME_SCALE}.csv")))
@@ -226,7 +236,7 @@ def main(run_id="default"):
             df = add_time_features(df, datetime_column=None)
 
             # Apply ALL feature engineering unconditionally
-            df, _ = apply_all_feature_engineering(df, TIME_SCALE)
+            df, _ = apply_all_feature_engineering(df, TIME_SCALE, contract=FEATURE_CONTRACT, swc_scale=SWC_SCALE)
 
             # Compute canopy conductance if requested as target
             if TARGET_COL == "canopy_conductance":

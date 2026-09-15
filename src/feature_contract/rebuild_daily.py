@@ -45,11 +45,12 @@ from pathlib import Path
 
 import pandas as pd
 from src.feature_contract.definitions import (
-    ERA5_DAILY_PRECIP_COL,
+    ERA5_HOURLY_MEAN_PRECIP_COL,
     PROVENANCE_FILE,
     PROVENANCE_KEY,
     SERVABLE_CONTRACT,
     SERVABLE_RAIN_EVENT_MM_PER_DAY,
+    SIDECAR_FILE,
 )
 from src.feature_contract.swvl_climatology import (
     DEFAULT_MAX_RADIUS_CELLS,
@@ -203,6 +204,17 @@ def verify_untouched_text(src_path: Path, dst_path: Path, touched: Sequence[str]
 
 def _read_provenance(config_dir: Path) -> dict:
     path = config_dir / PROVENANCE_FILE
+    sidecar = config_dir / SIDECAR_FILE
+    if sidecar.exists():
+        # Checked before the provenance block, not instead of it: between the merge and the sweep
+        # that folds the sidecar in, RUN_PROVENANCE.json exists WITHOUT the block, so the block
+        # check alone would let an already-servable tree through and quietly square the sigma.
+        raise ValueError(
+            f"{sidecar} is present: the Stage-4 merge already built this tree under the servable "
+            "contract. Rebuilding it would normalise values that are already normalised -- the bare "
+            "column would become raw/sigma/sigma -- and nothing downstream could tell. Rebuild the "
+            "legacy tree instead, or use this tree as it is."
+        )
     if not path.exists():
         raise FileNotFoundError(f"{path} not found; the source tree must carry its merge provenance")
     with open(path) as fh:
@@ -231,8 +243,8 @@ def _contract_block(clim, src: Path, layers: Sequence[int], max_radius_cells: in
             "untouched_cells": "copied as text, verified string-identical per file",
         },
         "precip_memory": {
-            "source_column": ERA5_DAILY_PRECIP_COL,
-            "units": "metres per day, converted to mm/day",
+            "source_column": ERA5_HOURLY_MEAN_PRECIP_COL,
+            "units": "daily mean of hourly metres, x 24 x 1000 -> mm/day; also the servable precip",
             "rain_event_mm_per_day": SERVABLE_RAIN_EVENT_MM_PER_DAY,
             "where": "feature_engineering under --FEATURE_CONTRACT servable; the tree already carries the column",
         },

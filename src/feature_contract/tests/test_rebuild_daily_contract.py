@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+from src.feature_contract.definitions import SIDECAR_FILE
 from src.feature_contract.rebuild_daily import CONTRACT_NAME, rebuild_tree
 
 LATS = np.array([52.0, 51.9, 51.8])
@@ -195,6 +196,18 @@ def test_refuses_to_overwrite_an_existing_destination(src_tree, cube_path, tmp_p
     dst.mkdir()
     with pytest.raises(FileExistsError):
         rebuild_tree(src_tree, dst, cube_path, layers=(1,))
+
+
+def test_refuses_a_tree_the_merge_already_built_servable(src_tree, cube_path, tmp_path):
+    """Rebuilding a merge-native tree would divide by sigma twice, and the result still looks like a
+    number, so nothing downstream could catch it.
+
+    This fixture's RUN_PROVENANCE.json carries no feature_contract block -- exactly the state between
+    the merge and the sweep that folds the sidecar in -- so the block check alone lets it through.
+    """
+    (src_tree / SIDECAR_FILE).write_text(json.dumps({"name": CONTRACT_NAME}))
+    with pytest.raises(ValueError, match=SIDECAR_FILE):
+        rebuild_tree(src_tree, tmp_path / "dst_guard" / "fullyear_fullday_tx", cube_path, layers=(1,))
 
 
 def test_a_missing_raw_column_fails_loudly(tmp_path, cube_path):

@@ -1,28 +1,34 @@
 """The two feature contracts, and the gate that ties a run to a dataset built under its own.
 
-``site``      legacy. Several features are statistics of each site's OWN record, and
-              precipitation memory reads the site gauge:
+``site``      legacy. Some features are statistics of each site's OWN record, and
+              precipitation reads the site gauge:
 
-              * bare ``volumetric_soil_water_layer_L`` = raw / std(site's hourly record)
-                (the merge; a 13-day record gives values five times a 3-year one)
-              * ``swc_layer{2,3,4}_norm`` = z-score over the site's record
+              * ``volumetric_soil_water_layer_L_zscore`` = z-score over the site's hourly
+                record (the merge)
               * ``soil_moisture_rel`` / ``soil_dry`` = the site's 5th-95th percentiles
+              * ``precip`` = the gauge's daily MEAN of hourly mm, and ``precip_lag1d``
               * ``precip_sum_*`` / ``*_since_rain`` from gauge ``precip``
 
               None of these exists for a 0.1 deg prediction cell.
 
 ``servable``  each of them is replaced by a definition a grid cell can reproduce:
-              soil moisture normalised by the per-cell 1995-2018 ERA5-Land climatology
-              (written into the tree by :mod:`src.feature_contract.rebuild_daily`), and
-              precipitation memory from ERA5-Land daily precipitation. The two
+              the soil-moisture anomaly over the per-cell 1995-2018 ERA5-Land climatology
+              (written by the Stage-4 merge under ``--feature-contract servable``; an older tree is
+              converted by :mod:`src.feature_contract.rebuild_daily` instead), and
+              ERA5-Land daily precipitation in mm/day (the daily mean of the hourly values
+              x 24, see :data:`ERA5_HOURLY_MEAN_PRECIP_COL`), the unit the prediction pipeline
+              serves, as both ``precip`` and the source of precipitation memory. The two
               site-quantile indicators have no such equivalent and are not emitted.
 
-              Under ``servable`` the soil-moisture SCALE is a further choice (``--SWC_SCALE``):
+Soil moisture has ONE definition per quantity per layer L, under both contracts:
 
-              * ``ratio``   level columns raw / sigma_clim, ``swc_layer*_norm`` the climatology
-                            z-score (the legacy split, with climatology statistics)
-              * ``zscore``  every soil-moisture feature from (raw - mu_clim) / sigma_clim
-              * ``raw``     every soil-moisture feature from raw m3/m3
+* ``volumetric_soil_water_layer_L_raw``     level, m3/m3. The only input of every derived
+  soil-moisture feature: lags, day-to-day change, running anomaly, interactions, rew, psi_soil.
+* ``volumetric_soil_water_layer_L_zscore``  anomaly, standardised as the contract says above.
+
+Retired on 2026-09-14 (:data:`RETIRED_SWC_FEATURES`): the bare column, raw / sigma, which is
+neither a level nor an anomaly, and ``swc_layer{2,3,4}_norm``, a second z-score of the same
+layer. The merge still writes the bare column; no feature may read it.
 
 Free of xarray so the trainer can run the gate before loading anything heavy.
 """
@@ -41,6 +47,13 @@ SERVABLE_CONTRACT = "servable"
 PROVENANCE_FILE = "RUN_PROVENANCE.json"
 PROVENANCE_KEY = "feature_contract"
 
+#: The Stage-4 merge writes the contract block beside ``daily/`` under this name, and the cells it
+#: normalised against under the next. Their presence is the record that a tree was built servable in
+#: one pass -- and it is what tells :mod:`src.feature_contract.rebuild_daily` to keep its hands off,
+#: since normalising an already-normalised tree cannot be detected from the values afterwards.
+SIDECAR_FILE = "feature_contract.json"
+CELLS_FILE = "feature_contract_cells.csv"
+
 #: ``precip`` at daily scale is the daily MEAN of hourly gauge mm (``precip_sum / precip == 24``
 #: in the merged tree), so this threshold means more than ~12 mm/day. Kept exactly as it was.
 SITE_RAIN_EVENT_THRESHOLD = 0.5
@@ -53,14 +66,6 @@ SERVABLE_RAIN_EVENT_MM_PER_DAY = 1.0
 ERA5_DAILY_PRECIP_COL = "total_precipitation_hourly_sum"
 M_TO_MM = 1000.0
 
-SWC_SCALES = ("ratio", "zscore", "raw")
-DEFAULT_SWC_SCALE = "ratio"
-#: The column family each non-default scale reads its values from.
-SWC_SCALE_COMPANION = {"zscore": "_zscore", "raw": "_raw"}
-SWC_LEVEL_TEMPLATE = "volumetric_soil_water_layer_{layer}"
-SWC_LAYERS = (1, 2, 3, 4)
-SWC_STAT_SUFFIXES = ("", "_min", "_max", "_sum")
-
 
 def validate_contract(contract: str) -> str:
     """Return ``contract`` if it is a known feature contract, else raise ``ValueError``."""
@@ -69,53 +74,82 @@ def validate_contract(contract: str) -> str:
     return contract
 
 
-def validate_swc_scale(swc_scale: str, contract: str) -> str:
-    """Return ``swc_scale`` if it is known and allowed under ``contract``, else raise ``ValueError``.
-
-    Only ``ratio`` exists under ``site``: there the ``_zscore`` columns are per-SITE z-scores, and
-    the point of the other scales is a definition a grid cell can reproduce.
-    """
-    if swc_scale not in SWC_SCALES:
-        raise ValueError(f"unknown swc scale {swc_scale!r}; expected one of {SWC_SCALES}")
-    if swc_scale != DEFAULT_SWC_SCALE and contract != SERVABLE_CONTRACT:
-        raise ValueError(f"swc scale {swc_scale!r} is defined for feature contract 'servable' only, not {contract!r}")
-    return swc_scale
+#: ERA5-Land soil layers: 0-7, 7-28, 28-100 and 100-289 cm.
+SWC_LAYERS = (1, 2, 3, 4)
+SWC_LEVEL_SUFFIX = "_raw"
+SWC_ANOMALY_SUFFIX = "_zscore"
+#: Daily-statistic suffixes the merged tree appends to either family, e.g. ``..._raw_min``.
+SWC_STAT_SUFFIXES = ("", "_min", "_max", "_sum")
 
 
-def rescale_swc_levels(df: pd.DataFrame, swc_scale: str) -> pd.DataFrame:
-    """Put the soil-moisture level columns on the scale ``swc_scale`` selects.
+def _swc_base(layer: int) -> str:
+    if layer not in SWC_LAYERS:
+        raise ValueError(f"unknown soil-moisture layer {layer!r}; expected one of {SWC_LAYERS}")
+    return f"volumetric_soil_water_layer_{layer}"
 
-    In a servable tree ``volumetric_soil_water_layer_L{,_min,_max,_sum}`` hold raw / sigma_clim.
-    ``zscore`` replaces each with its ``_zscore`` companion and ``raw`` with its ``_raw``
-    companion, so every feature later built from a level column (lags, interactions) inherits
-    that scale. ``ratio`` returns ``df`` itself. Companion columns are never changed; any other
-    scale returns a new frame.
 
-    Raises ``KeyError`` when a level column exists without its companion: keeping it would leave
-    that one feature on a different scale from the rest, and nothing downstream would notice.
-    """
-    if swc_scale not in SWC_SCALES:
-        raise ValueError(f"unknown swc scale {swc_scale!r}; expected one of {SWC_SCALES}")
-    if swc_scale == DEFAULT_SWC_SCALE:
-        return df
-    companion = SWC_SCALE_COMPANION[swc_scale]
-    replacements = {}
+def swc_level_col(layer: int) -> str:
+    """The level column of ``layer``: volumetric water content, m3/m3."""
+    return _swc_base(layer) + SWC_LEVEL_SUFFIX
+
+
+def swc_anomaly_col(layer: int) -> str:
+    """The anomaly column of ``layer``: (raw - mu) / sigma, mu and sigma as the contract defines them."""
+    return _swc_base(layer) + SWC_ANOMALY_SUFFIX
+
+
+#: The one input of every derived soil-moisture feature of the top layer.
+SWC_DERIVED_SOURCE = swc_level_col(1)
+
+
+def _retired_swc_features() -> dict:
+    retired = {}
     for layer in SWC_LAYERS:
-        base = SWC_LEVEL_TEMPLATE.format(layer=layer)
-        for suffix in SWC_STAT_SUFFIXES:
-            level = f"{base}{suffix}"
-            if level not in df.columns:
-                continue
-            source = f"{base}{companion}{suffix}"
-            if source not in df.columns:
-                raise KeyError(f"swc scale {swc_scale!r}: {level!r} has no {source!r} column to take its values from")
-            replacements[level] = df[source]
-    return df.assign(**replacements)
+        for stat in SWC_STAT_SUFFIXES:
+            level, anomaly = swc_level_col(layer) + stat, swc_anomaly_col(layer) + stat
+            retired[_swc_base(layer) + stat] = f"{level} (level) or {anomaly} (anomaly)"
+    for layer in SWC_LAYERS[1:]:
+        retired[f"swc_layer{layer}_norm"] = swc_anomaly_col(layer)
+    return retired
+
+
+#: Soil-moisture feature names retired on 2026-09-14, each mapped to its replacement.
+RETIRED_SWC_FEATURES = _retired_swc_features()
+
+
+def assert_no_retired_swc_features(names, source: str) -> None:
+    """Raise ``ValueError`` when ``names`` contains a retired soil-moisture feature.
+
+    The merge still writes the bare columns, so a stale feature list does not fail as "missing":
+    it would train on the retired definition and nothing downstream would notice. ``source``
+    names the list in the message.
+    """
+    stale = sorted(set(names) & set(RETIRED_SWC_FEATURES))
+    if stale:
+        detail = "; ".join(f"{name} -> {RETIRED_SWC_FEATURES[name]}" for name in stale)
+        raise ValueError(f"{source} names retired soil-moisture features: {detail}")
 
 
 def era5_precip_mm_per_day(precip_m: pd.Series) -> pd.Series:
     """ERA5-Land daily precipitation in metres -> mm/day, with tiny negative reanalysis values set to 0."""
     return (precip_m * M_TO_MM).clip(lower=0.0)
+
+
+#: Daily MEAN of the ERA5-Land hourly precipitation values at the site, metres per hour (a merge
+#: output column). The daily SUM counts only the hours present in the merged hourly frame, and 2.1%
+#: of sap-days in the 2026-09-02 servable tree have fewer than 24 (FIN_HYY_SME and SEN_SOU_* 23 on
+#: every day, others down to 1), so the sum undercounts where the mean does not.
+ERA5_HOURLY_MEAN_PRECIP_COL = "total_precipitation_hourly"
+HOURS_PER_DAY = 24
+
+
+def era5_hourly_mean_precip_mm_per_day(mean_m_per_hour: pd.Series) -> pd.Series:
+    """ERA5-Land daily mean of hourly precipitation, m/h -> mm/day; tiny negative values set to 0.
+
+    The unit of the prediction pipeline's daily total. A day without ERA5 hours stays NaN, where the
+    merge's daily sum reads 0 mm.
+    """
+    return (mean_m_per_hour * HOURS_PER_DAY * M_TO_MM).clip(lower=0.0)
 
 
 def assert_dataset_contract(config_dir, contract: str) -> None:
@@ -127,26 +161,35 @@ def assert_dataset_contract(config_dir, contract: str) -> None:
       A legacy tree also carries ``*_zscore`` columns, but they are per-SITE z-scores; reading
       them as climatological would train a model that looks servable and is not.
     * ``site`` accepts legacy trees (with or without provenance) and refuses a servable tree,
-      whose bare soil-moisture columns are no longer the per-site normalisation.
+      whose ``*_zscore`` columns hold the climatology anomaly, not the per-site z-score.
     """
     contract = validate_contract(contract)
-    path = Path(config_dir) / PROVENANCE_FILE
+    directory = Path(config_dir)
+    path = directory / PROVENANCE_FILE
+    sidecar = directory / SIDECAR_FILE
     block = None
     if path.exists():
         with open(path) as fh:
             block = json.load(fh).get(PROVENANCE_KEY)
+    if not isinstance(block, dict) and sidecar.exists():
+        # The merge writes its badge here and the sweep folds it into the provenance afterwards. A
+        # tree is servable the moment the merge finishes, so the fold is a convenience, not a gate.
+        with open(sidecar) as fh:
+            block = json.load(fh)
     built_as = block.get("name") if isinstance(block, dict) else None
 
     if contract == SERVABLE_CONTRACT:
-        if not path.exists():
+        if not path.exists() and not sidecar.exists():
             raise ValueError(
-                f"feature contract 'servable' needs {PROVENANCE_FILE} under {config_dir}, and there is none. "
-                "Build the tree with `python -m src.feature_contract.rebuild_daily`."
+                f"feature contract 'servable' needs {PROVENANCE_FILE} or {SIDECAR_FILE} under "
+                f"{config_dir}, and there is neither. Build the tree with the Stage-4 merge (it is "
+                "servable by default), or convert an existing one with "
+                "`python -m src.feature_contract.rebuild_daily`."
             )
         if built_as != SERVABLE_CONTRACT:
             raise ValueError(
-                f"feature contract 'servable' needs a '{PROVENANCE_KEY}' block naming 'servable' in {path}; "
-                f"found {block!r}"
+                f"feature contract 'servable' needs a '{PROVENANCE_KEY}' block naming 'servable' in "
+                f"{path}, or a {SIDECAR_FILE} naming it; found {block!r}"
             )
         return
 

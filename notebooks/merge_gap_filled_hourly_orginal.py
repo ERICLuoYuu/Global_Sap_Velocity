@@ -9,6 +9,24 @@ import pvlib
 
 # Assuming path_config is in your local environment
 from path_config import get_default_paths
+from src.feature_contract.definitions import SERVABLE_CONTRACT, validate_contract
+from src.feature_contract.merge_contract import (
+    DEFAULT_MAX_RADIUS_CELLS,
+    DEFAULT_SWVL_CUBE,
+    FeatureContractError,
+    apply_servable_precip,
+    cell_rows,
+    clear_sidecar,
+    contract_block,
+    load_cube,
+    preflight_cells,
+    require_era5_precip,
+    rename_gauge_columns,
+    swc_climatology_moments,
+    write_sidecar,
+)
+from src.site_info.pft_resolution import load_site_landcover_modes, resolve_pft, summarise
+from src.site_info.derive_igbp import derive_for_scale, derived_only
 
 paths = get_default_paths()
 
@@ -220,11 +238,11 @@ def load_stand_age_map(base_path):
     """
     Load the global stand age CSV and create a dictionary mapping site_name -> mean_age.
     """
-    age_file_path = base_path / "extracted_data" / "terrain_site_data" / "sapwood" / "stand_age_data.csv"
+    age_file_path = base_path / "extracted_data" / "terrain_site_data" / paths.scale / "stand_age_data.csv"
 
     if not age_file_path.exists():
         age_file_path = (
-            paths.base_data_dir / "raw" / "extracted_data" / "terrain_site_data" / "sapwood" / "stand_age_data.csv"
+            paths.base_data_dir / "raw" / "extracted_data" / "terrain_site_data" / paths.scale / "stand_age_data.csv"
         )
 
     if age_file_path.exists():
@@ -239,20 +257,420 @@ def load_stand_age_map(base_path):
     return {}
 
 
+#: Written into ``biome`` when a site ships no ``si_biome``. A NAMED placeholder,
+#: never NaN: the by-biome filename is built by ITERATING the label (NaN is not
+#: iterable), and NaN never compares equal to itself, so a NaN key gives every
+#: unlabelled site its own dict entry -- which then all collapse onto a single
+#: filename and silently keep only the last. 24 internal sites have no si_biome.
+UNCLASSIFIED_BIOME = "Unclassified"
+
+#: Env variables the merge carries forward. Anything else an env file ships --
+#: ``pa``, ``swc_shallow`` -- is dropped, which is what the old post-join
+#: aggregation did by omitting them from its rules; naming them makes it explicit.
+ENV_MEAN_COLS = ("vpd", "ta", "ws", "sw_in", "rh", "netrad", "ppfd_in", "ext_rad")
+
+#: Env variables that are TOTALS accumulated over the reporting interval rather
+#: than instantaneous states, so they are summed when collapsing to the hour.
+ENV_SUM_COLS = ("precip",)
+
+#: Sap-side columns that are static per tree and carried through unchanged.
+SAP_META_COLS = ("pl_code", "pl_dbh", "pl_sens_meth", "pl_species")
+
+#: Sap-side measurement columns that ``--daytime-sap-only`` rescopes to daylight.
+#: Env names are deliberately absent. The global prediction is served from the CDS
+#: product ``derived-era5-land-daily-statistics``, whose daily_mean / daily_minimum /
+#: daily_maximum are 24-HOUR statistics, so narrowing an env column to daylight here
+#: makes the trained feature mean something the served feature does not. Only the
+#: target moves; adding a name to this tuple reintroduces that skew.
+SAP_DAYTIME_COLS = ("sap_velocity",)
+
+
+def apply_daytime_sap_scope(df_daily, df_hourly, daytime_mask, sap_cols=SAP_DAYTIME_COLS, plant_level=False):
+    """Return ``df_daily`` with its sap statistics recomputed over daylight only.
+
+    ``--daytime-only`` filters the hourly frame BEFORE the daily aggregation, so it
+    rescopes every column at once. This is the narrow version: the 24-hour frame
+    supplies the row index and every env column, and a second pass over the daylight
+    hours alone overwrites the sap columns in place. Rows are never dropped -- a day
+    keeps its env even when it holds no daylight at all.
+
+    Days with no daylight hours come back NaN, not 0.0. ``resample("D").sum()``
+    reports 0.0 for a day holding no rows, which reads downstream as a genuine
+    "the tree moved no water" measurement rather than an absent one. ``min_count=1``
+    is what stops that, and it is load-bearing at the polar sites (FIN_HYY, SWE_NOR)
+    where whole days sit below the horizon.
+    """
+    present = [c for c in sap_cols if c in df_hourly.columns and c in df_daily.columns]
+    if not present:
+        return df_daily.copy()
+
+    by_plant = plant_level and "pl_code" in df_hourly.columns and "pl_code" in df_daily.columns
+    keys = ["TIMESTAMP", "pl_code"] if by_plant else ["TIMESTAMP"]
+
+    wanted = ["TIMESTAMP"] + present + (["pl_code"] if by_plant else [])
+    lit = df_hourly.loc[np.asarray(daytime_mask, dtype=bool), wanted].set_index("TIMESTAMP")
+
+    if by_plant:
+        # pl_code as an EXTERNAL grouping key, mirroring aggregate_sap_to_hourly:
+        # resampling a frame that still carries its own grouping column is
+        # deprecated, and selecting columns instead returns MultiIndex columns.
+        codes = lit["pl_code"]
+        resampler = lit.drop(columns=["pl_code"]).groupby(codes).resample("D")
+    else:
+        resampler = lit.resample("D")
+
+    stats = {
+        "": resampler.mean(),
+        "_min": resampler.min(),
+        "_max": resampler.max(),
+        # min_count=1 keeps a day with no daylight rows at NaN instead of 0.0.
+        "_sum": resampler.sum(min_count=1),
+    }
+    daytime = pd.concat(
+        [frame.rename(columns={c: f"{c}{suffix}" for c in present}) for suffix, frame in stats.items()],
+        axis=1,
+    ).reset_index()
+
+    # Align on the keys rather than merging, so the 24-hour frame keeps both its
+    # row order and its column order; days absent from the daylight pass resolve
+    # to NaN, which is the honest answer for a day that was never lit.
+    out = df_daily.copy()
+    target = daytime.set_index(keys)
+    lookup = pd.MultiIndex.from_frame(out[keys]) if len(keys) > 1 else pd.Index(out[keys[0]])
+    for col in target.columns:
+        out[col] = target[col].reindex(lookup).to_numpy()
+    return out
+
+
+def _drop_manufactured_hours(hourly, rows_per_hour):
+    """Remove hours ``resample`` invented across a gap.
+
+    ``resample("h")`` returns a CONTIGUOUS index, so every hour inside a gap
+    comes back as a row. Emptiness is judged by the number of SOURCE rows, not
+    by the aggregated values, because a summed column reports 0.0 for an
+    all-NaN hour and would make a genuinely empty hour look populated.
+    """
+    return hourly[rows_per_hour > 0]
+
+
+def aggregate_env_to_hourly(env_data, mean_cols=ENV_MEAN_COLS, sum_cols=ENV_SUM_COLS):
+    """Collapse env to one row per hour, keeping only hours that hold observations.
+
+    Precipitation is a total over the interval and is summed HERE, once. Because
+    the join downstream is hour-to-hour, this value is never duplicated, so no
+    later step has to know not to re-sum it.
+
+    An hour whose readings are all missing stays missing (``min_count=1``). The plain
+    sum wrote 0.0 there: 541,019 hours at 155 sites, and 20,849 sap-days on which the
+    gauge had no reading at all reached the model as dry days (measured 2026-09-14).
+    """
+    totals = [c for c in sum_cols if c in env_data.columns]
+    means = [c for c in mean_cols if c in env_data.columns]
+    binned = env_data[means + totals].resample("h")
+    parts = []
+    if totals:
+        parts.append(binned[totals].sum(min_count=1))
+    if means:
+        parts.append(binned[means].mean())
+    rows_per_hour = binned.size()
+    hourly = pd.concat(parts, axis=1) if parts else pd.DataFrame(index=rows_per_hour.index)
+    return _drop_manufactured_hours(hourly, rows_per_hour)
+
+
+def aggregate_sap_to_hourly(sap_data, plant_level=False):
+    """Collapse sap to one row per hour -- per tree when ``plant_level``.
+
+    The mirror of aggregate_env_to_hourly. Reducing each side on its own terms
+    before joining is what lets two deliveries with different clocks meet at all:
+    FRA_HES shares no instant with its env, but it shares every hour.
+    """
+    rules = {"sap_velocity": "mean"}
+    if "solar_TIMESTAMP" in sap_data.columns:
+        rules["solar_TIMESTAMP"] = "first"
+    for col in SAP_META_COLS:
+        if col != "pl_code" and col in sap_data.columns:
+            rules[col] = "first"
+
+    if plant_level and "pl_code" in sap_data.columns:
+        # Group by pl_code as an EXTERNAL key, with the column dropped from the
+        # frame being resampled. DataFrameGroupBy.resample otherwise operates on
+        # the grouping column, which pandas deprecates; selecting columns instead
+        # (``groupby(...)[[cols]]``) silences it but makes agg() return MultiIndex
+        # columns, which then cannot be joined against the single-level env frame.
+        # pl_code comes back as an index level and is restored below.
+        codes = sap_data["pl_code"]
+        grouped = sap_data.drop(columns=["pl_code"]).groupby(codes)
+        hourly = _drop_manufactured_hours(grouped.resample("h").agg(rules), grouped.resample("h").size())
+        return hourly.reset_index().set_index("TIMESTAMP")
+
+    return _drop_manufactured_hours(sap_data.resample("h").agg(rules), sap_data.resample("h").size())
+
+
+#: Instants are rounded to the minute before any hourly binning. 79 of 225 env files store some instants
+#: one second early ("01:59:59"); floored to the hour, that reading lands in the previous hour, and at
+#: SEN_SOU_* every midnight reading lands in the previous UTC day (measured 2026-09-14).
+TIMESTAMP_RESOLUTION = "min"
+
+HOURS_PER_DAY = 24
+MINUTES_PER_HOUR = 60
+MINUTES_PER_DAY = 1440
+
+#: ERA5-Land extract columns that identify the site rather than describe its weather.
+ERA5_ID_COLS = ("site_id", "site_name", "latitude", "longitude")
+
+#: Daily statistics written per dynamic column; the mean keeps the bare name.
+DAILY_STAT_SUFFIXES = ("", "_min", "_max", "_sum")
+
+#: ERA5-Land soil-moisture layers, and the per-site standard deviation below which they are not normalised.
+SWC_LAYERS = (1, 2, 3, 4)
+SWC_MIN_STD = 1e-10
+
+
+def round_instants(frame):
+    """Return a copy of ``frame`` with its DatetimeIndex rounded to :data:`TIMESTAMP_RESOLUTION`."""
+    out = frame.copy()
+    out.index = pd.DatetimeIndex(out.index.round(TIMESTAMP_RESOLUTION), name=frame.index.name)
+    return out
+
+
+def normalise_timestamps(frame):
+    """Round the index to the minute and collapse the rows rounding made one instant.
+
+    Each column takes its first non-missing value. A duplicated instant would be summed twice by the hourly
+    precipitation total; keeping the whole first row instead dropped the second of two logger streams stored
+    seconds apart (PRT_LEZ_ARN 16:00:00 env empty, 16:00:09 env valid): 285,967 values at 15 sites
+    (measured 2026-09-14).
+    """
+    out = round_instants(frame)
+    if not out.index.has_duplicates:
+        return out
+    return out.groupby(level=0).first()
+
+
+def _utc(index):
+    index = pd.DatetimeIndex(index)
+    return index.tz_localize("UTC") if index.tz is None else index.tz_convert("UTC")
+
+
+def daylight_hours(lat, lon, elevation):
+    """A ``keep_hours`` callable for ``--daytime-only``: True where the sun is above the horizon."""
+    elevation = 0 if pd.isna(elevation) else elevation
+
+    def keep(stamps):
+        return np.asarray(calculate_daytime_mask(stamps, lat=lat, lon=lon, elevation=elevation), dtype=bool)
+
+    return keep
+
+
+def _expected_hours(days, keep_hours):
+    """Hours a complete day needs: 24, or the hours of that day ``keep_hours`` retains."""
+    if keep_hours is None or len(days) == 0:
+        return pd.Series(HOURS_PER_DAY, index=days)
+    grid = pd.date_range(days.min(), days.max() + pd.Timedelta(hours=HOURS_PER_DAY - 1), freq="h")
+    kept = pd.Series(keep_hours(grid), index=grid)
+    return kept.groupby(grid.floor("D")).sum().reindex(days).fillna(0).astype(int)
+
+
+def _stat_columns(columns):
+    return [col + suffix for col in columns for suffix in DAILY_STAT_SUFFIXES]
+
+
+def complete_day_statistics(hourly, columns, keep_hours=None):
+    """Daily mean (bare name), ``_min``, ``_max`` and ``_sum`` of hourly ``columns``, one row per UTC day.
+
+    ``hourly`` holds at most one row per hour. A column's statistics for a day are NaN unless every hour
+    the day needs holds a value -- 24, or the hours ``keep_hours`` retains -- so a daily total is never
+    the total of part of a day, and a daily maximum never misses the afternoon.
+    """
+    columns = list(columns)
+    frame = hourly[columns].set_axis(_utc(hourly.index), axis=0)
+    if frame.index.has_duplicates:
+        raise ValueError("complete_day_statistics needs one row per hour; the index has duplicates")
+    if keep_hours is not None and len(frame):
+        frame = frame[keep_hours(frame.index)]
+    if frame.empty:
+        return pd.DataFrame(columns=_stat_columns(columns), index=pd.DatetimeIndex([], tz="UTC"), dtype=float)
+    day = frame.resample("D")
+    count = day.count()
+    complete = count.ge(_expected_hours(count.index, keep_hours), axis=0) & count.gt(0)
+    stats = {"": day.mean(), "_min": day.min(), "_max": day.max(), "_sum": day.sum(min_count=1)}
+    parts = [values.where(complete).add_suffix(suffix) for suffix, values in stats.items()]
+    return pd.concat(parts, axis=1)[_stat_columns(columns)]
+
+
+def swc_site_moments(hourly):
+    """Mean and standard deviation of each ERA5-Land soil-moisture layer over the site's merged hours."""
+    moments = {}
+    for layer in SWC_LAYERS:
+        col = f"volumetric_soil_water_layer_{layer}"
+        if col in hourly.columns:
+            moments[col] = (hourly[col].mean(), hourly[col].std())
+    return moments
+
+
+def add_swc_representations(frame, moments, site, warn=True):
+    """Return a copy of ``frame`` with three representations of each soil-moisture layer in ``moments``.
+
+    ``*_raw`` is the level in m3/m3; the bare column becomes raw / sigma and ``*_zscore`` (raw - mu) / sigma,
+    mu and sigma taken from ``moments``. A sigma at or below :data:`SWC_MIN_STD` (or NaN) writes 0.0 to both.
+    """
+    out = frame.copy()
+    for col, (mean, std) in moments.items():
+        if col not in out.columns:
+            continue
+        raw = out[col]
+        out[f"{col}_raw"] = raw
+        if std > SWC_MIN_STD:
+            out[col] = raw / std
+            out[f"{col}_zscore"] = (raw - mean) / std
+        else:
+            out[col] = 0.0
+            out[f"{col}_zscore"] = 0.0
+            if warn:
+                print(f"  Warning: {site} has near-zero std for {col}")
+    return out
+
+
+def era5_daily_for_site(era5_site, swc_moments, site, keep_hours=None):
+    """Daily statistics of every ERA5-Land column over ERA5's own hours of each UTC day.
+
+    ``era5_site`` is this site's slice of the extract, TIMESTAMP as a column. The merged hourly frame holds
+    only the hours in which sap AND env observed, so statistics taken there covered part of a day wherever
+    either side had a gap: 2.2% of sap-days, where total precipitation read 19% low and the 2 m
+    temperature maximum more than 1 K low on 267 days (measured 2026-09-14). ERA5-Land has every hour.
+    Soil temperature is aggregated like every other column; the old ``soil_`` static prefix took its
+    first hour. The soil-moisture representations use the moments of the merged hours, as hourly.
+    """
+    frame = era5_site.drop(columns=[c for c in ERA5_ID_COLS if c in era5_site.columns])
+    frame = frame.set_index("TIMESTAMP").sort_index()
+    frame = frame[~frame.index.duplicated(keep="first")]
+    frame = add_swc_representations(frame, swc_moments, site, warn=False)
+    numeric = [c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
+    return complete_day_statistics(frame, numeric, keep_hours)
+
+
+def gauge_reporting_minutes(values):
+    """The usual interval between a gauge's valid readings, in minutes; NaN with fewer than two."""
+    stamps = pd.DatetimeIndex(values.dropna().index)
+    if len(stamps) < 2:
+        return np.nan
+    steps = np.diff(stamps.as_unit("s").asi8) / 60.0
+    steps = steps[steps > 0]
+    return float(pd.Series(steps).mode().iloc[0]) if len(steps) else np.nan
+
+
+def gauge_daily_totals(readings, col, keep_hours=None):
+    """Daily totals of gauge column ``col`` from the env record's own readings, one row per UTC day.
+
+    Taken from the env file, not the merged hourly frame, which drops env hours that have no sap. A day is
+    complete when every slot of it holds a valid reading. A slot is one hour, or the gauge's reporting
+    interval where that is longer (CRI_TAM_TOW reports once a day, RUS_CHE_Y4 every 12 h). A reading
+    missing inside an hour of a sub-hourly gauge is not detected.
+
+    Columns: ``{col}`` and ``{col}_sum`` the total, ``{col}_min`` / ``{col}_max`` the smallest and largest
+    slot total -- all NaN on an incomplete day -- and ``{col}_coverage``, the fraction of slots holding a
+    reading. ``keep_hours`` scopes an hourly-slot gauge to the retained hours; a coarser gauge cannot be
+    split and is not scoped.
+    """
+    names = [col, f"{col}_min", f"{col}_max", f"{col}_sum", f"{col}_coverage"]
+    empty = pd.DataFrame(columns=names, index=pd.DatetimeIndex([], tz="UTC"), dtype=float)
+    values = pd.to_numeric(readings[col], errors="coerce").set_axis(_utc(readings.index)).dropna()
+    if values.empty:
+        return empty
+    step = gauge_reporting_minutes(values)
+    slot = int(round(step)) if step > MINUTES_PER_HOUR else MINUTES_PER_HOUR
+    totals = values.resample(f"{slot}min", origin="start_day").sum(min_count=1).dropna()
+    hourly_slots = slot == MINUTES_PER_HOUR
+    if hourly_slots and keep_hours is not None:
+        totals = totals[keep_hours(totals.index)]
+    if totals.empty:
+        return empty
+    day = totals.resample("D")
+    count = day.count()
+    if hourly_slots:
+        expected = _expected_hours(count.index, keep_hours)
+    else:
+        expected = pd.Series(max(1, int(round(MINUTES_PER_DAY / slot))), index=count.index)
+    complete = (count >= expected) & (count > 0)
+    total = day.sum(min_count=1).where(complete)
+    out = pd.DataFrame(
+        {
+            col: total,
+            f"{col}_min": day.min().where(complete),
+            f"{col}_max": day.max().where(complete),
+            f"{col}_sum": total,
+            f"{col}_coverage": (count / expected.where(expected > 0)).clip(upper=1.0),
+        }
+    )
+    return out[names]
+
+
+def overwrite_daily_columns(df_daily, daily, day_col="TIMESTAMP"):
+    """Return a copy of ``df_daily`` with the columns of ``daily`` set by UTC day.
+
+    A day ``daily`` does not hold becomes NaN. Existing columns keep their position and new ones are
+    appended; rows are never added or dropped, and every tree of a plant-level frame gets its day's value.
+    """
+    out = df_daily.copy()
+    lookup = _utc(out[day_col])
+    for col in daily.columns:
+        out[col] = daily[col].reindex(lookup).to_numpy()
+    return out
+
+
+def _preflight_sites(sap_input_dir, raw_csv_dir, suffix_words=4):
+    """(site, lat, lon) for every sap file whose site metadata carries a coordinate.
+
+    The climatology lookup runs over this before the main loop, so a site that cannot be placed is
+    known before any work is done. Three kinds of site are left out here, and they do NOT share a
+    fate. A site whose ``*_site_md.csv`` is missing or unreadable is skipped by the main loop too --
+    the loop reads the same file inside a try whose except continues -- so it is absent either way.
+    A site whose coordinate is NaN is NOT skipped by the loop: under the servable contract it raises
+    there instead, naming the site, rather than quietly shrinking the corpus. Each is reported.
+    """
+    sites = []
+    for sap_file in sorted(sap_input_dir.glob("*.csv")):
+        site = "_".join(sap_file.stem.split("_")[:-suffix_words])
+        md_file = raw_csv_dir / f"{site}_site_md.csv"
+        if not md_file.is_file():
+            print(f"  [contract] {site}: no {md_file.name}; the main loop skips it as well")
+            continue
+        try:
+            md = pd.read_csv(md_file, usecols=["si_lat", "si_long"], nrows=1)
+        except Exception as exc:  # noqa: BLE001 - an unreadable coordinate stays the loop's business
+            print(f"  [contract] {site}: cannot read si_lat/si_long ({exc})")
+            continue
+        if md.empty or pd.isna(md["si_lat"][0]) or pd.isna(md["si_long"][0]):
+            # The loop does NOT skip this one: it will raise under the servable contract. Say so
+            # here, where the reason is known, so the later failure is not the first anyone hears.
+            print(f"  [contract] {site}: si_lat/si_long is empty, so it cannot be placed")
+            continue
+        sites.append((site, float(md["si_lat"][0]), float(md["si_long"][0])))
+    return sites
+
+
 def merge_sap_env_data_site(
     output_base_dir,
     daytime_only=False,
+    daytime_sap_only=False,
     plant_level=False,
     growing_season_only=False,
     apply_flo2019_correction_flag=False,
     apply_treatment_filter_flag=False,
+    feature_contract=SERVABLE_CONTRACT,
+    swvl_cube=DEFAULT_SWVL_CUBE,
 ):
     """
     Merge sap flow and environmental data for all sites.
 
     Args:
         output_base_dir: Base directory for output files
-        daytime_only: If True, filter to daytime data only before daily aggregation
+        daytime_only: If True, filter to daytime data only before daily aggregation.
+                     Rescopes EVERY column, env variables included.
+        daytime_sap_only: If True, scope only the sap target to daylight and leave
+                     env variables at their 24-hour daily statistics, matching the
+                     CDS product the global prediction is served from. Mutually
+                     exclusive with daytime_only.
         plant_level: If True, output one row per tree per timestamp (long format)
                      instead of site-averaged sap velocity. Joins plant_md.csv
                      to add tree metadata (pl_dbh, pl_species, pl_sens_meth, etc.).
@@ -265,6 +683,14 @@ def merge_sap_env_data_site(
                              pl_treatment / st_treatment indicates predictor-
                              target decoupling (irrigation, drought, root
                              trenching, elevated CO2, shade).
+        feature_contract: servable (the default) normalises soil moisture against the
+                             ERA5-Land climatology cube and writes precip as the ERA5
+                             daily total in mm/day, keeping the gauge own totals under
+                             precip_gauge*. The tree is then ready to train and to serve
+                             with no further pass. site is the legacy behaviour:
+                             per-site soil-moisture moments and gauge precip.
+        swvl_cube: The soil-moisture climatology the servable contract normalises
+                             against. Ignored under the site contract.
     """
 
     # Imports kept inside the function so they are only resolved when the
@@ -291,6 +717,13 @@ def merge_sap_env_data_site(
         print("Nighttime data will be filtered out before daily aggregation")
         print("=" * 60 + "\n")
 
+    if daytime_sap_only:
+        print("\n" + "=" * 60)
+        print("DAYTIME-SAP-ONLY MODE ENABLED")
+        print("Sap velocity is aggregated over daylight hours only;")
+        print("env variables keep their 24-hour daily statistics")
+        print("=" * 60 + "\n")
+
     if growing_season_only:
         print("\n" + "=" * 60)
         print("GROWING-SEASON-ONLY MODE ENABLED")
@@ -314,6 +747,13 @@ def merge_sap_env_data_site(
 
     daily_out_dir = output_base_dir / "daily"
     daily_out_dir.mkdir(exist_ok=True)
+
+    # --- FEATURE CONTRACT ---
+    # Read before anything else: a tree labelled servable but normalised against something else
+    # cannot be told from a correct one once it is written.
+    contract = validate_contract(feature_contract)
+    clim = load_cube(swvl_cube) if contract == SERVABLE_CONTRACT else None
+    contract_cell_rows = []
 
     # Collections for final merge
     biome_merged_hourly = {}
@@ -366,30 +806,35 @@ def merge_sap_env_data_site(
     precip_PET = np.clip(precip / pet, 0, 10)
     era5_data["prcip/PET"] = precip_PET
     lai_data = pd.read_csv(paths.globmap_lai_data_path)
-    pft_data = pd.read_csv(paths.pft_data_path)
 
-    pft_mapping = {
-        1: "Evergreen Needleleaf Forests",
-        2: "Evergreen Broadleaf Forests",
-        3: "Deciduous Needleleaf Forests",
-        4: "Deciduous Broadleaf Forests",
-        5: "Mixed Forests",
-        6: "Closed Shrublands",
-        7: "Open Shrublands",
-        8: "Woody Savannas",
-        9: "Savannas",
-        10: "Grasslands",
-        11: "Permanent Wetlands",
-        12: "Cropland",
-        13: "Urban and Built-up Lands",
-        14: "Cropland/Natural Vegetation Mosaics",
-        15: "Permanent Snow and Ice",
-        16: "Areas with less than 10% vegetation",
-        17: "Water Bodies",
-    }
-    pft_data["pft"] = pft_data["landcover_type"].map(pft_mapping)
+    # MODIS land cover, reduced to ONE short IGBP code per site (mode across
+    # years).  This product used to be read here in full -- 5.4 M hourly rows,
+    # 303 MB -- mapped to long class names, timestamp-normalised, sorted, and
+    # then never joined to anything.  `pft` has always come from the provider's
+    # si_igbp a few lines below, and si_igbp is ABSENT at 23 of the 226 corpus
+    # sites (the entire internal/ICOS set), which therefore carried pft = NaN.
+    # The reduction is the fallback for exactly those sites.
+    #
+    # The vocabularies have to agree: si_igbp holds short IGBP codes
+    # (ENF/DBF/EBF/MF/SAV/DNF/WSA/WET), so the old long-name mapping could
+    # never have been substituted into the same column.
+    modis_pft_by_site = {}
+    if Path(paths.pft_data_path).exists():
+        modis_pft_by_site = load_site_landcover_modes(paths.pft_data_path)
+        print(f"MODIS land cover reduced to one class at {len(modis_pft_by_site)} site(s)")
+    else:
+        print(f"WARNING: land cover product not found at {paths.pft_data_path}")
 
-    for df_temp in [pft_data, lai_data, era5_data]:
+    # si_igbp is absent at the 23 internal sites, which used to mean they fell
+    # straight through to MODIS.  Derive it from the stand and species metadata
+    # those sites ship instead: st_forest_type is the description the provider
+    # wrote, and it beats a 463 m pixel that called a holm-oak dehesa Croplands.
+    # Recomputed every run, so a Stage-1 regeneration has nothing to revert.
+    derived_pft_by_site = derived_only(derive_for_scale(str(paths.raw_csv_dir)))
+    print(f"si_igbp derived from site metadata at {len(derived_pft_by_site)} site(s)")
+    pft_sources = {}
+
+    for df_temp in [lai_data, era5_data]:
         df_temp.rename(columns={"timestamp": "TIMESTAMP", "datetime": "TIMESTAMP"}, inplace=True)
         df_temp["TIMESTAMP"] = pd.to_datetime(df_temp["TIMESTAMP"], utc=True)
         df_temp.sort_values("TIMESTAMP", inplace=True)
@@ -401,6 +846,38 @@ def merge_sap_env_data_site(
     env_input_dir = paths.env_outliers_removed_dir
     print(f"Sap input: {sap_input_dir}")
     print(f"Env input: {env_input_dir}")
+
+    # Every climatology lookup happens here, outside the loop: the loop ends in a bare except, so a
+    # lookup that failed inside it would leave the site out of the tree with only a printed line.
+    _placed = _preflight_sites(sap_input_dir, paths.raw_csv_dir) if clim else []
+    cells_by_site = preflight_cells(clim, _placed) if clim else {}
+    print(f"Feature contract: {contract}")
+    if contract != SERVABLE_CONTRACT:
+        # Nothing may be left claiming this tree is servable: the gate believes the badge.
+        for _stale in clear_sidecar(output_base_dir):
+            print(f"  removed a stale contract badge from an earlier run: {_stale.name}")
+    if clim is not None:
+        # Whether the extract can supply servable precipitation is a property of the extract, not of
+        # any one site, so it is settled here rather than on the first site to reach the daily pass.
+        require_era5_precip(era5_data, paths.era5_discrete_data_path)
+        print(f"  climatology {clim.path}: {len(cells_by_site)} sites placed")
+        # servable is the DEFAULT, so a script written before this existed now builds a servable tree
+        # without asking. Two columns change meaning without changing name; a reader of this log is
+        # the last person who can notice before the numbers are downstream.
+        print("  precip is now the ERA5-Land daily TOTAL in mm/day, not the gauge daily mean of")
+        print("  hourly mm -- about 24x larger. Soil moisture is normalised by the climatology")
+        print("  cell, not by the record of each site. Pass --feature-contract site for the")
+        print("  previous behaviour; the tree records which contract built it either way.")
+        # Written BEFORE the loop, because the loop writes each site's CSV as it goes (:1268, :1438)
+        # and a run killed part way through would otherwise leave servable numbers with no badge --
+        # which the site contract accepts. This one names every placed site; the loop's own badge
+        # below replaces it with the sites actually kept.
+        _provisional = [row for _s, _la, _lo in _placed for row in cell_rows(_s, _la, _lo, cells_by_site[_s])]
+        write_sidecar(
+            output_base_dir,
+            contract_block(clim, SWC_LAYERS, DEFAULT_MAX_RADIUS_CELLS, _provisional, _git_short_sha(), complete=False),
+            _provisional,
+        )
 
     # --- MAIN LOOP ---
     for sap_data_file in sap_input_dir.glob("*.csv"):
@@ -416,8 +893,26 @@ def merge_sap_env_data_site(
 
             try:
                 biome_info = pd.read_csv(biome_data_file)
-                biome_type = biome_info["si_biome"][0]
-                igbp_type = biome_info["si_igbp"][0]
+                # Normalised HERE, at the single point of read, so the dict key,
+                # site_biome_mapping and the biome column can never disagree, and
+                # so a NaN can never reach the by-biome filename builder.
+                _raw_biome = biome_info["si_biome"][0]
+                biome_type = (
+                    str(_raw_biome).strip()
+                    if pd.notna(_raw_biome) and str(_raw_biome).strip()
+                    else UNCLASSIFIED_BIOME
+                )
+                # Provider value first, metadata-derived second, MODIS third.
+                # resolve_pft never
+                # raises: this sits inside a try whose except skips the site
+                # entirely, so an exception here would silently shrink the
+                # training corpus.
+                igbp_type, _pft_source = resolve_pft(
+                    biome_info["si_igbp"][0],
+                    modis_pft_by_site.get(location_type),
+                    derived_pft_by_site.get(location_type),
+                )
+                pft_sources[location_type] = _pft_source
                 lat = biome_info["si_lat"][0]
                 lon = biome_info["si_long"][0]
 
@@ -538,6 +1033,7 @@ def merge_sap_env_data_site(
             env_data.set_index("TIMESTAMP", inplace=True)
             # solar_TIMESTAMP comes from sap side (canonical); drop env duplicate to avoid merge conflict
             env_data.drop(columns=["solar_TIMESTAMP"], errors="ignore", inplace=True)
+            env_data = normalise_timestamps(env_data)
 
             # --- TREATMENT FILTER + FLO 2019 CALIBRATION (predictor-target alignment) ---
             # Order: filter FIRST (drop decoupled plants), calibrate SECOND (apply
@@ -631,51 +1127,20 @@ def merge_sap_env_data_site(
                     sap_dict["solar_TIMESTAMP"] = sap_data["solar_TIMESTAMP"]
                 plant_sap_data = pd.DataFrame(sap_dict).set_index("TIMESTAMP")
 
-            df = pd.merge(plant_sap_data, env_data, left_index=True, right_index=True)
-
             # --- PROCESS HOURLY DATA ---
-            # Resample env/sap data to strictly hourly using solar_TIMESTAMP (local solar time)
-            mean_cols = [
-                c
-                for c in ["vpd", "ta", "ws", "sw_in", "rh", "netrad", "ppfd_in", "ext_rad", "sap_velocity"]
-                if c in df.columns
-            ]
-            sum_cols = [c for c in ["precip"] if c in df.columns]
-
-            # Aggregation rules for hourly resample
-            agg_dict = {**{col: "sum" for col in sum_cols}, **{col: "mean" for col in mean_cols}}
-            # Keep solar_TIMESTAMP by taking the first value in each hour
-            if "solar_TIMESTAMP" in df.columns:
-                agg_dict["solar_TIMESTAMP"] = "first"
-
-            # Plant-level: carry tree metadata through as "first" (static per tree)
-            plant_meta_cols = []
-            if plant_level:
-                plant_meta_cols = [
-                    c
-                    for c in [
-                        "pl_code",
-                        "pl_dbh",
-                        "pl_sens_meth",
-                        "pl_species",
-                    ]
-                    if c in df.columns
-                ]
-                for c in plant_meta_cols:
-                    agg_dict[c] = "first"
-
-            # Resample to hourly using UTC TIMESTAMP
-            if plant_level and "pl_code" in df.columns:
-                # Group by pl_code first, then resample each tree independently
-                df_hourly = (
-                    df.groupby("pl_code")
-                    .resample("h")
-                    .agg({k: v for k, v in agg_dict.items() if k != "pl_code"})
-                    .reset_index()
-                )
-            else:
-                df_hourly = df.resample("h").agg(agg_dict).reset_index()
-            df_hourly.rename(columns={"index": "TIMESTAMP"}, inplace=True)
+            # Each side is collapsed to the hour on its OWN terms and only then
+            # joined, so neither delivery's clock has to land on the other's. The
+            # previous code joined on the exact instant BEFORE resampling, which
+            # discarded every sap reading absent from the env index -- 10.05% of
+            # the corpus (5,959,149 of 59,305,852 readings), and 100% at FRA_HES,
+            # whose sap sits on :15/:45 against env on :00/:30.
+            #
+            # Inner, so an hour is kept only where BOTH sides observed -- the
+            # behaviour the old exact-instant join was reaching for, expressed at
+            # a granularity the two clocks can actually meet on.
+            sap_hourly = aggregate_sap_to_hourly(round_instants(plant_sap_data), plant_level=plant_level)
+            env_hourly = aggregate_env_to_hourly(env_data)
+            df_hourly = sap_hourly.join(env_hourly, how="inner").reset_index()
 
             # --- ADD STATIC VARIABLES (Common function for DF population) ---
             def add_static_vars(target_df):
@@ -717,32 +1182,56 @@ def merge_sap_env_data_site(
             if df_hourly["TIMESTAMP"].dt.tz is None:
                 df_hourly["TIMESTAMP"] = df_hourly["TIMESTAMP"].dt.tz_localize("UTC")
             # --- MERGE EXTERNAL DATA (LAI, ERA5) TO HOURLY ---
-            df_hourly = pd.merge_asof(df_hourly, lai_data, on="TIMESTAMP", by="site_name", direction="nearest")
-            df_hourly = pd.merge_asof(df_hourly, era5_data, on="TIMESTAMP", by="site_name", direction="nearest")
+            # LAI: bounded nearest match.  merge_asof has no notion of a
+            # series ENDING, so an unbounded "nearest" keeps matching the last
+            # composite forever -- 271,917 h were carrying values up to 1812 d
+            # old and the row still looked complete.  GlobMap V3 ends 2023-12-27.
+            #
+            # 8 d is the exact separator, not a chosen threshold.  Measured
+            # 2026-08-17 over the 226-site corpus (5,389,733 site-hours): the
+            # furthest any site-hour INTERIOR to the record sits from a composite
+            # is 8.00 d, and everything strictly past 8.00 d is extrapolation
+            # beyond a record's end.  GlobMap is 8-day from 2001 and half-month
+            # (15-16 d) for 1991-2000, and "nearest" halves the gap.  So no
+            # smaller bound keeps every real match, and no larger one excludes
+            # extrapolation.
+            #
+            # The comparison must therefore be INCLUSIVE, and pandas 2.3.3 is
+            # (verified: gap 8 d / tolerance 8 d matches; 8.01 d does not).
+            # pandas is unpinned in requirements.txt, so if that ever flips, every
+            # half-month-era match sitting at exactly 8.00 d is dropped silently.
+            # The symptom to look for is pre-2001 LAI coverage collapsing -- it
+            # should be 0 missing out of 288,072 pre-2001 site-hours.
+            #
+            # Result: 47,262 h without LAI (0.88%), none of them pre-2001.  A 16 d
+            # bound would instead admit 960 h of 9-16 d-old values over
+            # 2024-01-04..01-12 at the five sites that outrun the record
+            # (AUT_MMG, CZE_LNZ, DEU_HAR, DEU_HOH, POL_MEZ, 192 h each).
+            df_hourly = pd.merge_asof(df_hourly, lai_data, on="TIMESTAMP", by="site_name",
+                                      direction="nearest", tolerance=pd.Timedelta(days=8))
+            # Bounded: ERA5-Land and every merged hour sit on the hour, so a real match is exact, and the
+            # bound only stops an hour outside the extract from borrowing the nearest one.
+            df_hourly = pd.merge_asof(df_hourly, era5_data, on="TIMESTAMP", by="site_name",
+                                      direction="nearest", tolerance=pd.Timedelta(minutes=30))
 
             # --- VOLUMETRIC SOIL WATER NORMALIZATION ---
-            # Three representations per layer:
-            #   *_raw  — original m³/m³ (for physics: REW, ψ_soil)
-            #   (main) — x / σ  variance-normalised (backward-compat ML feature)
-            #   *_zscore — (x − μ) / σ  proper z-score
-            for _layer in [1, 2, 3, 4]:
-                _col = f"volumetric_soil_water_layer_{_layer}"
-                if _col not in df_hourly.columns:
-                    continue
-                _vsw = df_hourly[_col]
-                _vsw_mean = _vsw.mean()
-                _vsw_std = _vsw.std()
-
-                # Always store raw values for physics-based features
-                df_hourly[f"{_col}_raw"] = _vsw
-
-                if _vsw_std > 1e-10:
-                    df_hourly[_col] = _vsw / _vsw_std  # x/σ
-                    df_hourly[f"{_col}_zscore"] = (_vsw - _vsw_mean) / _vsw_std
-                else:
-                    df_hourly[_col] = 0.0
-                    df_hourly[f"{_col}_zscore"] = 0.0
-                    print(f"  Warning: {location_type} has near-zero std for {_col}")
+            # Per layer: *_raw m3/m3, the bare column raw / sigma and *_zscore (raw - mu) / sigma, mu and
+            # sigma from the climatology cell under the servable contract, so a 0.1 degree prediction
+            # cell is normalised the same way, and from the site own merged hours under site. Applied
+            # to the HOURLY values, so every daily statistic below follows from this one affine
+            # transform, the daily sum included: it comes out as (sum(raw) - n*mu)/sigma with the true
+            # n. The daily ERA5 pass below reuses the same moments.
+            if contract == SERVABLE_CONTRACT:
+                _cells = cells_by_site.get(location_type)
+                if _cells is None:
+                    raise FeatureContractError(
+                        f"{location_type}: no climatology cell was resolved; its site metadata has no "
+                        "usable si_lat/si_long, so the servable contract cannot normalise it"
+                    )
+                swc_moments = swc_climatology_moments(_cells)
+            else:
+                swc_moments = swc_site_moments(df_hourly)
+            df_hourly = add_swc_representations(df_hourly, swc_moments, location_type)
 
             # --- CALCULATE DAY LENGTH ---
             # Day length in hours based on latitude, elevation, and date (astronomical calculation)
@@ -796,12 +1285,16 @@ def merge_sap_env_data_site(
 
             # --- PROCESS DAILY DATA (Aggregation from Hourly) ---
 
-            # Optional: Filter to daytime only before daily aggregation
-            if daytime_only:
-                # Use UTC TIMESTAMP for solar position calculation (pvlib needs actual moment in time)
+            # Both daylight modes need the same solar position; compute it once.
+            # Use UTC TIMESTAMP for solar position calculation (pvlib needs actual moment in time)
+            daytime_mask = None
+            if daytime_only or daytime_sap_only:
                 daytime_mask = calculate_daytime_mask(
                     df_hourly["TIMESTAMP"], lat=lat, lon=lon, elevation=ele if not pd.isna(ele) else 0
                 )
+
+            # Optional: Filter to daytime only before daily aggregation
+            if daytime_only:
                 n_before = len(df_hourly)
                 df_hourly_for_daily = df_hourly[daytime_mask.values].copy()
                 n_after = len(df_hourly_for_daily)
@@ -887,6 +1380,38 @@ def merge_sap_env_data_site(
             df_daily.columns = new_cols
             df_daily = df_daily.reset_index()
 
+            # --- DAILY STATISTICS FROM EACH SOURCE'S OWN HOURS ---
+            # The aggregation above ran over the hours in which sap AND env observed. ERA5-Land and the rain
+            # gauge are aggregated again over their own records, so neither loses part of a day to the other
+            # side's gaps: see era5_daily_for_site and gauge_daily_totals. The gauge's bare ``precip`` is
+            # therefore the daily TOTAL in mm/day, no longer the mean of its hourly values.
+            # --daytime-only keeps its daylight scope.
+            keep_hours = daylight_hours(lat, lon, ele) if daytime_only else None
+            era5_site = era5_data[era5_data["site_name"] == location_type]
+            df_daily = overwrite_daily_columns(
+                df_daily, era5_daily_for_site(era5_site, swc_moments, location_type, keep_hours)
+            )
+            for _total_col in [c for c in ENV_SUM_COLS if c in env_data.columns]:
+                _gauge = gauge_daily_totals(env_data, _total_col, keep_hours)
+                if contract == SERVABLE_CONTRACT:
+                    # The gauge keeps its own daily totals; the servable column belongs to ERA5-Land.
+                    _gauge = rename_gauge_columns(_gauge, _total_col)
+                df_daily = overwrite_daily_columns(df_daily, _gauge)
+            if contract == SERVABLE_CONTRACT:
+                df_daily = apply_servable_precip(df_daily)
+
+            # --- DAYTIME-SAP-ONLY: rescope the target, leave env at 24 h ---
+            # Placed BEFORE the growing-season filter so that filter reads the
+            # same sap series the model will train on.
+            if daytime_sap_only:
+                n_all = len(df_hourly)
+                n_lit = int(np.asarray(daytime_mask, dtype=bool).sum())
+                df_daily = apply_daytime_sap_scope(df_daily, df_hourly, daytime_mask, plant_level=plant_level)
+                print(
+                    f"  {location_type}: sap scoped to {n_lit}/{n_all} daylight hours "
+                    f"({n_lit / max(n_all, 1) * 100:.1f}%); env kept at 24 h"
+                )
+
             # 4. Derived Calculations (using the new suffixed column names)
             # Use 'sum' for precipitation related ratio, or adjust to 'mean' if preferred.
             # Here we use sum to stay consistent with typical daily totals.
@@ -938,13 +1463,29 @@ def merge_sap_env_data_site(
             biome_merged_hourly[biome_type].append(df_hourly)
             biome_merged_daily[biome_type].append(df_daily)
 
+            if contract == SERVABLE_CONTRACT:
+                contract_cell_rows.extend(cell_rows(location_type, lat, lon, cells_by_site[location_type]))
+
             count += 1
             if count % 10 == 0:
                 print(f"Processed {count} sites...")
 
+        except FeatureContractError:
+            # Not a messy site: a contract failure ends the run rather than the site, so the tree is
+            # never quietly short of what it claims to contain.
+            raise
         except Exception as e:
             print(f"Error processing {sap_data_file}: {str(e)}")
             continue
+
+    print(summarise(pft_sources))
+
+    if contract == SERVABLE_CONTRACT:
+        _block = contract_block(
+            clim, SWC_LAYERS, DEFAULT_MAX_RADIUS_CELLS, contract_cell_rows, _git_short_sha()
+        )
+        _sidecar, _cells_file = write_sidecar(output_base_dir, _block, contract_cell_rows)
+        print(f"Feature contract: {len(contract_cell_rows)} site-layers -> {_sidecar.name}, {_cells_file.name}")
 
     # --- FINAL MERGING (HOURLY & DAILY) ---
     def save_biome_collections(collection_dict, output_dir, file_suffix, skip_all_biomes_merge=False):
@@ -1032,6 +1573,7 @@ def merge_sap_env_data_site(
                     "apply_flo2019_correction": apply_flo2019_correction_flag,
                     "apply_treatment_filter": apply_treatment_filter_flag,
                     "daytime_only": daytime_only,
+                    "daytime_sap_only": daytime_sap_only,
                     "plant_level": plant_level,
                     "growing_season_only": growing_season_only,
                 },
@@ -1057,10 +1599,20 @@ def merge_sap_env_data_site(
 
 def main():
     parser = argparse.ArgumentParser(description="Merge sap flow and environmental data")
-    parser.add_argument(
+    # The two daylight modes disagree about env, so at most one can be in effect.
+    daylight = parser.add_mutually_exclusive_group()
+    daylight.add_argument(
         "--daytime-only",
         action="store_true",
-        help="Filter to daytime data only before daily aggregation (uses solar elevation > 0)",
+        help="Filter to daytime data only before daily aggregation (uses solar elevation > 0). "
+        "Rescopes EVERY column, env variables included.",
+    )
+    daylight.add_argument(
+        "--daytime-sap-only",
+        action="store_true",
+        help="Scope only the sap target to daylight; env variables keep their 24-hour "
+        "daily statistics, matching the CDS derived-era5-land-daily-statistics product "
+        "the global prediction is served from. Mutually exclusive with --daytime-only.",
     )
     parser.add_argument(
         "--output-dir", type=str, default=None, help="Output directory (default: paths.merged_data_root)"
@@ -1092,6 +1644,20 @@ def main():
         "predictor-target decoupling (irrigation, drought, root trenching, "
         "elevated CO2, shade). Default: off.",
     )
+    parser.add_argument(
+        "--feature-contract",
+        choices=("site", "servable"),
+        default=SERVABLE_CONTRACT,
+        help="servable (the default) normalises soil moisture against the ERA5-Land climatology "
+        "and writes precip as the ERA5 daily total in mm/day, so the tree needs no further pass; "
+        "the gauge keeps its own totals under precip_gauge*. site is the legacy behaviour.",
+    )
+    parser.add_argument(
+        "--swvl-cube",
+        type=str,
+        default=str(DEFAULT_SWVL_CUBE),
+        help="Soil-moisture climatology for the servable contract (default: the v2 1995-2019 cube).",
+    )
     args = parser.parse_args()
     # Defines the base directory for output
     if args.output_dir:
@@ -1106,10 +1672,13 @@ def main():
     merge_sap_env_data_site(
         output_base_dir,
         daytime_only=args.daytime_only,
+        daytime_sap_only=args.daytime_sap_only,
         plant_level=args.plant_level,
         growing_season_only=args.growing_season_only,
         apply_flo2019_correction_flag=args.apply_flo2019_correction,
         apply_treatment_filter_flag=args.apply_treatment_filter,
+        feature_contract=args.feature_contract,
+        swvl_cube=args.swvl_cube,
     )
 
 

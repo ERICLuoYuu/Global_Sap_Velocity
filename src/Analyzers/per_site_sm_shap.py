@@ -32,7 +32,14 @@ logger = logging.getLogger("per_site_sm_shap")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-FEATURE_COLS_BASE: tuple[str, ...] = ("vpd", "ta", "ws", "sw_in", "precip_sum")
+#: The gauge's daily precipitation total, under the two names the feature contracts give it. Both
+#: hold the same quantity -- the total over the gauge's OWN hours -- because the servable merge only
+#: moves the gauge aside to give the bare ``precip`` name to ERA5-Land, which a 0.1 deg cell can
+#: serve. A legacy tree carries the total as ``precip_sum``; a servable tree as ``precip_gauge_sum``.
+PRECIP_COL_NAME: str = "precip_sum"  # the internal name, so outputs do not depend on the tree
+PRECIP_SOURCE_COLS: tuple[str, ...] = ("precip_gauge_sum", PRECIP_COL_NAME)
+
+FEATURE_COLS_BASE: tuple[str, ...] = ("vpd", "ta", "ws", "sw_in", PRECIP_COL_NAME)
 TARGET_COL: str = "sap_velocity"
 SM_COL_NAME: str = "sm"  # generic internal name
 FEATURE_COLS: tuple[str, ...] = FEATURE_COLS_BASE + (SM_COL_NAME,)  # final 6 features
@@ -110,7 +117,19 @@ def load_site_data(
     sm_source_col = SM_VARIANT_TO_COL[sm_variant]
     required_cols = [TARGET_COL, *FEATURE_COLS_BASE, sm_source_col]
 
-    df = pd.read_csv(site_csv, usecols=lambda c: c in {"TIMESTAMP", *required_cols})
+    df = pd.read_csv(
+        site_csv, usecols=lambda c: c in {"TIMESTAMP", *required_cols, *PRECIP_SOURCE_COLS}
+    )
+
+    # Read whichever name this tree gives the gauge total under the internal one. The drop matters
+    # only for a frame carrying both names, which no merge writes: renaming onto a name already
+    # present would leave two columns called precip_sum, and df[list(FEATURE_COLS)] would then hand
+    # the model a 2-D block where it expects one feature.
+    precip_col = next((c for c in PRECIP_SOURCE_COLS if c in df.columns), None)
+    if precip_col is not None and precip_col != PRECIP_COL_NAME:
+        df = df.drop(columns=[PRECIP_COL_NAME], errors="ignore").rename(
+            columns={precip_col: PRECIP_COL_NAME}
+        )
 
     missing = [c for c in required_cols if c not in df.columns]
     if missing:

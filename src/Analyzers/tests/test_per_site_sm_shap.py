@@ -14,6 +14,8 @@ from src.Analyzers.per_site_sm_shap import (
     CLIMATE_FEATURES,
     FEATURE_COLS,
     PARAM_DIST,
+    PRECIP_COL_NAME,
+    PRECIP_SOURCE_COLS,
     SKIP_STATUSES,
     SM_COL_NAME,
     TARGET_COL,
@@ -571,3 +573,73 @@ def test_make_pool_figure_writes_png(tmp_path):
         sm_variant="raw",
     )
     assert out_png.exists()
+
+
+# -- F2: the gauge total under either feature contract --------------------------------------------
+#
+# The servable merge gives the bare ``precip`` name to ERA5-Land and moves the gauge's own daily
+# statistics to ``precip_gauge*``, dropping the ones that have no servable meaning -- ``precip_sum``
+# among them. This script wants the gauge total, which still exists; only its name moved. Both names
+# hold the same quantity, the total over the gauge's OWN hours, so a tree built under either contract
+# must give the same answer.
+
+
+def _servable_site_csv(tmp_path: Path) -> Path:
+    """The fixture as the servable merge writes it: the gauge total renamed out of precip's way."""
+    df = pd.read_csv(FIXTURE_DIR / "fake_site_daily.csv").rename(
+        columns={"precip_sum": "precip_gauge_sum"}
+    )
+    path = tmp_path / "servable_site_daily.csv"
+    df.to_csv(path, index=False)
+    return path
+
+
+def test_load_site_data_reads_a_servable_tree(tmp_path: Path) -> None:
+    """Before this, every site of every servable tree returned MISSING_FEATURE."""
+    df, status = load_site_data(site_csv=_servable_site_csv(tmp_path), sm_variant="raw", min_rows=1)
+    assert status == "OK"
+    assert PRECIP_COL_NAME in df.columns
+    assert len(df) == 9
+
+
+def test_a_servable_tree_gives_the_same_numbers_as_a_legacy_one(tmp_path: Path) -> None:
+    legacy, legacy_status = load_site_data(
+        site_csv=FIXTURE_DIR / "fake_site_daily.csv", sm_variant="raw", min_rows=1
+    )
+    servable, servable_status = load_site_data(
+        site_csv=_servable_site_csv(tmp_path), sm_variant="raw", min_rows=1
+    )
+    assert legacy_status == servable_status == "OK"
+    pd.testing.assert_frame_equal(legacy, servable)
+
+
+def test_a_tree_carrying_neither_name_is_still_reported_missing(tmp_path: Path) -> None:
+    """The fallback must not turn a real absence into a silent pass."""
+    df_in = pd.read_csv(FIXTURE_DIR / "fake_site_daily.csv").drop(columns=["precip_sum"])
+    path = tmp_path / "no_precip.csv"
+    df_in.to_csv(path, index=False)
+
+    df, status = load_site_data(site_csv=path, sm_variant="raw", min_rows=1)
+    assert df is None
+    assert status == "MISSING_FEATURE"
+
+
+def test_the_gauge_name_wins_and_leaves_exactly_one_column(tmp_path: Path) -> None:
+    """No tree carries both, but renaming onto a name already present would duplicate the column,
+    and ``df[list(FEATURE_COLS)]`` would then hand the model a 2-D block for one feature."""
+    df_in = pd.read_csv(FIXTURE_DIR / "fake_site_daily.csv")
+    df_in["precip_gauge_sum"] = df_in["precip_sum"] + 1.0
+    path = tmp_path / "both_names.csv"
+    df_in.to_csv(path, index=False)
+
+    df, status = load_site_data(site_csv=path, sm_variant="raw", min_rows=1)
+    assert status == "OK"
+    assert list(df.columns).count(PRECIP_COL_NAME) == 1
+    assert (df[PRECIP_COL_NAME] >= 1.0).all()  # the gauge column, not the one it replaced
+
+
+def test_the_internal_name_is_what_the_feature_set_uses() -> None:
+    """Outputs -- the feature matrix, the SHAP columns, the plots -- must not depend on the tree."""
+    assert PRECIP_COL_NAME in FEATURE_COLS
+    assert PRECIP_SOURCE_COLS[-1] == PRECIP_COL_NAME
+    assert "precip_gauge_sum" in PRECIP_SOURCE_COLS

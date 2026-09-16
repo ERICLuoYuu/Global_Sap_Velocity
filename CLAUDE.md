@@ -98,6 +98,18 @@ either that sidecar or the `feature_contract` block in `RUN_PROVENANCE.json`, an
 servable tree under `site`** — the `_zscore` columns are climatological anomalies, not per-site
 z-scores, and nothing else would notice the difference.
 
+Two records can name a contract and `RUN_PROVENANCE.json` outranks the sidecar, so the merge
+**refuses to write into a directory whose provenance names the other contract**. Clearing the badge
+is not enough on its own: a block beside it still speaks for whatever is written there next. Merge
+into a different `--output-dir`, or delete the stale `feature_contract` block. A provenance file
+carrying no such block — what `job_merge_sweep5.sh` writes after every merge — claims nothing and is
+accepted.
+
+Under `servable` there is no `precip_sum`; the gauge's daily total is `precip_gauge_sum`. A consumer
+that wants the gauge should read whichever of the two names the tree carries, because both hold the
+same quantity — the total over the gauge's OWN hours. `src/Analyzers/per_site_sm_shap.py` shows the
+pattern: resolve the name on load, keep one internal name so outputs never depend on the contract.
+
 This replaces two passes that used to follow the merge: `src/feature_contract/rebuild_daily.py`
 (still the only route for trees built before this) and the `_servable_precip` override in
 `feature_engineering.py` (still the producer for the prediction grid, and it recomputes the identical

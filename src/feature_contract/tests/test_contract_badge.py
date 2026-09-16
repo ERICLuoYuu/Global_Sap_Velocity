@@ -13,14 +13,19 @@ import pytest
 
 from src.feature_contract.definitions import (
     CELLS_FILE,
+    PROVENANCE_FILE,
+    PROVENANCE_KEY,
     SERVABLE_CONTRACT,
     SIDECAR_FILE,
     assert_dataset_contract,
 )
 from src.feature_contract.merge_contract import (
+    FeatureContractError,
     cell_rows,
     clear_sidecar,
     contract_block,
+    provenance_contract,
+    require_provenance_agrees,
     resolve_site_cells,
     write_sidecar,
 )
@@ -98,3 +103,82 @@ class TestABadgeThatSaysWhetherItIsFinal:
         block = json.loads((tmp_path / SIDECAR_FILE).read_text())
         assert block["complete"] is True
         assert block["swvl"]["n_sites"] == 2
+
+
+# -- F1: the provenance outranks the badge, and the merge does not own it ------------------------
+
+
+def _provenance(directory, name):
+    """RUN_PROVENANCE.json as an earlier run left it, claiming ``name``."""
+    (directory / PROVENANCE_FILE).write_text(json.dumps({PROVENANCE_KEY: {"name": name}}))
+    return directory
+
+
+class TestAProvenanceClaimLeftByAnEarlierRun:
+    """``assert_dataset_contract`` reads RUN_PROVENANCE.json before the badge beside it.
+
+    So clearing the badge is not enough: a block naming the other contract speaks for whatever the
+    merge writes into that directory next. The merge refuses rather than editing the file, because
+    the sweep -- not the merge -- owns it, and it records a run that really did happen.
+    """
+
+    def test_a_site_merge_is_refused_where_the_provenance_says_servable(self, tmp_path):
+        """The dangerous direction: site data the gate would hand to a servable run."""
+        _provenance(tmp_path, SERVABLE_CONTRACT)
+        with pytest.raises(FeatureContractError, match="servable"):
+            require_provenance_agrees(tmp_path, "site")
+
+    def test_a_servable_merge_is_refused_where_the_provenance_says_site(self, tmp_path):
+        _provenance(tmp_path, "site")
+        with pytest.raises(FeatureContractError, match="site"):
+            require_provenance_agrees(tmp_path, SERVABLE_CONTRACT)
+
+    def test_a_matching_claim_is_allowed(self, tmp_path):
+        _provenance(tmp_path, SERVABLE_CONTRACT)
+        require_provenance_agrees(tmp_path, SERVABLE_CONTRACT)
+
+    def test_a_directory_with_no_provenance_is_allowed(self, tmp_path):
+        require_provenance_agrees(tmp_path, SERVABLE_CONTRACT)
+        require_provenance_agrees(tmp_path, "site")
+
+    def test_a_provenance_without_the_block_is_allowed(self, tmp_path):
+        """job_merge_sweep5.sh writes this file with no feature_contract key, after every merge.
+
+        Refusing it would break every re-run of every sweep, and it claims nothing.
+        """
+        (tmp_path / PROVENANCE_FILE).write_text(json.dumps({"scale": "sapwood_combined"}))
+        require_provenance_agrees(tmp_path, SERVABLE_CONTRACT)
+        require_provenance_agrees(tmp_path, "site")
+
+    def test_a_corrupt_provenance_is_refused_before_the_merge_starts(self, tmp_path):
+        """The gate parses this file with no try. Failing here costs seconds; failing there costs
+        the whole merge, hours later."""
+        (tmp_path / PROVENANCE_FILE).write_text("{not json")
+        with pytest.raises(FeatureContractError, match="cannot be read"):
+            require_provenance_agrees(tmp_path, SERVABLE_CONTRACT)
+
+    def test_clearing_the_badge_is_not_enough_on_its_own(self, tmp_path):
+        """The finding, end to end: badge cleared, and the gate still calls the tree servable."""
+        _badge(tmp_path)
+        _provenance(tmp_path, SERVABLE_CONTRACT)
+        clear_sidecar(tmp_path)
+        assert_dataset_contract(tmp_path, SERVABLE_CONTRACT)  # the hole: site data, read as servable
+        with pytest.raises(FeatureContractError):
+            require_provenance_agrees(tmp_path, "site")
+
+
+class TestReadingTheProvenanceClaim:
+    def test_it_reports_the_name(self, tmp_path):
+        _provenance(tmp_path, SERVABLE_CONTRACT)
+        assert provenance_contract(tmp_path) == SERVABLE_CONTRACT
+
+    def test_no_file_claims_nothing(self, tmp_path):
+        assert provenance_contract(tmp_path) is None
+
+    def test_no_block_claims_nothing(self, tmp_path):
+        (tmp_path / PROVENANCE_FILE).write_text(json.dumps({"scale": "sapwood_combined"}))
+        assert provenance_contract(tmp_path) is None
+
+    def test_a_block_that_is_not_a_mapping_claims_nothing(self, tmp_path):
+        (tmp_path / PROVENANCE_FILE).write_text(json.dumps({PROVENANCE_KEY: "servable"}))
+        assert provenance_contract(tmp_path) is None

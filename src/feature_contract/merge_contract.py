@@ -35,6 +35,8 @@ import pandas as pd
 from .definitions import (
     CELLS_FILE,
     ERA5_HOURLY_MEAN_PRECIP_COL,
+    PROVENANCE_FILE,
+    PROVENANCE_KEY,
     SERVABLE_CONTRACT,
     SERVABLE_RAIN_EVENT_MM_PER_DAY,
     SIDECAR_FILE,
@@ -190,6 +192,48 @@ def apply_servable_precip(daily, col="precip"):
     stale = [f"{col}{suffix}" for suffix in STALE_GAUGE_STATS if f"{col}{suffix}" in daily.columns]
     out = daily.drop(columns=stale)
     return out.assign(**{col: era5_hourly_mean_precip_mm_per_day(out[ERA5_HOURLY_MEAN_PRECIP_COL])})
+
+
+def provenance_contract(config_dir):
+    """The contract ``RUN_PROVENANCE.json`` in ``config_dir`` claims, or ``None`` if it claims none.
+
+    ``None`` covers the directory with no provenance and, just as importantly, the one carrying a
+    provenance file with no ``feature_contract`` block -- which is what ``job_merge_sweep5.sh``
+    writes after every merge, and every tree between the merge and the fold that adds the block.
+    """
+    path = Path(config_dir) / PROVENANCE_FILE
+    if not path.is_file():
+        return None
+    try:
+        with open(path) as handle:
+            provenance = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise FeatureContractError(
+            f"{path} cannot be read ({exc}), and the dataset gate reads it to decide which contract "
+            "built the tree in this directory. Repair or remove it before merging here."
+        ) from exc
+    block = provenance.get(PROVENANCE_KEY) if isinstance(provenance, dict) else None
+    return block.get("name") if isinstance(block, dict) else None
+
+
+def require_provenance_agrees(config_dir, contract):
+    """Refuse to merge into a directory whose provenance names the OTHER contract.
+
+    ``assert_dataset_contract`` reads ``RUN_PROVENANCE.json`` BEFORE the badge beside it, so a block
+    left by an earlier run speaks for whatever is written here next, whatever the badge says --
+    clearing the badge is not enough on its own. The merge refuses instead of editing the file,
+    because the sweep owns it and it records a run that did happen; and it refuses here, before any
+    work, rather than letting the disagreement surface at training time hours later.
+    """
+    claimed = provenance_contract(config_dir)
+    if claimed is None or claimed == contract:
+        return
+    raise FeatureContractError(
+        f"{Path(config_dir) / PROVENANCE_FILE} records this directory as built under the {claimed!r} "
+        f"contract, and this merge builds {contract!r}. The dataset gate reads that block before the "
+        f"badge beside it, so whatever is written here would be read as {claimed!r}. Merge into a "
+        f"different --output-dir, or remove the stale {PROVENANCE_KEY!r} block from that file."
+    )
 
 
 def clear_sidecar(config_dir):

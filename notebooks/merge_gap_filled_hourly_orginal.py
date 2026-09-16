@@ -21,6 +21,7 @@ from src.feature_contract.merge_contract import (
     load_cube,
     preflight_cells,
     require_era5_precip,
+    require_provenance_agrees,
     rename_gauge_columns,
     swc_climatology_moments,
     write_sidecar,
@@ -846,6 +847,11 @@ def merge_sap_env_data_site(
     env_input_dir = paths.env_outliers_removed_dir
     print(f"Sap input: {sap_input_dir}")
     print(f"Env input: {env_input_dir}")
+
+    # RUN_PROVENANCE.json outranks the badge in assert_dataset_contract, and the merge does not own
+    # it, so a block naming the other contract is refused here -- before any work -- rather than
+    # quietly overwritten or discovered at training time.
+    require_provenance_agrees(output_base_dir, contract)
 
     # Every climatology lookup happens here, outside the loop: the loop ends in a bare except, so a
     # lookup that failed inside it would leave the site out of the tree with only a printed line.

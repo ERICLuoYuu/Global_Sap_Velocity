@@ -110,6 +110,22 @@ that wants the gauge should read whichever of the two names the tree carries, be
 same quantity — the total over the gauge's OWN hours. `src/Analyzers/per_site_sm_shap.py` shows the
 pattern: resolve the name on load, keep one internal name so outputs never depend on the contract.
 
+**Every consumer defaults to `servable` as well**, so a freshly merged tree needs no flag anywhere:
+`run_selection.py --feature_contract`, the trainer's `--FEATURE_CONTRACT`, and `FEATURE_CONTRACT` in
+`sweep5_config.sh`. Pass `site` for a tree merged that way, or for any tree built before 2026-09-16.
+A mismatch stops the run at the dataset gate; it never trains on the other contract's features.
+(`DEFAULT_CONTRACT` in `definitions.py` stays `site`: it is also the default of
+`apply_feature_engineering`, and a library function must not change behaviour for callers who never
+asked.)
+
+Under `servable`, **`total_precipitation_hourly_sum` is not a feature**. It is still loaded — feature
+engineering's `cwd` group reads it — but the FFS loader keeps it out of the design matrix, because
+`precip` is that same ERA5-Land daily total: the merge writes precip as the daily mean × 24 × 1000,
+and a complete day's sum is exactly 24 × its mean, so `precip == 1000 × total_precipitation_hourly_sum`
+to the bit. Offering both would spend two selection slots on one driver and split its SHAP credit
+across two names, and nothing would report a problem: both columns are present and numeric. Under
+`site` they are the gauge and the reanalysis — different measurements — and both stay selectable.
+
 This replaces two passes that used to follow the merge: `src/feature_contract/rebuild_daily.py`
 (still the only route for trees built before this) and the `_servable_precip` override in
 `feature_engineering.py` (still the producer for the prediction grid, and it recomputes the identical

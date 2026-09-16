@@ -23,6 +23,7 @@ from pathlib import Path
 # Ensure project root is on sys.path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.feature_contract.definitions import FEATURE_CONTRACTS, SERVABLE_CONTRACT  # noqa: E402
 from src.forward_selection.config import (  # noqa: E402
     HyperparamConfig,
     ScoringMode,
@@ -131,6 +132,16 @@ def _parse_args() -> argparse.Namespace:
         default=0.05,
         help="Grid cell size in degrees (only used when --spatial_method=grid).",
     )
+    parser.add_argument(
+        "--feature_contract",
+        type=str,
+        default=SERVABLE_CONTRACT,
+        choices=list(FEATURE_CONTRACTS),
+        help="Feature contract the cache is built under (--build_cache only; the cache records it). "
+        "servable (default): definitions a 0.1 deg cell can reproduce, which the Stage-4 merge "
+        "writes by default. site: legacy definitions -- per-site soil-moisture statistics and gauge "
+        "precip -- for a tree merged with --feature-contract site.",
+    )
     return parser.parse_args()
 
 
@@ -170,7 +181,7 @@ def _cmd_build_cache(args: argparse.Namespace) -> None:
         data_dir = paths.merged_data_root / args.time_scale
 
     cache_path = output_dir / "feature_cache.npz"
-    logger.info("Building cache from %s -> %s", data_dir, cache_path)
+    logger.info("Building cache from %s -> %s (feature contract: %s)", data_dir, cache_path, args.feature_contract)
 
     load_and_cache_features(
         data_dir=data_dir,
@@ -178,6 +189,7 @@ def _cmd_build_cache(args: argparse.Namespace) -> None:
         time_scale=args.time_scale,
         spatial_method=args.spatial_method,
         grid_size=args.grid_size,
+        contract=args.feature_contract,
     )
     logger.info("Cache build complete.")
 

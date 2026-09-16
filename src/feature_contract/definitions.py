@@ -130,6 +130,42 @@ def assert_no_retired_swc_features(names, source: str) -> None:
         raise ValueError(f"{source} names retired soil-moisture features: {detail}")
 
 
+#: Feature names that hold a quantity another feature already carries, under ``servable`` only.
+#:
+#: ``precip`` IS the ERA5-Land daily total under that contract -- the merge writes it as the daily
+#: MEAN of the hourly values x 24 x 1000 -- and :data:`ERA5_DAILY_PRECIP_COL` is that same total in
+#: metres. ``complete_day_statistics`` takes the mean and the sum over the same complete day and
+#: emits neither unless every hour is present, so on any row that exists the sum is exactly 24 x the
+#: mean: ``precip == M_TO_MM * total_precipitation_hourly_sum``. Offering both spends two selection
+#: slots on one driver and splits its SHAP credit between two names.
+#:
+#: Under ``site`` they are different measurements -- the rain GAUGE and the reanalysis -- and both
+#: belong. The column is LOADED under either contract: feature engineering's ``cwd`` group reads it.
+SERVABLE_DUPLICATE_FEATURES = {
+    ERA5_DAILY_PRECIP_COL: "precip, the same ERA5-Land daily total (precip == 1000 x this column)",
+}
+
+
+def servable_duplicate_features(contract: str) -> dict:
+    """``{name: what it duplicates}`` under ``contract``; empty for every contract but servable."""
+    return dict(SERVABLE_DUPLICATE_FEATURES) if validate_contract(contract) == SERVABLE_CONTRACT else {}
+
+
+def assert_no_servable_duplicate_features(names, source: str, contract: str) -> None:
+    """Raise ``ValueError`` when ``names`` carries two names for one quantity under ``contract``.
+
+    Like the retired soil-moisture names, these do not announce themselves as "missing": the column
+    is present and numeric, so a stale list trains on one driver twice and nothing else notices.
+    """
+    duplicates = servable_duplicate_features(contract)
+    stale = sorted(set(names) & set(duplicates))
+    if stale:
+        detail = "; ".join(f"{name} -> {duplicates[name]}" for name in stale)
+        raise ValueError(
+            f"{source} names features that duplicate another under the {contract!r} contract: {detail}"
+        )
+
+
 def era5_precip_mm_per_day(precip_m: pd.Series) -> pd.Series:
     """ERA5-Land daily precipitation in metres -> mm/day, with tiny negative reanalysis values set to 0."""
     return (precip_m * M_TO_MM).clip(lower=0.0)

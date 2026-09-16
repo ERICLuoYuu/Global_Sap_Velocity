@@ -1,4 +1,4 @@
-"""--FEATURE_CONTRACT and --SWC_SCALE on the ML trainer's parser, and their record in FINAL_config."""
+"""--FEATURE_CONTRACT on the ML trainer's parser, and its record in FINAL_config; --SWC_SCALE is gone."""
 
 import argparse
 import sys
@@ -15,8 +15,14 @@ def _parse(monkeypatch, *extra):
     return parse_args()
 
 
-def test_default_contract_is_site(monkeypatch):
-    assert _parse(monkeypatch).FEATURE_CONTRACT == "site"
+def test_the_default_is_servable(monkeypatch):
+    """The Stage-4 merge builds servable by default; a consumer defaulting to the other contract
+    would make every fresh tree fail the dataset gate until someone passed a flag."""
+    assert _parse(monkeypatch).FEATURE_CONTRACT == "servable"
+
+
+def test_site_is_still_accepted(monkeypatch):
+    assert _parse(monkeypatch, "--FEATURE_CONTRACT", "site").FEATURE_CONTRACT == "site"
 
 
 def test_servable_is_accepted(monkeypatch):
@@ -37,24 +43,11 @@ def test_provenance_of_a_parser_without_the_flag_records_none():
     assert build_run_provenance(argparse.Namespace())["feature_contract"] is None
 
 
-def test_default_swc_scale_is_ratio(monkeypatch):
-    assert _parse(monkeypatch).SWC_SCALE == "ratio"
-
-
-@pytest.mark.parametrize("scale", ["zscore", "raw"])
-def test_the_other_swc_scales_are_accepted(monkeypatch, scale):
-    assert scale == _parse(monkeypatch, "--FEATURE_CONTRACT", "servable", "--SWC_SCALE", scale).SWC_SCALE
-
-
-def test_an_unknown_swc_scale_is_rejected_by_the_parser(monkeypatch):
+def test_the_swc_scale_flag_is_gone(monkeypatch):
+    """Soil moisture has one definition per quantity per layer; there is no scale left to choose."""
     with pytest.raises(SystemExit):
-        _parse(monkeypatch, "--SWC_SCALE", "minmax")
+        _parse(monkeypatch, "--SWC_SCALE", "ratio")
 
 
-def test_provenance_records_the_swc_scale():
-    args = argparse.Namespace(FEATURE_CONTRACT="servable", SWC_SCALE="raw")
-    assert build_run_provenance(args)["swc_scale"] == "raw"
-
-
-def test_provenance_of_a_parser_without_the_swc_flag_records_none():
-    assert build_run_provenance(argparse.Namespace())["swc_scale"] is None
+def test_provenance_records_no_swc_scale():
+    assert "swc_scale" not in build_run_provenance(argparse.Namespace(FEATURE_CONTRACT="servable"))

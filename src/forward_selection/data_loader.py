@@ -16,6 +16,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.feature_contract.definitions import (
+    DEFAULT_CONTRACT,
+    assert_dataset_contract,
+    assert_no_retired_swc_features,
+    assert_no_servable_duplicate_features,
+    servable_duplicate_features,
+    validate_contract,
+)
 from src.forward_selection.feature_registry import (
     ADDITIONAL_FEATURES,
     INTERMEDIATE_ONLY,
@@ -23,6 +31,16 @@ from src.forward_selection.feature_registry import (
 )
 
 _INTERMEDIATE_SET = frozenset(INTERMEDIATE_ONLY)
+
+
+def _intermediate_columns(contract: str) -> frozenset:
+    """Columns loaded as feature-engineering inputs but kept OUT of the design matrix.
+
+    Under ``servable`` this also covers the ERA5-Land daily total in metres, because ``precip`` is
+    that same total in mm and the two would be one variable under two names. Feature engineering's
+    ``cwd`` group still reads the metres column, so it is dropped here rather than never loaded.
+    """
+    return _INTERMEDIATE_SET | frozenset(servable_duplicate_features(contract))
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +78,7 @@ def load_and_cache_features(
     is_only_day: bool = False,
     grid_size: float = 0.05,
     spatial_method: str = "default",
+    contract: str = DEFAULT_CONTRACT,
 ) -> dict[str, Any]:
     """Load all site CSVs, compute every feature, and save to .npz cache.
 
@@ -77,11 +96,19 @@ def load_and_cache_features(
         If True, filter to daytime records (sw_in > 10).
     grid_size : float
         Spatial grid size for grouping (degrees).
+    contract : str
+        Feature contract, ``"site"`` (default, legacy) or ``"servable"``; see
+        :mod:`src.feature_contract.definitions`. The tree (the parent of ``data_dir``) must have
+        been built under it, every site is engineered under it, and the cache records it.
 
     Returns
     -------
     dict with keys: X, y, groups, pfts_encoded, feature_names, pft_categories
     """
+    contract = validate_contract(contract)
+    # Before anything heavy: a servable cache from a legacy tree would read per-SITE soil-moisture
+    # z-scores as climatological, and a site cache from a servable tree the reverse.
+    assert_dataset_contract(Path(data_dir).parent, contract)
     apply_all_feature_engineering, add_time_features, create_spatial_groups = _import_training_helpers()
 
     data_list = sorted(data_dir.glob(f"*{time_scale}.csv"))
@@ -90,7 +117,7 @@ def load_and_cache_features(
     if not data_list:
         raise FileNotFoundError(f"No CSV files found in {data_dir}")
 
-    logger.info("Found %d site CSV files in %s", len(data_list), data_dir)
+    logger.info("Found %d site CSV files in %s (feature contract: %s)", len(data_list), data_dir, contract)
 
     # Build the full used_cols list (base + additional)
     base_features = [
@@ -111,7 +138,6 @@ def load_and_cache_features(
         "elevation",
         "LAI",
         "prcip/PET",
-        "volumetric_soil_water_layer_1",
         "soil_temperature_level_1",
         "day_length",
     ]
@@ -120,6 +146,8 @@ def load_and_cache_features(
         base_features = [f for f in base_features if f not in daily_only_cols]
 
     used_cols = list(set(base_features + ADDITIONAL_FEATURES))
+    assert_no_retired_swc_features(used_cols, "the FFS column list (base features + ADDITIONAL_FEATURES)")
+    _intermediates = _intermediate_columns(contract)
     all_possible_pft_types = PFT_ONEHOT_COLS
 
     site_data_dict: dict[str, pd.DataFrame] = {}
@@ -169,7 +197,7 @@ def load_and_cache_features(
             df = add_time_features(df, datetime_column=None)
 
             # Step 2: apply ALL feature engineering (single call)
-            df, engineered_names = apply_all_feature_engineering(df, time_scale)
+            df, engineered_names = apply_all_feature_engineering(df, time_scale, contract=contract)
             for fname in engineered_names:
                 if fname not in used_cols:
                     used_cols.append(fname)
@@ -186,7 +214,7 @@ def load_and_cache_features(
                 "Year cos",
             ]
 
-            feature_cols = [c for c in used_cols + time_features if c not in _INTERMEDIATE_SET]
+            feature_cols = [c for c in used_cols + time_features if c not in _intermediates]
             missing_cols = [c for c in feature_cols if c not in df.columns]
 
             if missing_cols:
@@ -286,6 +314,7 @@ def load_and_cache_features(
         pfts_encoded=pfts_encoded,
         feature_names=np.array(final_feature_names),
         pft_categories=np.array(list(pft_categories)),
+        feature_contract=np.array(contract),
     )
     logger.info("Cache saved to %s (%.1f MB)", cache_path, cache_path.stat().st_size / 1e6)
 
@@ -296,6 +325,7 @@ def load_and_cache_features(
         "pfts_encoded": pfts_encoded,
         "feature_names": final_feature_names,
         "pft_categories": list(pft_categories),
+        "feature_contract": contract,
     }
 
 
@@ -309,22 +339,39 @@ def load_cache(cache_path: Path) -> dict[str, Any]:
 
     Returns
     -------
-    dict with keys: X, y, groups, pfts_encoded, feature_names, pft_categories
+    dict with keys: X, y, groups, pfts_encoded, feature_names, pft_categories, feature_contract
+        (``None`` for a cache written before the contract was recorded)
+
+    Raises
+    ------
+    ValueError
+        The cache names a soil-moisture feature retired on 2026-09-14. Such a cache also lacks the
+        level and anomaly columns, so selection on it would silently run without soil moisture.
     """
     cache_path = Path(cache_path)
     data = np.load(cache_path, allow_pickle=True)
+    # Names first: an .npz member is read on access, so a stale cache fails before X is decompressed.
+    feature_names = list(data["feature_names"])
+    cached_contract = data["feature_contract"].item() if "feature_contract" in data.files else None
+    _source = f"feature cache {cache_path} (rebuild it with run_selection --build_cache)"
+    assert_no_retired_swc_features(feature_names, _source)
+    if cached_contract:
+        # A servable cache built before precip became the ERA5 total carries both names for it.
+        assert_no_servable_duplicate_features(feature_names, _source, cached_contract)
     result = {
         "X": data["X"],
         "y": data["y"],
         "groups": data["groups"],
         "pfts_encoded": data["pfts_encoded"],
-        "feature_names": list(data["feature_names"]),
+        "feature_names": feature_names,
         "pft_categories": list(data["pft_categories"]),
+        "feature_contract": cached_contract,
     }
     logger.info(
-        "Loaded cache: X=%s, %d features, %d PFT classes",
+        "Loaded cache: X=%s, %d features, %d PFT classes, feature contract %s",
         result["X"].shape,
         len(result["feature_names"]),
         len(result["pft_categories"]),
+        result["feature_contract"],
     )
     return result

@@ -51,7 +51,11 @@ from path_config import PathConfig  # noqa: E402
 tf.random.set_seed(42)
 np.random.seed(42)
 
-from src.feature_contract.definitions import assert_dataset_contract, validate_swc_scale  # noqa: E402
+from src.feature_contract.definitions import (  # noqa: E402
+    assert_dataset_contract,
+    assert_no_retired_swc_features,
+    assert_no_servable_duplicate_features,
+)
 
 # Import the hyperparameter optimizer
 from src.hyperparameter_optimization.feature_engineering import (  # noqa: E402
@@ -110,7 +114,6 @@ def main(run_id="default"):
     R2_METHOD = args.r2_method
     VPD_FILTER = args.vpd_filter
     FEATURE_CONTRACT = args.FEATURE_CONTRACT
-    SWC_SCALE = validate_swc_scale(args.SWC_SCALE, FEATURE_CONTRACT)
 
     # Initialize target transformer
     target_transformer = TargetTransformer(method=TRANSFORM_METHOD)
@@ -151,7 +154,7 @@ def main(run_id="default"):
     # site loads: a servable run on a legacy tree would take the per-SITE soil-moisture
     # z-scores as if they were climatological, and nothing downstream could tell.
     assert_dataset_contract(data_dir.parent, FEATURE_CONTRACT)
-    logging.info(f"Feature contract: {FEATURE_CONTRACT}, swc scale: {SWC_SCALE} (dataset accepted: {data_dir.parent})")
+    logging.info(f"Feature contract: {FEATURE_CONTRACT} (dataset accepted: {data_dir.parent})")
 
     # --- Data Loading and Processing ---
     data_list = sorted(list(data_dir.glob(f"*{TIME_SCALE}.csv")))
@@ -178,6 +181,12 @@ def main(run_id="default"):
         raise ValueError(
             f"selected_features JSON contains raw 'pft' column. Use individual PFT names instead: {PFT_COLUMNS}"
         )
+    # A retired soil-moisture name is still a column of the merged CSVs, so a stale list would not be
+    # skipped as missing: it would train on the retired definition without a word.
+    assert_no_retired_swc_features(_sf_list, args.selected_features)
+    # Under servable, precip IS the ERA5-Land daily total, so a list naming the metres column too
+    # trains one driver twice. It is present and numeric, so it never fails as missing.
+    assert_no_servable_duplicate_features(_sf_list, args.selected_features, args.FEATURE_CONTRACT)
     used_cols = sorted(_sf_list)
     # Ensure TARGET_COL is included
     if TARGET_COL not in used_cols:
@@ -236,7 +245,7 @@ def main(run_id="default"):
             df = add_time_features(df, datetime_column=None)
 
             # Apply ALL feature engineering unconditionally
-            df, _ = apply_all_feature_engineering(df, TIME_SCALE, contract=FEATURE_CONTRACT, swc_scale=SWC_SCALE)
+            df, _ = apply_all_feature_engineering(df, TIME_SCALE, contract=FEATURE_CONTRACT)
 
             # Compute canopy conductance if requested as target
             if TARGET_COL == "canopy_conductance":

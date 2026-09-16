@@ -47,7 +47,23 @@ case "$GROUPING" in
 esac
 
 
+# Feature contract, for the cache AND the trainer together (src/feature_contract/definitions.py).
+#   servable  DEFAULT. Definitions a 0.1 deg cell can reproduce. The Stage-4 merge writes such a
+#             tree by default, so a freshly merged tree needs nothing set here.
+#   site      legacy definitions -- per-site soil-moisture statistics and gauge precip. Needed for a
+#             tree merged with --feature-contract site, and for any tree built before 2026-09-16.
+# Every stage asserts the tree, and selection and training assert the cache, so a run cannot pair
+# one contract's features with the other's -- a mismatch stops the sweep, it does not train.
+#   sbatch --export=ALL,SWEEP_NAME=sweep_20260902_hohfix,FEATURE_CONTRACT=site ...
+FEATURE_CONTRACT="${FEATURE_CONTRACT:-servable}"
+case "$FEATURE_CONTRACT" in
+  site|servable) ;;
+  *)    echo "FATAL: FEATURE_CONTRACT must be 'site' or 'servable', got '$FEATURE_CONTRACT'" >&2
+        return 1 2>/dev/null || exit 1 ;;
+esac
+
 case "$SWEEP_NAME" in
+  *_hohfix_sv) SWEEP_TAG=_hohfix_sv ;;
   *_hohfix) SWEEP_TAG=_hohfix ;;
   *)        SWEEP_TAG="" ;;
 esac
@@ -109,5 +125,32 @@ if bad:
 if flags.get("apply_flo2019_correction") is not False:
     sys.exit("  GATE FAIL: flo2019 calibration is ON; the sweep ran with it off")
 print("  GATE PASS: %s  %s" % (name, {k: flags[k] for k in sorted(want)}))
+PYEOF
+}
+
+# Assert the merged tree was built under the contract (two-sided: 'site' refuses a servable tree).
+sweep5_assert_contract () {
+    python - "$1" "$2" <<'PYEOF'
+import sys
+from src.feature_contract.definitions import assert_dataset_contract
+try:
+    assert_dataset_contract(sys.argv[1], sys.argv[2])
+except ValueError as exc:
+    sys.exit("  GATE FAIL: %s" % exc)
+print("  GATE PASS: %s accepted under feature contract %r" % (sys.argv[1], sys.argv[2]))
+PYEOF
+}
+
+# Assert an FFS cache records the contract. A cache without the key predates it and is refused.
+sweep5_assert_cache_contract () {
+    python - "$1" "$2" <<'PYEOF'
+import sys
+import numpy as np
+# allow_pickle: our own cache, written by stage 1 of this sweep on private scratch.
+d = np.load(sys.argv[1], allow_pickle=True)
+got = d["feature_contract"].item() if "feature_contract" in d.files else None
+if got != sys.argv[2]:
+    sys.exit("  GATE FAIL: %s records feature_contract=%r, the run wants %r" % (sys.argv[1], got, sys.argv[2]))
+print("  GATE PASS: the cache records feature_contract=%r" % got)
 PYEOF
 }

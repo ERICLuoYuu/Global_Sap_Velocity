@@ -4,6 +4,8 @@ Loads data from the FFS feature_cache.npz, selects only the FFS-chosen
 features, and runs the same 10-fold StratifiedGroupKFold CV as the main
 training script.  Guarantees exact data match with FFS evaluation.
 
+A cache or feature list naming a soil-moisture feature retired on 2026-09-14 is refused.
+
 Usage:
     python -m src.forward_selection.train_from_cache \
         --cache_path outputs/forward_selection/feature_cache.npz \
@@ -27,6 +29,13 @@ from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 
+from src.feature_contract.definitions import (
+    DEFAULT_CONTRACT,
+    assert_no_retired_swc_features,
+    assert_no_servable_duplicate_features,
+)
+from src.forward_selection.data_loader import load_cache
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -45,25 +54,25 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    t0 = time.time()
+def load_selected_features(cache_path, selected_features_path) -> tuple[dict, list[int], list[str]]:
+    """Load the FFS cache and pick the listed features, in cache column order.
 
-    # --- Load FFS cache ---
-    logger.info("Loading FFS cache from %s", args.cache_path)
-    cache = np.load(args.cache_path, allow_pickle=True)
-    X_all = cache["X"]
-    y_all = cache["y"]
-    groups = cache["groups"]
-    pfts_encoded = cache["pfts_encoded"]
-    feature_names = list(cache["feature_names"])
-    pft_categories = list(cache["pft_categories"])
-    logger.info("Cache: %d samples, %d features, %d groups", X_all.shape[0], X_all.shape[1], len(np.unique(groups)))
+    Both inputs go through the soil-moisture guard: the cache via ``load_cache``, the list by name.
+    A retired name is no column of a new cache, so without the guard it would only be warned about
+    as missing and the model trained without it.
 
-    # --- Select FFS features ---
-    with open(args.selected_features) as f:
+    Returns ``(cache, sel_idx, sel_names)``.
+    """
+    cache = load_cache(cache_path)
+    feature_names = cache["feature_names"]
+
+    with open(selected_features_path) as f:
         sf_data = json.load(f)
     sel_list = sf_data.get("selected_features", sf_data) if isinstance(sf_data, dict) else sf_data
+    assert_no_retired_swc_features(sel_list, str(selected_features_path))
+    assert_no_servable_duplicate_features(
+        sel_list, str(selected_features_path), cache.get("feature_contract") or DEFAULT_CONTRACT
+    )
     sel_set = set(sel_list)
 
     sel_idx = [i for i, fn in enumerate(feature_names) if fn in sel_set]
@@ -71,6 +80,21 @@ def main() -> None:
     missing = sel_set - set(sel_names)
     if missing:
         logger.warning("Features in JSON but not in cache: %s", sorted(missing))
+    return cache, sel_idx, sel_names
+
+
+def main() -> None:
+    args = parse_args()
+    t0 = time.time()
+
+    # --- Load FFS cache and select FFS features ---
+    logger.info("Loading FFS cache from %s", args.cache_path)
+    cache, sel_idx, sel_names = load_selected_features(args.cache_path, args.selected_features)
+    X_all = cache["X"]
+    y_all = cache["y"]
+    groups = cache["groups"]
+    pfts_encoded = cache["pfts_encoded"]
+    logger.info("Cache: %d samples, %d features, %d groups", X_all.shape[0], X_all.shape[1], len(np.unique(groups)))
 
     X = X_all[:, sel_idx].astype(np.float32)
     y = y_all.astype(np.float32)

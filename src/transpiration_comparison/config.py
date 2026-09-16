@@ -2,9 +2,11 @@ from __future__ import annotations
 
 """Configuration for transpiration product comparison pipeline."""
 
+import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -124,16 +126,47 @@ _SCRATCH = Path(os.environ.get("SCRATCH_DIR", "/scratch/tmp/yluo2"))
 
 @dataclass
 class Paths:
+    """Every location the pipeline reads or writes, derived from `base`.
+
+    Each field defaults to None and is filled from `base` in __post_init__.
+    Before, only `base` was settable and every other field kept a hardwired
+    `/scratch/tmp/yluo2/gsv/...` value, so `--base-dir` moved nothing; and
+    figures_dir/reports_dir were RELATIVE, so the output location was decided
+    by the caller's cwd. `run_tag`, when set, gives this run its own cache and
+    figure directories instead of overwriting the previous run's.
+    """
+
     base: Path = _SCRATCH / "gsv"
+    run_tag: str = ""
     worktree: Path = _SCRATCH / "gsv-wt" / "map-viz"
-    predictions_parquet: Path = _SCRATCH / "gsv" / "outputs" / "data_for_prediction" / "stage2_no_precip"
-    predictions_geotiff: Path = (
-        _SCRATCH / "gsv" / "outputs" / "data_for_prediction" / "stage3_maps" / "no_precip_2016_2018"
-    )
-    products_dir: Path = _SCRATCH / "gsv" / "data" / "transpiration_products"
-    preprocessed_dir: Path = _SCRATCH / "gsv" / "data" / "transpiration_preprocessed"
-    figures_dir: Path = Path("outputs/figures/transpiration_comparison")
-    reports_dir: Path = Path("outputs/transpiration_comparison")
+    predictions_parquet: Optional[Path] = None
+    serving_store: Optional[Path] = None
+    products_dir: Optional[Path] = None
+    preprocessed_dir: Optional[Path] = None
+    figures_dir: Optional[Path] = None
+    reports_dir: Optional[Path] = None
+
+    def __post_init__(self):
+        self.base = Path(self.base)
+        if self.predictions_parquet is None:
+            self.predictions_parquet = self.base / "outputs" / "data_for_prediction" / "stage2_no_precip"
+        if self.serving_store is None:
+            self.serving_store = self.base / "outputs" / "serving" / "store_v1"
+        if self.products_dir is None:
+            self.products_dir = self.base / "data" / "transpiration_products"
+        if self.preprocessed_dir is None:
+            self.preprocessed_dir = self.base / "data" / "transpiration_preprocessed"
+        if self.figures_dir is None:
+            self.figures_dir = self.base / "outputs" / "figures" / "transpiration_comparison"
+        if self.reports_dir is None:
+            self.reports_dir = self.base / "outputs" / "transpiration_comparison"
+        for name in ("predictions_parquet", "serving_store", "products_dir",
+                     "preprocessed_dir", "figures_dir", "reports_dir"):
+            setattr(self, name, Path(getattr(self, name)))
+        if self.run_tag:
+            self.preprocessed_dir = self.preprocessed_dir / self.run_tag
+            self.figures_dir = self.figures_dir / self.run_tag
+            self.reports_dir = self.reports_dir / self.run_tag
 
     def ensure_dirs(self):
         for d in [self.products_dir, self.preprocessed_dir, self.figures_dir, self.reports_dir]:
@@ -171,5 +204,26 @@ DEFAULT_DOMAIN = SpatialDomain()
 DEFAULT_PERIOD = TimePeriod()
 DEFAULT_PATHS = Paths()
 
-# Minimum valid days for Z-score computation
+# --- Validity thresholds ---
+#
+# These are applied to whatever frame preprocessing produced, which is MONTHLY
+# (pipeline collapses anything longer than 100 steps to monthly means). The old
+# hard-coded 30 was a day count: at 36 months it kept 30/36, but a one-year run
+# has 12 months and 30 masked every pixel on Earth, silently. The fraction below
+# is 30/36 exactly, so a 2016-2018 run reproduces the published mask.
+MIN_VALID_FRACTION = 5.0 / 6.0
+MIN_VALID_FLOOR = 6
+
+# Retained for callers that still import it; prefer min_valid_timesteps().
 MIN_VALID_TIMESTEPS = 30
+
+
+def min_valid_timesteps(
+    n_time: int,
+    fraction: float = MIN_VALID_FRACTION,
+    floor: int = MIN_VALID_FLOOR,
+) -> int:
+    """Minimum non-NaN steps a pixel needs, scaled to the frame it is in."""
+    if n_time <= 0:
+        raise ValueError(f"n_time must be positive, got {n_time}")
+    return min(n_time, max(floor, math.ceil(fraction * n_time)))

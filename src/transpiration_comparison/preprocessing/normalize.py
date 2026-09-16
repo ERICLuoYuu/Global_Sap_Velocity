@@ -13,7 +13,7 @@ import logging
 import numpy as np
 import xarray as xr
 
-from ..config import MIN_VALID_TIMESTEPS
+from ..config import min_valid_timesteps
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ def zscore_normalize(
     ds: xr.Dataset,
     var: str,
     dim: str = "time",
-    min_valid: int = MIN_VALID_TIMESTEPS,
+    min_valid: "int | None" = None,
 ) -> xr.Dataset:
     """Z-score normalize a variable along the time dimension per pixel.
 
@@ -46,9 +46,14 @@ def zscore_normalize(
     xr.Dataset
         Dataset with additional '{var}_zscore' variable.
     """
-    logger.info(f"Z-score normalizing '{var}' along '{dim}' (min_valid={min_valid})...")
-
     data = ds[var]
+    if min_valid is None:
+        min_valid = min_valid_timesteps(int(data.sizes[dim]))
+    logger.info(
+        f"Z-score normalizing '{var}' along '{dim}' "
+        f"(min_valid={min_valid} of {int(data.sizes[dim])} steps)..."
+    )
+
     mean = data.mean(dim=dim)
     std = data.std(dim=dim)
 

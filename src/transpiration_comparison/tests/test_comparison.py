@@ -30,7 +30,6 @@ from src.transpiration_comparison.comparison.spatial import (
 from src.transpiration_comparison.comparison.temporal_comp import (
     interannual_correlation,
     seasonal_cycle_comparison,
-    trend_agreement,
 )
 from src.transpiration_comparison.config import PFT_COLUMNS, REGIONS, Region
 
@@ -264,27 +263,6 @@ class TestInterannualCorrelation:
             assert np.mean(valid) > 0.8
 
 
-# ── Trend agreement ───────────────────────────────────────────────
-
-
-class TestTrendAgreement:
-    def test_same_trend_full_agreement(self, small_domain, monthly_time):
-        lat, lon = small_domain
-        # Both products with identical positive trend
-        ds1 = _make_ts_dataset("v", lat, lon, monthly_time, seed=0, scale=1.0)
-        ds2 = _make_ts_dataset("v", lat, lon, monthly_time, seed=0, scale=1.0)
-        result = trend_agreement({"a": ds1, "b": ds2}, var_key="v")
-        assert "trend_agreement" in result.data_vars
-        # Identical data -> same trend sign -> agreement = 1.0
-        assert float(result["trend_agreement"].mean()) == pytest.approx(1.0)
-
-    def test_single_product_returns_empty(self, small_domain, monthly_time):
-        lat, lon = small_domain
-        ds = _make_ts_dataset("v", lat, lon, monthly_time)
-        result = trend_agreement({"only": ds}, var_key="v")
-        assert len(result.data_vars) == 0
-
-
 # ── Regional analysis ─────────────────────────────────────────────
 
 
@@ -410,11 +388,18 @@ class TestZonalMeanProfile:
             assert "lat_center" in result.columns
             assert "product" in result.columns
 
-    def test_no_zscore_var_warns(self, small_domain, monthly_time):
+    def test_profiles_the_raw_variable_not_the_zscore(self, small_domain, monthly_time):
+        """Seasonal amplitude comes from the raw values.
+
+        A Z-score has std 1 per pixel by construction, so its zonal profile
+        would be flat everywhere; the function takes the raw variable even when
+        no Z-score is present.
+        """
         lat, lon = small_domain
         ds = _make_ts_dataset("temperature", lat, lon, monthly_time)
         result = zonal_mean_profile({"prod": ds}, var_suffix="_zscore")
-        assert len(result) == 0
+        assert len(result) > 0
+        assert set(result["product"]) == {"prod"}
 
 
 # ── Manual correlation ────────────────────────────────────────────

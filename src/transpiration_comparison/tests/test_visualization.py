@@ -218,30 +218,3 @@ class TestMapPlots:
         out = tmp_path / "consensus.png"
         plot_consensus_map(ds, out)
         assert out.exists()
-
-
-# ── Taylor diagram ────────────────────────────────────────────────
-
-
-class TestTaylorDiagram:
-    def test_manual_taylor_creates_file(self, tmp_path):
-        from src.transpiration_comparison.visualization.taylor import _manual_taylor
-
-        rng = np.random.default_rng(42)
-        ref = xr.DataArray(rng.normal(0, 1, (100, 10, 10)), dims=["time", "lat", "lon"])
-        products = {
-            "gleam": xr.DataArray(ref.values + rng.normal(0, 0.3, ref.shape), dims=["time", "lat", "lon"]),
-        }
-        out = tmp_path / "taylor.png"
-        _manual_taylor(ref, products, "Test Taylor", out)
-        assert out.exists()
-
-    def test_taylor_with_insufficient_data(self, tmp_path):
-        from src.transpiration_comparison.visualization.taylor import taylor_diagram
-
-        ref = xr.DataArray(np.full((5, 2, 2), np.nan), dims=["time", "lat", "lon"])
-        products = {"a": xr.DataArray(np.full((5, 2, 2), np.nan), dims=["time", "lat", "lon"])}
-        out = tmp_path / "taylor_empty.png"
-        taylor_diagram(ref, products, "Empty", out)
-        # Should not create file when no valid data
-        assert not out.exists()

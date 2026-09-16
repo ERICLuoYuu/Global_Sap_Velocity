@@ -42,7 +42,10 @@ class TestProductInstantiation:
     def test_pmlv2_init(self):
         p = PMLv2Product()
         assert p.config == PRODUCTS["pmlv2"]
-        assert p.config.native_resolution == 0.05
+        # Upstream PMLv2 is 0.05 deg, but download() exports it through GEE at
+        # crs_transform [0.1, 0, ...], so the files are 0.1 and no regrid is
+        # wanted. pipeline.py reads this field to decide that.
+        assert p.config.native_resolution == 0.1
 
     def test_gldas_init(self):
         p = GLDASProduct()

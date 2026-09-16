@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from ..config import PFT_COLUMNS
+from ..config import PFT_COLUMNS, min_valid_timesteps
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ def pixel_temporal_correlation(
     ds_comp: xr.Dataset,
     var_ref: str = "sap_velocity_zscore",
     var_comp: str = "transpiration_zscore",
-    min_overlap: int = 30,
+    min_overlap: "int | None" = None,
 ) -> xr.Dataset:
     """Compute pixel-wise temporal Pearson correlation between two products.
 
@@ -44,7 +44,12 @@ def pixel_temporal_correlation(
     xr.Dataset
         Dataset with 'pearson_r' and 'p_value' per pixel.
     """
-    logger.info(f"Computing pixel-wise temporal correlation: {var_ref} vs {var_comp}")
+    if min_overlap is None:
+        min_overlap = min_valid_timesteps(int(ds_ref[var_ref].sizes["time"]))
+    logger.info(
+        f"Computing pixel-wise temporal correlation: {var_ref} vs {var_comp} "
+        f"(min_overlap={min_overlap})"
+    )
 
     try:
         import xskillscore as xs

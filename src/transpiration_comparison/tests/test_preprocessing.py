@@ -74,7 +74,7 @@ class TestZscoreNormalize:
         result = zscore_normalize(ds, "transpiration")
         attrs = result["transpiration_zscore"].attrs
         assert attrs["units"] == "dimensionless"
-        assert "min_valid_days" in attrs
+        assert "min_valid_timesteps" in attrs
 
 
 # ── Climatology ────────────────────────────────────────────────────

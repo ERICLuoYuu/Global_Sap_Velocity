@@ -17,8 +17,8 @@ config.py
     v
 products/          --> preprocessing/     --> comparison/        --> visualization/
   gleam.py              regrid.py              spatial.py            maps.py
-  era5land.py           temporal.py            temporal_comp.py      taylor.py
-  pmlv2.py              normalize.py           regional.py           timeseries.py
+  era5land.py           temporal.py            temporal_comp.py      timeseries.py
+  pmlv2.py              normalize.py           regional.py
   gldas.py                                     agreement.py          summary.py
   sap_velocity.py                              collocation.py
     |                       |                       |                    |
@@ -69,7 +69,6 @@ src/transpiration_comparison/
 |-- visualization/             # Phase 7: Figures
 |   |-- __init__.py
 |   |-- maps.py               # Global maps (cartopy)
-|   |-- taylor.py             # Taylor diagrams (SkillMetrics)
 |   |-- timeseries.py         # Time series, seasonal cycles
 |   +-- summary.py            # Dashboard/summary figures
 |
@@ -241,16 +240,19 @@ PFT_COLUMNS = {
     "WET": "Wetland",
 }
 
-# Paths (HPC)
+# Paths (HPC) -- every field is derived from `base` in __post_init__,
+# so --base-dir moves all of them. `run_tag`, when set, gives the run its own
+# cache/figure/report directories instead of overwriting the previous run's.
 @dataclass
 class Paths:
     base: Path = Path("/scratch/tmp/yluo2/gsv")
-    predictions_parquet: Path = Path("/scratch/tmp/yluo2/gsv/outputs/data_for_prediction/stage2_no_precip")
-    predictions_geotiff: Path = Path("/scratch/tmp/yluo2/gsv/outputs/data_for_prediction/stage3_maps/no_precip_2016_2018")
-    products_dir: Path = Path("/scratch/tmp/yluo2/gsv/data/transpiration_products")
-    preprocessed_dir: Path = Path("/scratch/tmp/yluo2/gsv/data/transpiration_preprocessed")
-    figures_dir: Path = Path("outputs/figures/transpiration_comparison")
-    reports_dir: Path = Path("outputs/transpiration_comparison")
+    run_tag: str = ""
+    predictions_parquet: Optional[Path] = None   # <base>/outputs/data_for_prediction/stage2_no_precip
+    serving_store: Optional[Path] = None         # <base>/outputs/serving/store_v1
+    products_dir: Optional[Path] = None          # <base>/data/transpiration_products
+    preprocessed_dir: Optional[Path] = None      # <base>/data/transpiration_preprocessed[/<run_tag>]
+    figures_dir: Optional[Path] = None           # <base>/outputs/figures/transpiration_comparison[/<run_tag>]
+    reports_dir: Optional[Path] = None           # <base>/outputs/transpiration_comparison[/<run_tag>]
 ```
 
 ## Interface Contracts
@@ -384,10 +386,6 @@ def interannual_correlation(ds_ref: xr.Dataset, ds_comp: xr.Dataset,
     """Pixel-wise correlation of annual anomalies.
     Aggregates to annual means, then correlates."""
     ...
-
-def trend_agreement(datasets: dict[str, xr.Dataset]) -> xr.Dataset:
-    """Linear trend per pixel per product. Returns sign agreement map."""
-    ...
 ```
 
 ### comparison/collocation.py
@@ -427,21 +425,6 @@ def plot_correlation_map(corr: xr.DataArray, title: str, output_path: Path) -> N
 def plot_multi_product_maps(datasets: dict[str, xr.Dataset], var: str,
                             output_dir: Path) -> None:
     """Panel plot: one map per product side by side."""
-    ...
-```
-
-### visualization/taylor.py
-
-```python
-def taylor_diagram(reference: xr.DataArray, products: dict[str, xr.DataArray],
-                   title: str, output_path: Path) -> None:
-    """Taylor diagram using SkillMetrics library.
-    One point per product showing correlation, std ratio, centered RMSE."""
-    ...
-
-def taylor_diagram_by_pft(reference: xr.DataArray, products: dict[str, xr.DataArray],
-                          pft_map: xr.DataArray, output_path: Path) -> None:
-    """One Taylor diagram per PFT (subplot grid)."""
     ...
 ```
 
@@ -498,7 +481,7 @@ Phase 3: Spatial Comparison
 
 Phase 4: Temporal Comparison
   Load preprocessed products + climatologies
-  Compute: seasonal correlations, interannual correlations, trends
+  Compute: seasonal correlations, interannual correlations
   Output: temporal metric maps + DataFrames
 
 Phase 5: Regional Deep Dives

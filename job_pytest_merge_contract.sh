@@ -16,10 +16,10 @@ export ANALYSIS_SCALE=sapwood_combined
 NEW="src/feature_contract/tests notebooks/test_merge_feature_contract.py"
 REG="notebooks/test_daily_own_hours.py notebooks/test_env_hourly_gaps.py notebooks/test_normalise_timestamps_streams.py notebooks/test_daytime_scope.py src/feature_contract/tests src/hyperparameter_optimization/tests src/forward_selection/tests src/serving/tests"
 
-# Pre-existing failure, measured before this change and unreachable from it: neither test_dl_parity
-# nor the DL trainer imports the merge or merge_contract. The parity loader accepts no site at all,
-# which is its own question.
-DESELECT="--deselect src/hyperparameter_optimization/tests/test_dl_parity.py"
+# Nothing is deselected. test_dl_parity was, while it failed: its two FFS selections name soil-moisture
+# features retired on 2026-09-14, so the DL parity loader accepted no site at all. The DL trainer now
+# refuses such a list outright, and the test strips the retired names before checking the rest.
+DESELECT=""
 
 # The regression suite runs by DEFAULT. It used to be opt-in behind WITH_REGRESSION=1, with REG_RC
 # defaulting to 0, so a run that never executed a single regression test still printed "RESULT: PASS"
@@ -35,7 +35,7 @@ NEW_RC=$?
 echo "=== NEW exit: $NEW_RC"
 
 if [ "$WITH_REGRESSION" = "1" ]; then
-  echo "=== REGRESSION (test_dl_parity deselected: pre-existing, unrelated) ==="
+  echo "=== REGRESSION (nothing deselected) ==="
   python -m pytest -q $REG $DESELECT
   REG_RC=$?
   echo "=== REGRESSION exit: $REG_RC"

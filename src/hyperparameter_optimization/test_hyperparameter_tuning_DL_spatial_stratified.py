@@ -42,6 +42,18 @@ from tensorflow.keras import regularizers
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
+from src.feature_contract.definitions import (
+    FEATURE_CONTRACTS,
+    SERVABLE_CONTRACT,
+    assert_dataset_contract,
+    assert_no_retired_swc_features,
+    assert_no_servable_duplicate_features,
+)
+from src.hyperparameter_optimization.feature_engineering import apply_all_feature_engineering
+from src.hyperparameter_optimization.shap_constants import PFT_COLUMNS
+from src.hyperparameter_optimization.target_transformer import ScaledTargetPipeline
+from src.hyperparameter_optimization.training_utils import _str_to_bool, build_pft_onehot
+from src.hyperparameter_optimization.training_utils import add_time_features as tu_add_time_features
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.model_selection import GroupKFold, train_test_split
 from sklearn.model_selection import StratifiedGroupKFold
@@ -110,6 +122,9 @@ def setup_logging(logger_name,log_dir=None):
     return logging.getLogger(logger_name)
 def process_date_file(data_file, args):
     logging.info(f"Processing {data_file.name}")
+    # Read before the try below, which turns every error into a skipped site: a parity run that lost
+    # its contract must stop, not quietly engineer each tree under the library default.
+    contract = args['FEATURE_CONTRACT'] if args.get('PARITY') else None
     try:
         # Unpack arguments
         used_cols = args['USED_COLS']
@@ -130,16 +145,19 @@ def process_date_file(data_file, args):
         lon_col = next((col for col in df.columns if col.lower() in ['lon', 'longitude_x']), None)
         
         # Find the PFT column for stratification
-        pft_col = next((col for col in df.columns if col.lower() in ['pft', 'plant_functional_type', 'biome']), None)
+        # Walk the candidates in PRIORITY order, not df.columns order.  The merged
+        # CSV carries both `pft` (short codes matching PFT_COLUMNS) and `biome`
+        # (IGBP long names); picking by column order can grab `biome`, whose long
+        # names coerce to NaN under pd.Categorical(categories=PFT_COLUMNS) and
+        # produce an all-zero one-hot.  Same fix the ML trainer already carries.
+        _lower_to_actual = {col.lower(): col for col in df.columns}
+        pft_col = next((_lower_to_actual[_p] for _p in ['pft', 'plant_functional_type', 'biome']
+                        if _p in _lower_to_actual), None)
         if not (lat_col and lon_col and pft_col):
                 logging.warning(f"  Warning: Lat/Lon/PFT not found for site {site_id}. Required for spatial stratified CV. Skipping.")
                 return {}, {}, set()
         latitude = df[lat_col].median()
         longitude = df[lon_col].median()
-        # skip CZE sites
-        if site_id.startswith('CZE'):
-            logging.info(f"  Skipping site {site_id} as it starts with CZE.")
-            return {}, {}, set()
         # Add coordinates as features (constant per site)
         df['latitude'] = latitude
         df['longitude'] = longitude
@@ -151,11 +169,24 @@ def process_date_file(data_file, args):
             raise ValueError(f"Latitude or longitude not found in {data_file.name}. Please ensure the file contains lat/lon columns.")
         
         # Set index and add time features
-        df.set_index('TIMESTAMP', inplace=True)
-        df = add_time_features(df)
-        # Fix potential case/whitespace issues
-        df.columns = [col.strip().lower() for col in df.columns]
-        used_cols = [col.strip().lower() for col in used_cols]
+        if args.get('PARITY'):
+            # Mirror test_hyperparameter_tuning_ML_spatial_stratified.py:224-281:
+            # solar clock as index, the SHARED add_time_features, then ALL feature
+            # engineering.  The FFS sets are largely engineered columns that do not
+            # exist in the CSV, so without this every site fails the gate below.
+            # Case is preserved here because engineered names and the PFT one-hots
+            # ('MF', 'DNF', ...) are case-sensitive.
+            df = df.set_index('solar_TIMESTAMP').sort_index()
+            df = tu_add_time_features(df, datetime_column=None)
+            df, _ = apply_all_feature_engineering(df, time_scale, contract=contract)
+            if [c for c in used_cols if c in PFT_COLUMNS]:
+                df = build_pft_onehot(df, pft_col, site_id, PFT_COLUMNS)
+        else:
+            df.set_index('TIMESTAMP', inplace=True)
+            df = add_time_features(df)
+            # Fix potential case/whitespace issues
+            df.columns = [col.strip().lower() for col in df.columns]
+            used_cols = [col.strip().lower() for col in used_cols]
         # Verify columns exist
         missing_cols = [col for col in used_cols if col not in df.columns]
         if missing_cols:
@@ -167,7 +198,7 @@ def process_date_file(data_file, args):
         # Select only the columns we need
         df = df[used_cols].copy()
         
-        if 'pft' in used_cols:
+        if 'pft' in used_cols and not args.get('PARITY'):
             if 'pft' in df.columns:
                 # Get non-pft columns
                 orig_cols = [col for col in used_cols if col != 'pft']
@@ -807,7 +838,8 @@ def create_spatial_groups(
             cell_data_counts = np.bincount(cell_indices, weights=data_counts)
 
             # Sort cells by data count in descending order
-            sorted_cell_indices = np.argsort(cell_data_counts)[::-1]
+            # stable sort: quicksort reorders TIED counts if the site list changes
+            sorted_cell_indices = np.argsort(cell_data_counts, kind="stable")[::-1]
 
             # Greedily assign cells to folds to balance data counts
             fold_data_counts = np.zeros(n_groups)
@@ -828,7 +860,8 @@ def create_spatial_groups(
             groups = np.arange(len(lat))
         else:
             # Sort points by data counts (descending)
-            sorted_indices = np.argsort(data_counts)[::-1]
+            # stable sort: quicksort reorders TIED counts if the site list changes
+            sorted_indices = np.argsort(data_counts, kind="stable")[::-1]
             groups = np.zeros(len(lat), dtype=int) - 1  # Initialize all to -1 (unassigned)
             fold_data_counts = np.zeros(n_groups)
             
@@ -929,6 +962,32 @@ def convert_windows_to_numpy(windows: List[Tuple[tf.Tensor, tf.Tensor]]) -> Tupl
     
     return X, y
 
+def load_frozen_feature_list(path, contract):
+    """The --selected_features list, refused where it cannot mean what it says -- as in the ML trainer.
+
+    A retired soil-moisture name is still a column of the merged CSVs, so a stale list is not skipped
+    as missing: it trains on the retired definition without a word. Under servable, precip IS the
+    ERA5-Land daily total, and a list naming the metres column as well trains one driver twice; that
+    column is present and numeric, so it never fails as missing either.
+    """
+    with open(path) as handle:
+        data = json.load(handle)
+    names = data.get('selected_features', data) if isinstance(data, dict) else data
+    if not isinstance(names, list):
+        raise ValueError(
+            f"{path} must hold a list, or a dict whose 'selected_features' is a list; "
+            f"got {type(names).__name__}"
+        )
+    if 'pft' in names:
+        raise ValueError(
+            "selected_features must name the PFT one-hot columns (MF, DNF, ...), "
+            "not the raw 'pft' column: the parity path one-hots by name."
+        )
+    assert_no_retired_swc_features(names, str(path))
+    assert_no_servable_duplicate_features(names, str(path), contract)
+    return names
+
+
 def parse_args():
     """
     Parse command line arguments for the script.
@@ -948,20 +1007,42 @@ def parse_args():
     parser.add_argument('--INPUT_WIDTH', type=int, default=1, help='Input width for time series windows')
     parser.add_argument('--LABEL_WIDTH', type=int, default=1, help='Label width for time series windows')
     parser.add_argument('--SHIFT', type=int, default=1, help='Shift for time series windows')
-    parser.add_argument('--EXCLUDE_LABELS', type=bool, default=True, help='Exclude labels from input features')
-    parser.add_argument('--EXCLUDE_TARGETS', type=bool, default=True, help='Exclude targets from input features')
+    parser.add_argument('--EXCLUDE_LABELS', type=_str_to_bool, default=True, help='Exclude labels from input features')
+    parser.add_argument('--EXCLUDE_TARGETS', type=_str_to_bool, default=True, help='Exclude targets from input features')
     parser.add_argument('--TUNING_WORKERS', type=int, default=1, help='Number of workers for hyperparameter tuning')
     parser.add_argument('--n_groups', type=int, default=10, help='Number of spatial groups for cross-validation')
     parser.add_argument('--spatial_split_method', type=str, default='default', help='Method for spatial splitting of data')
-    parser.add_argument('--IS_CV', type=bool, default=False, help='Whether to use cross-validation')
-    parser.add_argument('--IS_SHUFFLE', type=bool, default=True, help='Whether to shuffle the data')
-    parser.add_argument('--IS_STRATIFIED', type=bool, default=True, help='Whether to use stratified sampling')
-    parser.add_argument('--BALANCED', type=bool, default=False, help='Whether to balance the spatial groups')
+    parser.add_argument('--IS_CV', type=_str_to_bool, default=False, help='Whether to use cross-validation')
+    parser.add_argument('--IS_SHUFFLE', type=_str_to_bool, default=True, help='Whether to shuffle the data')
+    parser.add_argument('--IS_STRATIFIED', type=_str_to_bool, default=True, help='Whether to use stratified sampling')
+    parser.add_argument('--BALANCED', type=_str_to_bool, default=False, help='Whether to balance the spatial groups')
     # add arguments for hyperparameters
     parser.add_argument('--hyperparameters', type=str, help='Path to the JSON file of hyperparameters') 
     parser.add_argument('--additional_features', nargs='*', default=[], help='List of features')
     parser.add_argument('--TIME_SCALE', type=str, default='daily', help='Time scale of the data: hourly or daily')
     parser.add_argument('--run_id', type=str, default='default_daily', help='Unique identifier for this run (default: {model_type}_run_{RANDOM_SEED})')
+    # --- parity with test_hyperparameter_tuning_ML_spatial_stratified.py ---
+    parser.add_argument('--data_dir', type=str, default=None,
+                        help='Root of the merged data; the trainer appends /TIME_SCALE. '
+                             'Overrides PathConfig, which is constructed with an explicit '
+                             'scale here and so ignores $ANALYSIS_SCALE.')
+    parser.add_argument('--selected_features', type=str, default=None,
+                        help='JSON file holding a frozen feature list. Supplying it switches '
+                             'the loader onto the ML-trainer sequence (solar clock, full '
+                             'feature engineering, PFT one-hot by name).')
+    parser.add_argument('--IS_TRANSFORM', type=_str_to_bool, default=False,
+                        help='Transform the target before standardising it')
+    parser.add_argument('--TRANSFORM_METHOD', type=str, default='log1p',
+                        help='Target transform: log1p, sqrt, box-cox, yeo-johnson, none')
+    parser.add_argument('--grid_size', type=float, default=0.05,
+                        help='Cell size in degrees when spatial_split_method=grid')
+    parser.add_argument('--FEATURE_CONTRACT', type=str, default=SERVABLE_CONTRACT,
+                        choices=list(FEATURE_CONTRACTS),
+                        help='servable (default): climatology-normalised soil moisture and ERA5-Land '
+                             'precipitation memory, reproducible at prediction time, which the Stage-4 '
+                             'merge writes by default. site: legacy per-site soil-moisture statistics and '
+                             'gauge precipitation memory, for a tree merged with --feature-contract site. '
+                             'The tree under --data_dir must have been built under it.')
     return parser.parse_args()
 
 @deterministic
@@ -988,6 +1069,11 @@ def main():
     model_type = args.model
     IS_STRATIFIED = args.IS_STRATIFIED
     BALANCED = args.BALANCED
+    IS_TRANSFORM = args.IS_TRANSFORM
+    TRANSFORM_METHOD = args.TRANSFORM_METHOD
+    GRID_SIZE = args.grid_size
+    PARITY = args.selected_features is not None
+    FEATURE_CONTRACT = args.FEATURE_CONTRACT
     
     # Use provided run_id or generate default
     if args.run_id is not None:
@@ -1012,6 +1098,20 @@ def main():
     logging.info(f"Using {n_groups} spatial groups with leave-fold-out cross-validation")
     logging.info(f"batch_size={BATCH_SIZE}, input_width={INPUT_WIDTH}, label_width={LABEL_WIDTH}, shift={SHIFT}, exclude_labels={EXCLUDE_LABELS}, exclude_targets={EXCLUDE_TARGETS}, shuffle strategy={IS_SHUFFLE}, spatial_split_method={spatial_split_method}, IS_STRATIFIED={IS_STRATIFIED}, model_type={model_type}")
 
+    # Resolve the tree, check its contract and read the frozen feature list before anything is written:
+    # a refused run must not leave empty output directories behind for a fresh-run_id gate to trip on.
+    if args.data_dir is not None:
+        data_dir = Path(args.data_dir) / TIME_SCALE
+    else:
+        data_dir = paths.merged_data_root / TIME_SCALE
+    # A run may only read a tree built under its own feature contract -- the ML trainer's gate. Without
+    # it this trainer engineered every tree under the library default (site), so a servable tree got the
+    # gauge's rain threshold and the site-quantile soil-moisture indicators, and nothing could tell.
+    assert_dataset_contract(data_dir.parent, FEATURE_CONTRACT)
+    logging.info(f"Feature contract: {FEATURE_CONTRACT} (dataset accepted: {data_dir.parent})")
+    if PARITY:
+        _sf_list = load_frozen_feature_list(args.selected_features, FEATURE_CONTRACT)
+
     # Create output directories
     plot_dir = paths.hyper_tuning_plots_dir / model_type / run_id
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -1019,9 +1119,15 @@ def main():
     model_dir = paths.models_root / model_type / run_id
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load and preprocess data
-    data_dir = paths.merged_data_root / TIME_SCALE
-    data_list = list(data_dir.glob(f'*{TIME_SCALE}.csv'))
+    # Load and preprocess data (data_dir was resolved, and its contract checked, above)
+    data_list = sorted(data_dir.glob(f'*{TIME_SCALE}.csv'))
+    # all_biomes_merged_*.csv is the concatenation of every site and lives in the
+    # same directory.  process_date_file takes site_name from row 0, so ingesting
+    # it would fold the whole corpus into a single fake site.
+    _n_all = len(data_list)
+    data_list = [f for f in data_list if 'all_biomes_merged' not in f.name]
+    if len(data_list) != _n_all:
+        logging.info(f"Excluded {_n_all - len(data_list)} aggregate all_biomes_merged file(s)")
     
     if not data_list:
         logging.critical("No data files found in the specified directory. Attempting fallback to single file mode.")
@@ -1039,7 +1145,16 @@ def main():
         'elevation', 'latitude', 'longitude', 'Day sin', 'Year sin'
     ]
     # Define the columns we want to use
-    used_cols = list(set(base_features + additional_features))
+    if PARITY:
+        # _sf_list was read, and refused if stale, before any output directory was created.
+        used_cols = sorted(_sf_list)
+        if TARGET_COL not in used_cols:
+            used_cols = [TARGET_COL] + used_cols
+        logging.info(f"Frozen feature list from {args.selected_features}: {len(used_cols)} columns")
+    else:
+        # dict.fromkeys, not set(): a set iterates in hash-seed order, so the input columns -- and every
+        # name derived from them -- came out in a different order on each run.
+        used_cols = list(dict.fromkeys(base_features + additional_features))
     logging.info(f"Using columns: {used_cols}")
     all_pft_types = set()
     all_possible_pft_types = ['MF', 'DNF', 'ENF', 'EBF', 'WSA', 'WET', 'DBF', 'SAV']
@@ -1047,6 +1162,7 @@ def main():
     # Sort data files for deterministic processing order
     data_list = sorted(data_list)
     args_dict = {
+        'PARITY': PARITY,
         'USED_COLS': used_cols,
         'ALL_POSSIBLE_PFT_TYPES': all_possible_pft_types,
         'INPUT_WIDTH': INPUT_WIDTH,
@@ -1054,6 +1170,7 @@ def main():
         'ALL_PFT_TYPES': all_pft_types,
         'TUNING_WORKERS': TUNING_WORKERS,
         'TIME_SCALE': TIME_SCALE,
+        'FEATURE_CONTRACT': FEATURE_CONTRACT,
     }
     results = []  # Store results from each file
     results = Parallel(n_jobs=5)(delayed(process_date_file)(file, args_dict) for file in data_list)
@@ -1087,6 +1204,8 @@ def main():
             lat=latitudes,
             lon=longitudes,
             method=spatial_split_method,
+            lat_grid_size=GRID_SIZE,
+            lon_grid_size=GRID_SIZE,
         )
     else:
         spatial_groups, group_stats = create_spatial_groups(
@@ -1096,6 +1215,8 @@ def main():
             n_groups=n_groups,
             method=spatial_split_method,
             balanced=BALANCED,
+            lat_grid_size=GRID_SIZE,
+            lon_grid_size=GRID_SIZE,
         )
     
 
@@ -1275,7 +1396,9 @@ def main():
         X_test_scaled = np.concatenate([X_test_num_scaled, X_test_cat], axis=2)
 
         # Scale labels (this part remains the same)
-        label_scaler = StandardScaler()
+        # log1p-then-standardise when asked, so the network optimises the same
+        # target the XGB reference does.  'none' is exactly a bare StandardScaler.
+        label_scaler = ScaledTargetPipeline(TRANSFORM_METHOD if IS_TRANSFORM else 'none')
         y_train_scaled = label_scaler.fit_transform(y_train)
         y_val_scaled = label_scaler.transform(y_val)
         y_test_scaled = label_scaler.transform(y_test)
@@ -1650,7 +1773,7 @@ def main():
     X_all_scaled = np.concatenate([X_all_num_scaled, X_all_cat], axis=2)
     
     # Scale labels
-    final_label_scaler = StandardScaler()
+    final_label_scaler = ScaledTargetPipeline(TRANSFORM_METHOD if IS_TRANSFORM else 'none')
     final_label_scaler.fit(y_all_records.reshape(-1, 1))  # Fit on ALL labels
     
     y_train_final_scaled = final_label_scaler.transform(y_train_final.reshape(-1, 1)).reshape(y_train_final.shape)
@@ -1778,6 +1901,8 @@ def main():
     logging.info(f"Label scaler saved to: {final_label_scaler_path}")
     
     # Save config/metadata
+    from src.hyperparameter_optimization.training_utils import build_run_provenance
+
     final_config = {
         'model_type': model_type,
         'run_id': run_id,
@@ -1804,6 +1929,7 @@ def main():
         'feature_columns': feature_columns,
         'numerical_indices': numerical_indices,
         'categorical_indices': categorical_indices,
+        **build_run_provenance(args, used_cols, data_dir),
         'random_seed': RANDOM_SEED,
     }
     

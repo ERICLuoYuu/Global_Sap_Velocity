@@ -62,10 +62,18 @@ case "$FEATURE_CONTRACT" in
         return 1 2>/dev/null || exit 1 ;;
 esac
 
-case "$SWEEP_NAME" in
-  *_hohfix_sv) SWEEP_TAG=_hohfix_sv ;;
-  *_hohfix) SWEEP_TAG=_hohfix ;;
-  *)        SWEEP_TAG="" ;;
+# The tag is whatever follows the sweep's DATE, so a name this file has never seen still gets its
+# own cache, FFS output and run_id. The hardcoded case this replaces knew only _hohfix and
+# _hohfix_sv and sent every other name to "" -- sweep_20260914_ownhours and any sweep named after
+# today both resolved to sweep_20260902's paths, and CACHE_DIR carries no FFS_TAG, so there was no
+# way to separate them from the command line. Two runs on one name with matching shapes and a
+# passing gate is the failure this file's header says it exists to prevent.
+# Every name with artifacts on disk keeps the tag it already had:
+#   sweep_20260902 -> ""     *_hohfix -> _hohfix     *_hohfix_sv -> _hohfix_sv
+SWEEP_TAG="${SWEEP_NAME#sweep_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]}"
+case "$SWEEP_TAG" in
+  ""|_*) ;;                      # nothing after the date, or already an _suffix
+  *) SWEEP_TAG="_$SWEEP_TAG" ;;  # a name off the sweep_<date> pattern still gets a separating _
 esac
 
 sweep5_config () {

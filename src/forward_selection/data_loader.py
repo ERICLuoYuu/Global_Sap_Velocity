@@ -145,7 +145,11 @@ def load_and_cache_features(
     if time_scale == "hourly":
         base_features = [f for f in base_features if f not in daily_only_cols]
 
-    used_cols = list(set(base_features + ADDITIONAL_FEATURES))
+    # dict.fromkeys, not set(): a set of strings iterates in an order drawn from the process's hash
+    # seed, so every cache build laid the design matrix out differently -- and forward selection breaks
+    # ties by column position, as do XGBoost's column subsampling and split finding. The same rows and
+    # seeds could select a different feature set. Declared order; the first occurrence of a name wins.
+    used_cols = list(dict.fromkeys(base_features + ADDITIONAL_FEATURES))
     assert_no_retired_swc_features(used_cols, "the FFS column list (base features + ADDITIONAL_FEATURES)")
     _intermediates = _intermediate_columns(contract)
     all_possible_pft_types = PFT_ONEHOT_COLS

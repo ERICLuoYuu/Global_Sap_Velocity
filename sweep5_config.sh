@@ -11,6 +11,12 @@
 # a sibling dataset -- the failure mode that produces a clean-looking result for
 # the wrong design.
 
+# One hash seed for every stage that sources this file. Only the training job pinned it, so the
+# cache and selection stages iterated any set of strings in a per-run order. The FFS column order no
+# longer depends on it (data_loader builds that list with dict.fromkeys); this keeps anything else
+# that might from differing between the stages, or between two runs of one stage.
+export PYTHONHASHSEED=0
+
 # Which merged tree this sweep reads. Overridable so a DEU_HOH-corrected rebuild
 # can run beside the original instead of clobbering it:
 #   sbatch --export=ALL,SWEEP_NAME=sweep_20260902_hohfix job_sweep5_select.sh

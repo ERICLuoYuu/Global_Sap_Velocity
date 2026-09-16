@@ -38,12 +38,17 @@ echo "=============================================================="
 echo "FFS cache  task=$T  config=$NAME"
 echo "  data_dir : $DATA_DIR   (run_selection appends /daily)"
 echo "  output   : $CACHE_DIR"
+echo "  contract : $FEATURE_CONTRACT"
 echo "  git sha  : $(git rev-parse --short HEAD)"
 echo "=============================================================="
 
 echo
 echo "=== GATE 1: dataset identity ==="
 sweep5_assert_provenance "$DATA_DIR" "$NAME" "$EXP_GS" "$EXP_DAY" "$EXP_DAYSAP" "$EXP_TX" || exit 1
+
+echo
+echo "=== GATE 1b: the tree was built under FEATURE_CONTRACT=$FEATURE_CONTRACT ==="
+sweep5_assert_contract "$DATA_DIR" "$FEATURE_CONTRACT" || exit 1
 
 echo
 echo "=== GATE 2: data_dir is the PARENT, and /daily is populated ==="
@@ -85,7 +90,8 @@ python -u -m src.forward_selection.run_selection \
     --output_dir "$CACHE_DIR" \
     --time_scale daily \
     --spatial_method "$CACHE_METHOD" \
-    --grid_size 0.05
+    --grid_size 0.05 \
+    --feature_contract "$FEATURE_CONTRACT"
 BUILD_EXIT=$?
 echo "### cache build exit: $BUILD_EXIT"
 date
@@ -137,6 +143,9 @@ if np.isnan(X).any():
 print('  GATE 4 PASS: GROUPING=%s, 8/8 PFT classes, %d groups over %d contiguous '
       'site runs, no NaN' % (want, len(uniq), runs))
 PYEOF
+
+echo "=== GATE 4b: the cache records FEATURE_CONTRACT ==="
+sweep5_assert_cache_contract "$CACHE_DIR/feature_cache.npz" "$FEATURE_CONTRACT" || exit 1
 
 ls -lh "$CACHE_DIR/feature_cache.npz"
 echo

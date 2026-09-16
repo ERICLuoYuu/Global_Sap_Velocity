@@ -55,12 +55,18 @@ echo "  run_id    : $RUN_ID"
 echo "  data_dir  : $DATA_DIR  (trainer appends /daily)"
 echo "  ffs json  : $FFS_JSON"
 echo "  grouping  : grid @ 0.05 deg (matches the selection)"
+echo "  contract  : $FEATURE_CONTRACT"
 echo "  git sha   : $(git rev-parse --short HEAD)"
 echo "=============================================================="
 
 echo
 echo "=== GATE 1: dataset identity ==="
 sweep5_assert_provenance "$DATA_DIR" "$NAME" "$EXP_GS" "$EXP_DAY" "$EXP_DAYSAP" "$EXP_TX" || exit 1
+
+echo
+echo "=== GATE 1b: tree and FFS cache were built under FEATURE_CONTRACT=$FEATURE_CONTRACT ==="
+sweep5_assert_contract "$DATA_DIR" "$FEATURE_CONTRACT" || exit 1
+sweep5_assert_cache_contract "$CACHE_DIR/feature_cache.npz" "$FEATURE_CONTRACT" || exit 1
 
 echo
 echo "=== GATE 2: pin the FFS selection as this run's feature file ==="
@@ -140,11 +146,23 @@ python -u "$TRAINER" \
     --TARGET_COL sap_velocity \
     --r2_method both \
     --spatial_split_method "$TRAIN_METHOD" --grid_size 0.05 \
+    --FEATURE_CONTRACT "$FEATURE_CONTRACT" \
     --run_id "$RUN_ID"
 TRAIN_EXIT=$?
 echo "### training exit: $TRAIN_EXIT"
 date
 if [ $TRAIN_EXIT -ne 0 ]; then echo "STATUS: TRAINING FAILED"; exit $TRAIN_EXIT; fi
+
+echo
+echo "=== GATE 5: FINAL_config records FEATURE_CONTRACT ==="
+python - "$RUN_ID" "$FEATURE_CONTRACT" <<'PYEOF' || exit 1
+import json, sys
+run, want = sys.argv[1], sys.argv[2]
+cfg = json.load(open("models/xgb/%s/FINAL_config_%s.json" % (run, run)))
+if cfg.get("feature_contract") != want:
+    sys.exit("  GATE 5 FAIL: FINAL_config feature_contract=%r, the run wants %r" % (cfg.get("feature_contract"), want))
+print("  GATE 5 PASS: FINAL_config records feature_contract=%r" % want)
+PYEOF
 
 echo
 echo "=== SITES DROPPED BY THE MISSING-COLUMN GUARD ==="

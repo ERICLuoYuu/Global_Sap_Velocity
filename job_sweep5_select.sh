@@ -102,6 +102,7 @@ echo "=============================================================="
 echo "FFS selection  task=$T  config=$NAME"
 echo "  cache   : $CACHE"
 echo "  output  : $FFS_OUT"
+echo "  contract: $FEATURE_CONTRACT"
 echo "  cores   : ${SLURM_CPUS_PER_TASK:-?}  partition: ${SLURM_JOB_PARTITION:-?}"
 echo "  git sha : $(git rev-parse --short HEAD)"
 echo "=============================================================="
@@ -142,6 +143,10 @@ if want == 'site' and runs != len(uniq):
 print('  GATE 1 PASS: GROUPING=%s, %d groups over %d contiguous site runs'
       % (want, len(uniq), runs))
 PYEOF
+
+echo
+echo "=== GATE 1c: the cache was built under FEATURE_CONTRACT=$FEATURE_CONTRACT ==="
+sweep5_assert_cache_contract "$CACHE" "$FEATURE_CONTRACT" || exit 1
 
 echo
 echo "=== GATE 2b: every mandatory feature is actually IN the cache ==="

@@ -7,6 +7,9 @@
 
 # One soil-moisture scale for EVERY soil-moisture feature, on top of the servable retrain.
 #
+# LEGACY TREES ONLY: "the servable run (..._sv)" below is a tree job_sv_rebuild.sh produced. Since
+# b7eaf26 the Stage-4 merge builds a servable tree in one pass; no _sv twin is made any more.
+#
 #   SWC_SCALE=zscore sbatch --job-name=swc_zscore job_swc_scale_train.sh
 #   SWC_SCALE=raw    sbatch --job-name=swc_raw    job_swc_scale_train.sh
 #

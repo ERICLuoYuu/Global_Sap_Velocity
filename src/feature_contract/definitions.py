@@ -166,11 +166,6 @@ def assert_no_servable_duplicate_features(names, source: str, contract: str) -> 
         )
 
 
-def era5_precip_mm_per_day(precip_m: pd.Series) -> pd.Series:
-    """ERA5-Land daily precipitation in metres -> mm/day, with tiny negative reanalysis values set to 0."""
-    return (precip_m * M_TO_MM).clip(lower=0.0)
-
-
 #: Daily MEAN of the ERA5-Land hourly precipitation values at the site, metres per hour (a merge
 #: output column). The daily SUM counts only the hours present in the merged hourly frame, and 2.1%
 #: of sap-days in the 2026-09-02 servable tree have fewer than 24 (FIN_HYY_SME and SEN_SOU_* 23 on

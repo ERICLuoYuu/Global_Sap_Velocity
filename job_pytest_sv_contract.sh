@@ -7,7 +7,8 @@
 #SBATCH --error=/scratch/tmp/yluo2/gsv/logs/pytest_sv_%j.err
 
 # Tests for the servable feature contract.
-#   MODE=new  only the new test files (the RED run, before the implementation is uploaded)
+#   MODE=red  only the soil-moisture cleanup's new test files (run before its implementation)
+#   MODE=new  the feature-contract and soil-moisture test files
 #   MODE=all  the new files plus every existing suite the change touches (regression)
 # The exit code is printed and returned as-is: never pipe pytest through tail.
 
@@ -17,14 +18,16 @@ source .venv/bin/activate || exit 1
 export PYTHONPATH=/scratch/tmp/yluo2/gsv
 export PYTHONHASHSEED=0
 
-NEW="src/feature_contract/tests src/hyperparameter_optimization/tests/test_feature_contract_fe.py src/hyperparameter_optimization/tests/test_feature_contract_args.py src/hyperparameter_optimization/tests/test_feature_contract_swc_scale.py"
-REGRESSION="src/hyperparameter_optimization/tests/test_feature_engineering.py src/hyperparameter_optimization/tests/test_training_utils.py src/forward_selection/tests/test_data_loader.py"
+NEW="src/feature_contract/tests src/hyperparameter_optimization/tests/test_feature_contract_fe.py src/hyperparameter_optimization/tests/test_feature_contract_args.py src/hyperparameter_optimization/tests/test_swc_single_definition.py src/forward_selection/tests/test_swc_registry.py src/forward_selection/tests/test_swc_cache_guard.py src/forward_selection/tests/test_ffs_feature_contract.py src/hyperparameter_optimization/tests/test_servable_precip.py src/forward_selection/tests/test_ffs_servable_precip.py"
+RED="src/hyperparameter_optimization/tests/test_servable_precip.py src/forward_selection/tests/test_ffs_servable_precip.py"
+REGRESSION="src/hyperparameter_optimization/tests/test_feature_engineering.py src/hyperparameter_optimization/tests/test_training_utils.py src/forward_selection/tests/test_data_loader.py src/forward_selection/tests/test_feature_registry.py src/hyperparameter_optimization/tests/test_run_provenance.py"
 
 MODE="${MODE:-all}"
 case "$MODE" in
+  red) TARGETS="$RED" ;;
   new) TARGETS="$NEW" ;;
   all) TARGETS="$NEW $REGRESSION" ;;
-  *)   echo "FATAL: MODE must be new or all, got '$MODE'"; exit 2 ;;
+  *)   echo "FATAL: MODE must be red, new or all, got '$MODE'"; exit 2 ;;
 esac
 
 echo "MODE=$MODE  python=$(python --version 2>&1)  git=$(git rev-parse --short HEAD)"

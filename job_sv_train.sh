@@ -8,6 +8,9 @@
 
 # Retrain sweep5_fullyear_fullday_tx_ffs_grid005_hohfix_sm under the SERVABLE feature contract.
 #
+# LEGACY TREES ONLY: the tree below is one job_sv_rebuild.sh produced from a site tree. A tree from
+# today's merge is already servable -- point the trainer straight at it and skip the rebuild.
+#
 # Held fixed against the base run: the 50 feature names (read from the base FINAL_config),
 # the trainer and every flag, grid-0.05 CV, the merged rows.
 # Changed: the tree (soil moisture renormalised by the per-cell climatology) and

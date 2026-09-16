@@ -8,6 +8,10 @@
 
 # Rebuild fullyear_fullday_tx under the SERVABLE feature contract.
 #
+# LEGACY TREES ONLY. Since b7eaf26 the Stage-4 merge applies the servable contract itself, in one
+# pass, and rebuild_daily refuses a tree carrying the sidecar it writes. Run this only on a tree
+# merged before 2026-09-16, or one merged with --feature-contract site.
+#
 # Only the normalised soil-moisture families change (raw / sigma_clim and the
 # climatology z-score). Every other cell is copied as text. The verification
 # below does not trust the module that wrote the tree:
@@ -29,8 +33,11 @@ export PYTHONPATH=/scratch/tmp/yluo2/gsv
 export PYTHONUNBUFFERED=1
 export PYTHONHASHSEED=0
 
-SRC=outputs/processed_data/sapwood_combined/merged/sweep_20260902_hohfix/fullyear_fullday_tx
-DST=outputs/processed_data/sapwood_combined/merged/sweep_20260902_hohfix_sv/fullyear_fullday_tx
+# Overridable, so a later merge is rebuilt beside the earlier trees rather than over them:
+#   sbatch --export=ALL,SRC_SWEEP=sweep_20260914_ownhours,DST_SWEEP=sweep_20260914_ownhours_sv job_sv_rebuild.sh
+MERGED=outputs/processed_data/sapwood_combined/merged
+SRC=$MERGED/${SRC_SWEEP:-sweep_20260902_hohfix}/fullyear_fullday_tx
+DST=$MERGED/${DST_SWEEP:-sweep_20260902_hohfix_sv}/fullyear_fullday_tx
 CUBE=outputs/derived/swvl_sigma_climatology/swvl_sigma_climatology_v2_1995_2019.nc
 SHA="$(git rev-parse --short HEAD)+uncommitted($(git status --porcelain --untracked-files=no | wc -l))"
 

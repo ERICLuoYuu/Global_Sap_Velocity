@@ -16,6 +16,9 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 from path_config import PathConfig  # noqa: E402
 from src.Analyzers.mannual_removal_processor import RemovalLogProcessor  # noqa: E402
+from src.clock_offsets.apply import correct_loaded_frames  # noqa: E402
+from src.clock_offsets.registry import REGISTRY as CLOCK_REGISTRY  # noqa: E402
+from src.clock_offsets.registry import require_valid_registry  # noqa: E402
 from src.gap_filling.config import GapFillingConfig  # noqa: E402, F811
 from src.gap_filling.filler import GapFiller  # noqa: E402, F811
 from src.qc_flags import (  # noqa: E402
@@ -41,8 +44,11 @@ class SapFlowAnalyzer:
         scale: str = "sapwood",
         gap_filling_config: GapFillingConfig | None = None,
         qc_config: QcFlagConfig | None = None,
+        clock_registry=None,
     ):
         self.paths = paths if paths is not None else PathConfig(scale=scale)
+        # Reviewed clock offsets, applied at load (src/clock_offsets); a test can pass its own registry.
+        self.clock_registry = tuple(CLOCK_REGISTRY if clock_registry is None else clock_registry)
         self.data_dir = self.paths.sap_data_dir
         self.data_outlier_removed_dir = self.paths.sap_outliers_removed_dir
 
@@ -465,6 +471,8 @@ class SapFlowAnalyzer:
     def _load_sapflow_data(self, files_to_load: list[Path]):
         """Load a specific batch of sapflow data files and their corresponding flags"""
         print(f"Loading {len(files_to_load)} sapflow files for this batch...")
+        # A registry that cannot be applied stops the batch before a single file is read.
+        require_valid_registry(self.clock_registry)
 
         # Check if removal log is active
         has_removal_log = self.removal_processor is not None
@@ -497,9 +505,6 @@ class SapFlowAnalyzer:
                 tz_df = pd.read_csv(time_zone_file)
                 time_zone = tz_df["env_time_zone"].iloc[0]
                 timestep = tz_df["env_timestep"].iloc[0]
-                df["TIMESTAMP_LOCAL"] = df["TIMESTAMP"].apply(
-                    lambda ts, tz=time_zone: adjust_time_to_local(ts, tz, self.timezone_map)
-                )
                 site_md_file = file.parent / f"{file.stem.replace('_sapf_data', '_site_md')}.csv"
                 site_md = pd.read_csv(site_md_file)
                 latitude = site_md["si_lat"].values[0]
@@ -519,6 +524,15 @@ class SapFlowAnalyzer:
                 if has_removal_log:
                     print(f"\n--- Applying Removal Log: {location}_{plant_type} ---")
                     df = self._apply_removal_log(df, location, plant_type)
+
+                # Clock offsets come AFTER the removal log, whose periods were reviewed against the labels
+                # as shipped, and BEFORE anything reads time: TIMESTAMP_LOCAL, the day/night QC strata,
+                # incomplete days. The registry is keyed on the full site code, never on `location`,
+                # which is USA_ORN for both ORN twins.
+                df, flags = correct_loaded_frames(file, "sap", df, flags, self.clock_registry)
+                df["TIMESTAMP_LOCAL"] = df["TIMESTAMP"].apply(
+                    lambda ts, tz=time_zone: adjust_time_to_local(ts, tz, self.timezone_map)
+                )
 
                 df_processed = self._process_sapflow_data(
                     df, latitude, longitude, timestep, time_zone, elevation, location, plant_type, flags

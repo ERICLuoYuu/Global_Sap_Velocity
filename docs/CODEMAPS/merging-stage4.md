@@ -236,6 +236,28 @@ print(paths.merged_data_dir)           # Output
 
 ---
 
+## Env Daily Statistics and `ext_rad` (2026-09-17)
+
+The merge's daily aggregation runs over the hours in which sap AND env both observed, under no completeness
+rule. `env_daily_overwrite(df_daily, env_hourly, lat, lon, keep_hours)` replaces the env sensor statistics with
+`src.env_daily`'s, by UTC day, after the ERA5 and gauge overwrites:
+
+- `ta`, `vpd`, `rh`, `ws` need **≥ 20 present hours** of the day (scaled when `--daytime-only` narrows the scope).
+- `sw_in` and `ppfd_in` are **dark-filled** where top-of-atmosphere radiation is ≤ 0 across `[h−30, h+59]` min,
+  then **clearness-scaled** — `Σpresent / ΣTOA(present) × ΣTOA(day) / expected` — and are valid only at
+  **≥ 0.8 TOA coverage**. `_min` / `_max` need 20 filled hours of their own; `_sum` is `mean × expected`.
+- `ext_rad` is recomputed from geometry, exactly `src.serving.era5_daily.ext_rad_daily`, so the trained and the
+  served definitions are the same function. The archive's column is never read.
+- `netrad` deliberately keeps the old statistics: no feature, FFS registry entry, contract or serving path
+  reads it (user decision, 2026-09-16).
+
+Every write is checked: `check_support(df_daily)` raises `SupportInvariantError` immediately before
+`to_csv`, because a daily value without the support its rule requires is a defect in the merge, not a messy
+site. `kt_exceedance_days` then counts the days on which daily `sw_in` still exceeds a positive daily
+`ext_rad`, per site, and the feature-contract block records `env_daily_rule`, `clock_registry_sha256` and
+`kt_exceedance`. `python -m src.env_daily.gate DATA_DIR` refuses a tree that carries none of it — the sweep's
+cache and train jobs run it as GATE 1c, so a tree built before the rule cannot be trained as if it were fixed.
+
 ## Related Codemaps
 
 - **[etl-stage1.md](etl-stage1.md)** — Produces Sapflow-internal data

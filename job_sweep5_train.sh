@@ -69,6 +69,19 @@ sweep5_assert_contract "$DATA_DIR" "$FEATURE_CONTRACT" || exit 1
 sweep5_assert_cache_contract "$CACHE_DIR/feature_cache.npz" "$FEATURE_CONTRACT" || exit 1
 
 echo
+echo "=== GATE 1c: the daily env columns were built under the env daily rule ==="
+# A tree merged before 2026-09-16 carries a daylight-only mean sw_in against a 24 h
+# ext_rad mean, and a shipped ext_rad displaced by hours at 15 sites. Nothing
+# downstream can tell that tree from a fixed one (plan WP-B4, failure mode F21).
+if ! python -m src.env_daily.gate "$DATA_DIR"; then
+    if [ "${ALLOW_OLD_ENV_DAILY:-0}" != 1 ]; then
+        echo "    Re-merge the tree, or set ALLOW_OLD_ENV_DAILY=1 to use an old tree deliberately."
+        exit 1
+    fi
+    echo "  GATE 1c: old tree accepted (ALLOW_OLD_ENV_DAILY=1)"
+fi
+
+echo
 echo "=== GATE 2: pin the FFS selection as this run's feature file ==="
 # Pinned per run_id rather than read live: a later re-run of stage 2 must not be
 # able to retro-change what this model was trained on.

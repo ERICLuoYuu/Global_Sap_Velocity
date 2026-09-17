@@ -127,6 +127,60 @@ class TestKtExceedance:
         assert kt_exceedance_days(pd.DataFrame({"TIMESTAMP": [DAY], "ta": [1.0]})) == 0
 
 
+class TestKtPolarTwilightFloor:
+    """The mask the baseline was recorded under, which the gate did not carry.
+
+    KT_RESIDUAL_SITES was measured by probe_support_rules (Palma 46757405) under ``served > 5``
+    (probes/radiation/probe_support_rules.py:238). kt_exceedance_days counted every day with a positive
+    ext_rad, so the two never measured the same quantity. On the 2026-09-17 tree the gate found 241
+    site-days against a baseline of 221, and the whole of the difference was polar twilight at the corpus's
+    two highest-latitude sites: RUS_CHE_Y4 at 68.74N and one day at USA_BNZ_BLA at 64.70N (Palma 46781424).
+    """
+
+    #: Measured at RUS_CHE_Y4, not invented: days the gate flagged and the probe never scored.
+    ARCTIC_DAYS = (
+        ("2014-11-28", 0.8632, 0.0009),  # kt = 923, one sub-resolution number over another
+        ("2015-01-15", 0.9125, 0.0213),  # kt = 43
+        ("2013-11-27", 1.0110, 0.0705),  # kt = 14
+        ("2013-11-22", 2.2921, 2.0400),  # kt = 1.12, the shoulder of polar night
+    )
+
+    def frame(self, rows):
+        return pd.DataFrame(
+            {
+                "TIMESTAMP": pd.DatetimeIndex([day for day, _, _ in rows], tz="UTC"),
+                "sw_in": [sw_in for _, sw_in, _ in rows],
+                "ext_rad": [ext_rad for _, _, ext_rad in rows],
+            }
+        )
+
+    def test_a_polar_twilight_day_is_not_counted(self):
+        # Either side of polar night both terms sit under a pyranometer's resolution, and the ratio is
+        # noise over noise: 0.8632 / 0.0009 is 923, which is not a radiation defect but a division.
+        assert kt_exceedance_days(self.frame(self.ARCTIC_DAYS)) == 0
+
+    def test_the_floor_is_exclusive_at_its_own_value(self):
+        # `served > 5`, so a day sitting exactly on the floor is not scored.
+        assert kt_exceedance_days(self.frame([("2015-01-05", 6.0, 5.0)])) == 0
+        assert kt_exceedance_days(self.frame([("2015-01-05", 6.0, 5.0001)])) == 1
+
+    def test_the_defect_the_gate_exists_for_is_still_caught(self):
+        # The floor must not buy its silence by blinding the gate. A daylight mean compared against a
+        # 24-hour ext_rad mean lands at kt 1.2 to 2.0 with ext_rad in the hundreds, nowhere near the floor.
+        assert kt_exceedance_days(self.frame([("2015-06-21", 420.0, 350.0)])) == 1
+
+    def test_a_site_answers_for_its_lit_days_while_its_dark_days_are_ignored(self):
+        mixed = list(self.ARCTIC_DAYS) + [("2015-06-21", 420.0, 350.0)]
+        assert kt_exceedance_days(self.frame(mixed)) == 1
+
+    def test_the_floor_is_named_and_is_the_one_the_baseline_was_recorded_under(self):
+        # Imported here rather than at module scope: while the floor does not exist this must fail as one
+        # test, not as a collection error that hides every behavioural failure above it.
+        from src.env_daily.invariants import KT_MIN_EXT_RAD
+
+        assert KT_MIN_EXT_RAD == 5.0
+
+
 class TestRadiationGate:
     def test_the_documented_residual_passes(self):
         assert sum(KT_RESIDUAL_SITES.values()) == KT_BASELINE_TOTAL

@@ -10,6 +10,10 @@ new rule the probe (Palma 46757405) left 221, at ten sites whose cause is a diff
 constant ext_rad offset, sensor calibration at the others). :func:`radiation_gate` holds that line: a total
 above the baseline, any such day at a site outside :data:`KT_RESIDUAL_SITES`, or a residual site above its
 own recorded count, fails.
+
+The probe counted under ``served > 5``, and the baseline below is that count, so the gate applies the same
+floor -- see :data:`KT_MIN_EXT_RAD`. It belongs to the gate and not to the data: nothing here changes what the
+merge writes, so it is deliberately absent from :func:`env_daily_rule`, which records how a tree was built.
 """
 
 from __future__ import annotations
@@ -49,6 +53,15 @@ KT_RESIDUAL_SITES: Mapping[str, int] = MappingProxyType(
 )
 KT_BASELINE_TOTAL = 221
 
+#: Daily-mean TOA below which the clearness ratio is not a measurement. Either side of polar night both terms
+#: fall under a pyranometer's resolution and the quotient stops meaning anything: at RUS_CHE_Y4 (68.74N) on
+#: 2014-11-28 the tree holds sw_in 0.8632 W m-2 over ext_rad 0.0009 W m-2, a kt of 923.
+#: :data:`KT_RESIDUAL_SITES` was recorded under exactly this mask -- probe_support_rules counted ``served > 5``
+#: (probes/radiation/probe_support_rules.py:238) -- so a gate without it does not measure its own baseline. On
+#: the 2026-09-17 tree that cost 20 phantom site-days, all of them polar twilight at the corpus's two
+#: highest-latitude sites, while no other site moved by a single day (Palma 46781424).
+KT_MIN_EXT_RAD = 5.0
+
 #: Violations quoted in an error message; the count is always complete.
 MAX_EXAMPLES = 5
 
@@ -75,12 +88,16 @@ def check_support(daily: pd.DataFrame) -> None:
 
 
 def kt_exceedance_days(frame: pd.DataFrame, day_col: str = "TIMESTAMP") -> int:
-    """UTC days on which daily ``sw_in`` exceeds a positive daily ``ext_rad``; a plant-level day counts once."""
+    """UTC days on which daily ``sw_in`` exceeds a daily ``ext_rad`` worth dividing by; a day counts once.
+
+    Days whose daily ``ext_rad`` is at or below :data:`KT_MIN_EXT_RAD` are not scored, which is the mask
+    :data:`KT_RESIDUAL_SITES` was recorded under. A plant-level day still counts once.
+    """
     if "sw_in" not in frame.columns or "ext_rad" not in frame.columns:
         return 0
     sw_in = pd.to_numeric(frame["sw_in"], errors="coerce")
     ext_rad = pd.to_numeric(frame["ext_rad"], errors="coerce")
-    over = ((ext_rad > 0) & (sw_in > ext_rad)).to_numpy()
+    over = ((ext_rad > KT_MIN_EXT_RAD) & (sw_in > ext_rad)).to_numpy()
     if not over.any():
         return 0
     stamps = frame.loc[over, day_col] if day_col in frame.columns else frame.index[over]

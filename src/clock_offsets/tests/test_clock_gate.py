@@ -8,6 +8,7 @@ acknowledged site, a dead sensor and a polar day.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,16 @@ import pandas as pd
 import pytest
 
 from src.clock_offsets.detect import Estimate, toa_for
-from src.clock_offsets.gate import ERROR, WARN, SiteClock, findings, main, measure_site, zero_points
+from src.clock_offsets.gate import (
+    APPLIED_ERROR_HOURS,
+    ERROR,
+    WARN,
+    SiteClock,
+    findings,
+    main,
+    measure_site,
+    zero_points,
+)
 from src.clock_offsets.registry import ClockOffset
 
 REPO = Path(__file__).resolve().parents[3]
@@ -202,6 +212,29 @@ class TestDecisionRules:
 
     def test_a_corrected_site_that_measures_nothing_left_says_nothing(self):
         assert findings([self.clock(SKIPPED, 0.2, -0.1)], self.ZEROS, REGISTRY) == []
+
+    def test_two_estimators_that_agree_the_site_is_on_time_do_not_fail_it(self):
+        # USA_ORN_ST2_AMB after its +5 h correction, to the decimal: clear-day -0.17 h, edges -0.50 h.
+        # Its twin USA_ORN_ST1_AMB shares the met station, was never corrected, and the whole-corpus run
+        # measures it at -0.174 / -0.500 -- the same numbers -- and says nothing about it. A rule that
+        # fails one and not the other is reading the registry, not the clock. The residual here is the
+        # station's own estimator bias, and the edge shift cannot resolve below 0.25 h anyway.
+        assert findings([self.clock(SKIPPED, -0.17, -0.50)], self.ZEROS, REGISTRY) == []
+
+    @pytest.mark.parametrize(
+        "clear,edge",
+        [(3.0, 0.1), (1.2, 1.5), (-0.17, -0.50), (0.6, 0.55), (5.0, 4.8), (0.49, 0.51)],
+    )
+    def test_the_residual_it_fails_on_is_the_residual_it_prints(self, clear, edge):
+        # The failure this pins: the rule decided on the LOUDEST estimator and the message reported the
+        # MEAN, so a corrected site could be failed for 0.50 h and told it measures 0.34 h -- a verdict
+        # its own number does not support. Whatever the rule judges, the message must say that number.
+        found = findings([self.clock(SKIPPED, clear, edge)], self.ZEROS, REGISTRY)
+        if not found or found[0].level != ERROR:
+            return
+        printed = re.search(r"still measures ([+-]\d+\.\d+) h", found[0].message)
+        assert printed, found[0].message
+        assert abs(float(printed.group(1))) >= APPLIED_ERROR_HOURS, found[0].message
 
     def test_an_unregistered_site_needs_both_estimators_over_the_threshold(self):
         # They agree and their mean reaches 1.0 h, but neither alone does. The rule is "both reach 1 h":

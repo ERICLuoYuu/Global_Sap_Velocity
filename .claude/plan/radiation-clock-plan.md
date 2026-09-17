@@ -413,3 +413,28 @@ fails in under a second naming the four missing paths, 46765642 (`GSV_ROOT` set)
 **What this commit does not do.** It does not rebuild the data. Stage 3 still holds uncorrected timestamps, so
 the clock gate exits 1 over the tree on disk today (46762193: 3 errors, all of them registry sites). That run
 is the "before" arm; WP-C is the rebuild.
+
+**WP-C.2 -- the Stage-3 re-run, ten sites (46770304 array, checked by 46773602).** Every one of the ten
+CONTROL files came back byte-identical, which answers two questions at once: the registry is inert outside
+itself (USA_ORN_ST1_AMB, the twin sharing ST2's met station, did not move), and the production tree IS
+reproducible with today's code -- so swapping five corrected sites into a corpus of 225 written on
+2026-09-14 leaves it internally consistent, and no full-corpus re-run is owed.
+
+| site | before (clear-day / edges) | after | verdict |
+|---|---|---|---|
+| ISR_YAT_YAT | -6.02 / -6.25 | -0.07 / -0.25 | PASS, residual -0.16 h |
+| USA_HUY_LIN_NON | +4.83 / +4.75 | -0.17 / -0.25 | PASS, -0.21 h |
+| USA_ORN_ST2_AMB | +4.83 / +4.50 | -0.17 / -0.50 | PASS, -0.34 h |
+| FIN_PET | none / +2.75 | none / **-0.75** | WARN, one witness |
+| SWE_SVA_MIX_NON (sap clock) | +0.08 / +0.00 | unchanged | PASS, env rightly untouched |
+
+**The FIN_PET prediction above was made before the run and came back exact: -0.75 h.** That is the edge
+estimator's documented bias at 69.5 N (section 3 A6, deviation D11), not a correction that missed.
+
+**The swap confirms the registry's component targeting independently.** Only the files whose component the
+registry names actually changed: ISR, USA_HUY_LIN_NON and FIN_PET env only; USA_ORN_ST2_AMB both; and
+SWE_SVA_MIX_NON sap only, its env file byte-identical.
+
+**One defect the re-run found in the gate, fixed under D24.** USA_ORN_ST2_AMB's post-correction reading is
+the same, to the decimal, as its uncorrected twin's -- and the gate failed one and was silent about the
+other, because the applied-site rule decided on the loudest estimator and printed the mean.

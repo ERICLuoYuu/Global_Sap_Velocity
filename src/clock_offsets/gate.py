@@ -162,13 +162,18 @@ def _env_findings(clock: SiteClock, zeros: Dict[str, float], registry) -> List[F
     loudest = max(measured, key=abs)
 
     if applied:
-        # A corrected site should measure nothing. When both estimators can read it and one of them still
-        # sees an offset, it fails whichever way they point: a disagreement is not what a landed correction
-        # looks like either, and at seven corrected sites a false alarm costs a look, not a rebuild.
-        if abs(loudest) < APPLIED_ERROR_HOURS:
+        # A corrected site should measure nothing. When the two estimators agree, the residual IS their
+        # mean, and that is the number judged; when they contradict each other there is no single
+        # residual, so the loudest is judged and the message says they do not agree. Judging one number
+        # and printing another is not a stricter rule, it is an unreadable one: it failed USA_ORN_ST2_AMB
+        # for a loudest of 0.50 h while reporting a mean of 0.34 h, a verdict its own number does not
+        # support. A disagreement still fails whichever way the two point, because that is not what a
+        # landed correction looks like either, and at seven corrected sites a false alarm costs a look,
+        # not a rebuild.
+        value = float(np.mean(measured)) if (both and agree) else loudest
+        if abs(value) < APPLIED_ERROR_HOURS:
             return []
         if both:
-            value = float(np.mean(measured)) if agree else loudest
             return [
                 Finding(
                     ERROR,
@@ -186,7 +191,7 @@ def _env_findings(clock: SiteClock, zeros: Dict[str, float], registry) -> List[F
                 clock.site,
                 "env",
                 f"{_correction(applied)}, and the one estimator that can read it still measures "
-                f"{loudest:+.2f} h ({reading}); one witness is not two, so this is a warning, not a "
+                f"{value:+.2f} h ({reading}); one witness is not two, so this is a warning, not a "
                 f"failure: {_why(clock, both)}",
             )
         ]

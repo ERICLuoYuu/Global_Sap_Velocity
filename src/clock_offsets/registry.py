@@ -22,7 +22,14 @@ before they apply a single entry.
 ``status``
     ``applied``       the Stage-3 loaders move this site's component by ``offset_hours`` inside the period;
     ``acknowledged``  suspected or measured and deliberately NOT applied, recorded so the gate reports it as
-                      a known finding rather than a new one. ``offset_hours`` may be 0.0 while unresolved.
+                      a known finding rather than a new one. ``offset_hours`` may be 0.0 while unresolved;
+    ``checked``       measured and found to need no correction. It exists because the reason a component was
+                      left alone used to live in a comment, and one such comment was simply wrong: this file
+                      said USA_HUY_LIN_NON "ships no sap file" of a site that ships one. A ``checked`` entry
+                      holds the measurement instead, where :func:`coverage_errors` can insist on it and the
+                      next reader can check it. It is NOT ``acknowledged``: the gate downgrades a finding at
+                      an acknowledged site to a warning, and a component measured to be on time must still
+                      fail loudly if it ever drifts.
 
 ``start`` / ``end`` are UTC LABEL times -- the uncorrected stamps -- half-open ``[start, end)``; ``None`` is
 open-ended.
@@ -41,7 +48,11 @@ from typing import Iterable, List, Optional, Tuple
 import pandas as pd
 
 COMPONENTS = ("env", "sap")
-STATUSES = ("applied", "acknowledged")
+STATUSES = ("applied", "acknowledged", "checked")
+
+#: A status whose entry must show the measurement behind it. An applied offset has to justify moving rows;
+#: a checked one has to justify NOT moving them, which is the claim this registry once got wrong.
+MUST_CITE_EVIDENCE = ("applied", "checked")
 
 #: No civil UTC offset exceeds 14 h; an entry beyond that is a typo or a date error, not a clock.
 MAX_OFFSET_HOURS = 14.0
@@ -112,7 +123,18 @@ REGISTRY: Tuple[ClockOffset, ...] = (
             "already appears at label 21:30. The label sequence itself is regular throughout."
         ),
     ),
-    # USA_HUY_LIN_NON: env only; the site ships no sap file.
+    ClockOffset(
+        site="ISR_YAT_YAT",
+        component="sap",
+        offset_hours=0.0,
+        status="checked",
+        evidence=(
+            "Every sap tree is on true time through all three env clocks: sap vs TOA +0.08 h, vs ERA5-Land "
+            "+0.03 h. The logger that drifted is the met one, so only env is moved."
+        ),
+    ),
+    # USA_HUY_LIN_NON: env only -- and its sap file, which this table once wrongly said did not exist, is
+    # measured below rather than described.
     ClockOffset(
         site="USA_HUY_LIN_NON",
         component="env",
@@ -121,6 +143,19 @@ REGISTRY: Tuple[ClockOffset, ...] = (
         evidence=(
             "TOA correlation +4.97, daylight edges +5.00, clear-day correlation +4.96, ERA5-Land +4.79, "
             "morning crossing +4.85 (calibrated); 2017, the only full year, reads the same."
+        ),
+    ),
+    ClockOffset(
+        site="USA_HUY_LIN_NON",
+        component="sap",
+        offset_hours=0.0,
+        status="checked",
+        evidence=(
+            "The clock gate cannot read this component -- pair_lag needs both series and sw_in covers about "
+            "19% of the sap rows -- so it was measured by diurnal phase instead (Palma 46774069, 2 Picea "
+            "glauca, 6,776 readings): sap peaks +1.60 h after TOA, beside +1.15 h at the USA_ORN_ST1_AMB "
+            "control and +0.26 h at DEU_HIN_TER, which is ordinary physiology. Sharing the env logger's "
+            "clock would put it near +6.6 h. Corrected env and untouched sap therefore agree."
         ),
     ),
     # USA_ORN_ST1_AMB and ST2_AMB stand at one location with one set of sensors, so the twin difference is
@@ -172,6 +207,16 @@ REGISTRY: Tuple[ClockOffset, ...] = (
             "one for a 64 N site and is not one network's convention (Finnish, Russian and Swedish controls "
             "all lie at 1.6-3.1 h); under it the radiation and thermal references agree to 0.02 h, where the "
             "global zero leaves them 0.46 h apart and gives -4.8."
+        ),
+    ),
+    ClockOffset(
+        site="SWE_SVA_MIX_NON",
+        component="env",
+        offset_hours=0.0,
+        status="checked",
+        evidence=(
+            "Its own sw_in is on time: every env estimator within 0.11 h. The sap offset below is measured "
+            "against this env, so an env clock of its own would have moved it."
         ),
     ),
     # Measured, NOT corrected (user decision 2026-09-16: big offsets first).
@@ -380,6 +425,40 @@ def require_valid_registry(registry: Iterable[ClockOffset] = REGISTRY, corpus_di
         raise ClockRegistryError("the clock-offset registry cannot be applied:\n  " + "\n  ".join(errors))
 
 
+def coverage_errors(registry: Iterable[ClockOffset] = REGISTRY, corpus_dir=None) -> List[str]:
+    """Applied sites whose OTHER component the registry never accounts for; empty when each one does.
+
+    A site is corrected on one component because the other was looked at and found not to need it. That
+    reasoning used to live in a comment, and the comment for USA_HUY_LIN_NON was false -- it said the site
+    ships no sap file, of a site that ships one. Silence and "measured, fine" read identically, and the
+    clock gate cannot tell them apart either: its sap estimator returns nothing when it cannot measure.
+
+    So the corpus decides. For every site with an applied entry, each component whose corpus file is on
+    disk must carry an entry of some status. ``corpus_dir`` is required -- without a corpus there is no
+    fact to check against, and a rule that quietly passes when it cannot look is the defect again.
+    """
+    require_corpus = Path(corpus_dir) if corpus_dir is not None else None
+    if require_corpus is None:
+        return ["coverage cannot be judged without a corpus directory: the claim to check is what is on disk"]
+    entries = tuple(registry)
+    corrected = sorted({entry.site for entry in entries if entry.status == "applied"})
+    seen = {(entry.site, entry.component) for entry in entries}
+    errors: List[str] = []
+    for site in corrected:
+        for component in COMPONENTS:
+            if (site, component) in seen:
+                continue
+            name = site + CORPUS_SUFFIXES[component]
+            if not (require_corpus / name).is_file():
+                continue
+            errors.append(
+                f"{site!r}/{component!r}: the registry corrects this site's other component and says nothing "
+                f"about this one, though {name} is in the corpus. Measure it and record the result as a "
+                f"checked entry; do not leave the reason to a comment"
+            )
+    return errors
+
+
 def registry_sha256(registry: Iterable[ClockOffset] = REGISTRY) -> str:
     """A content hash of the registry for provenance; independent of entry order."""
     rows = sorted(json.dumps(asdict(entry), sort_keys=True) for entry in registry)
@@ -398,8 +477,8 @@ def _entry_errors(entry: ClockOffset, corpus_dir):
     if entry.status not in STATUSES:
         errors.append(f"{where}: status must be one of {STATUSES}, got {entry.status!r}")
     errors.extend(_offset_errors(entry, where))
-    if entry.status == "applied" and not str(entry.evidence).strip():
-        errors.append(f"{where}: an applied offset must name its evidence")
+    if entry.status in MUST_CITE_EVIDENCE and not str(entry.evidence).strip():
+        errors.append(f"{where}: a {entry.status} entry must name its evidence")
     start = _bound(entry.start, "start", where, errors)
     end = _bound(entry.end, "end", where, errors)
     if start is not None and end is not None and not start < end:

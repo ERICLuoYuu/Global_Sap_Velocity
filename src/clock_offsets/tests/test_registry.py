@@ -11,10 +11,13 @@ from pathlib import Path
 import pytest
 
 from src.clock_offsets.registry import (
+    COMPONENTS,
+    CORPUS_SUFFIXES,
     MAX_OFFSET_HOURS,
     REGISTRY,
     ClockOffset,
     ClockRegistryError,
+    coverage_errors,
     offsets_for,
     registry_sha256,
     require_valid_registry,
@@ -211,3 +214,97 @@ class TestShippedRegistry:
     @pytest.mark.skipif(not CORPUS.is_dir(), reason="corpus not on this machine")
     def test_the_shipped_registry_is_valid_against_the_corpus(self):
         assert validate_registry(REGISTRY, CORPUS) == []
+
+
+class TestCheckedStatus:
+    """``checked`` means measured and found to need no correction (review finding 1)."""
+
+    def test_a_checked_entry_is_valid_with_a_zero_offset(self, corpus):
+        assert validate_registry((entry(status="checked", offset_hours=0.0),), corpus) == []
+
+    def test_a_checked_entry_must_name_its_evidence(self, corpus):
+        # The defect being fixed: "this component is fine" with nothing behind it.
+        errors = validate_registry((entry(status="checked", offset_hours=0.0, evidence="  "),), corpus)
+        assert any("evidence" in error for error in errors)
+
+    def test_a_checked_entry_is_never_handed_to_a_loader(self):
+        assert offsets_for("FIN_PET", "env", (entry(status="checked", offset_hours=0.0),)) == ()
+
+    def test_a_checked_entry_is_not_an_acknowledged_one(self):
+        # The gate downgrades a finding at an acknowledged site to a warning. A component measured to be
+        # on time must still fail loudly if it drifts, so the two statuses must not be confused.
+        assert entry(status="checked").status != "acknowledged"
+
+
+class TestCoverage:
+    """An applied site must account for its other component, against the corpus and not a comment."""
+
+    def test_a_site_corrected_on_both_components_is_covered(self, corpus):
+        table = (entry(component="env"), entry(component="sap"))
+        assert coverage_errors(table, corpus) == []
+
+    def test_a_silent_sibling_that_ships_a_file_is_refused(self, corpus):
+        # Exactly the USA_HUY_LIN_NON defect: env corrected, sap shipped, sap never mentioned.
+        errors = coverage_errors((entry(component="env"),), corpus)
+        assert len(errors) == 1 and "FIN_PET_sapf_data.csv" in errors[0]
+
+    def test_a_checked_sibling_satisfies_it(self, corpus):
+        table = (entry(component="env"), entry(component="sap", status="checked", offset_hours=0.0))
+        assert coverage_errors(table, corpus) == []
+
+    def test_an_acknowledged_sibling_satisfies_it(self, corpus):
+        table = (entry(component="env"), entry(component="sap", status="acknowledged", offset_hours=1.5))
+        assert coverage_errors(table, corpus) == []
+
+    def test_a_sibling_with_no_corpus_file_needs_no_entry(self, corpus):
+        (corpus / "FIN_PET_sapf_data.csv").unlink()
+        assert coverage_errors((entry(component="env"),), corpus) == []
+
+    def test_an_acknowledged_site_is_not_asked_to_cover_anything(self, corpus):
+        # Nothing was corrected there, so there is no decision to justify.
+        assert coverage_errors((entry(status="acknowledged", offset_hours=1.0),), corpus) == []
+
+    def test_the_twin_site_does_not_cover_it(self, corpus):
+        # USA_ORN_ST1_AMB and ST2_AMB stand at one location and share one set of sensors. A prefix match
+        # would read ST1's entries as covering ST2; only the full site code may settle it. ST1 is fully
+        # accounted for here, so the single error that comes back can only be ST2's.
+        (corpus / "USA_ORN_ST2_AMB_sapf_data.csv").write_text("TIMESTAMP\n")
+        table = (
+            entry(site="USA_ORN_ST2_AMB", component="env"),
+            entry(site="USA_ORN_ST1_AMB", component="env", status="checked", offset_hours=0.0),
+            entry(site="USA_ORN_ST1_AMB", component="sap", status="checked", offset_hours=0.0),
+        )
+        errors = coverage_errors(table, corpus)
+        assert len(errors) == 1
+        assert "USA_ORN_ST2_AMB" in errors[0] and "sapf_data" in errors[0]
+
+    def test_without_a_corpus_it_refuses_rather_than_passes(self):
+        # A rule that quietly passes when it cannot look is the defect it was written to stop.
+        assert coverage_errors((entry(),), None)
+
+
+class TestShippedRegistryCoverage:
+    @pytest.mark.skipif(not CORPUS.is_dir(), reason="corpus not on this machine")
+    def test_every_corrected_site_accounts_for_its_other_component(self):
+        assert coverage_errors(REGISTRY, CORPUS) == []
+
+    @pytest.mark.skipif(not CORPUS.is_dir(), reason="corpus not on this machine")
+    def test_usa_huy_lin_non_ships_the_sap_file_the_table_once_denied(self):
+        # The false claim itself: "the site ships no sap file". It does.
+        assert (CORPUS / ("USA_HUY_LIN_NON" + CORPUS_SUFFIXES["sap"])).is_file()
+
+    @pytest.mark.skipif(not CORPUS.is_dir(), reason="corpus not on this machine")
+    def test_no_entry_of_any_status_names_a_file_that_is_not_there(self):
+        missing = [
+            "{0}/{1}".format(e.site, e.component)
+            for e in REGISTRY
+            if not (CORPUS / (e.site + CORPUS_SUFFIXES[e.component])).is_file()
+        ]
+        assert missing == []
+
+    @pytest.mark.skipif(not CORPUS.is_dir(), reason="corpus not on this machine")
+    def test_every_checked_entry_carries_a_measurement(self):
+        checked = [e for e in REGISTRY if e.status == "checked"]
+        assert checked, "the fix for finding 1 records three measurements; none are here"
+        assert all(e.evidence.strip() for e in checked)
+        assert all(e.component in COMPONENTS for e in checked)

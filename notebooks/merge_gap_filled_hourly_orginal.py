@@ -28,6 +28,7 @@ from src.feature_contract.merge_contract import (
 )
 from src.site_info.pft_resolution import load_site_landcover_modes, resolve_pft, summarise
 from src.site_info.derive_igbp import derive_for_scale, derived_only
+from src.clock_offsets.provenance import stamp_errors, tree_provenance
 from src.clock_offsets.registry import registry_sha256
 from src.env_daily.invariants import (
     KT_BASELINE_TOTAL,
@@ -645,7 +646,7 @@ def env_daily_overwrite(df_daily, env_hourly, lat, lon, keep_hours=None):
     return overwrite_daily_columns(out, ext_rad_daily_statistics(out["TIMESTAMP"], lat, lon, keep_hours))
 
 
-def radiation_provenance(kt_by_site=None):
+def radiation_provenance(kt_by_site=None, clock_errors_by_site=None):
     """The env daily rule, the clock registry and the kt > 1 count, for the feature-contract block (WP-B4).
 
     ``kt_by_site`` maps every written site to its days with daily ``sw_in`` above a positive daily ``ext_rad``,
@@ -653,7 +654,17 @@ def radiation_provenance(kt_by_site=None):
     None; ``python -m src.env_daily.gate`` refuses a tree whose block carries no count, so an old tree cannot
     be trained as a fixed one.
     """
-    block = {"env_daily_rule": env_daily_rule(), "clock_registry_sha256": registry_sha256(), "kt_exceedance": None}
+    block = {
+        "env_daily_rule": env_daily_rule(),
+        "clock_registry_sha256": registry_sha256(),
+        "kt_exceedance": None,
+        # What the Stage-3 inputs of THIS tree were actually corrected with, site by site. The hash above
+        # names the registry this merge imported and cannot speak for the inputs, which were written by a
+        # different run -- usually a much older one.
+        "clock_provenance": None,
+    }
+    if clock_errors_by_site is not None:
+        block["clock_provenance"] = tree_provenance(clock_errors_by_site)
     if kt_by_site is None:
         return block
     over = {site: int(days) for site, days in sorted(kt_by_site.items()) if int(days) > 0}
@@ -806,6 +817,7 @@ def merge_sap_env_data_site(
     contract_cell_rows = []
     # Days on which daily sw_in exceeded ext_rad, per written site: the contract block records them.
     kt_by_site = {}
+    clock_errors_by_site = {}
 
     # Collections for final merge
     biome_merged_hourly = {}
@@ -1523,6 +1535,12 @@ def merge_sap_env_data_site(
             check_support(df_daily)
             df_daily.to_csv(daily_out_dir / f"{location_type}_daily.csv", index=False)
             kt_by_site[location_type] = kt_exceedance_days(df_daily)
+            # Recorded where the site is certainly IN the tree, so a tree never answers for a site it
+            # skipped. stamp_errors reports and never raises: a raise here would meet the loop's
+            # except-continue below and drop the site instead of the finding.
+            clock_errors_by_site[location_type] = stamp_errors(env_data_file, "env") + stamp_errors(
+                sap_data_file, "sap"
+            )
 
             # --- COLLECT FOR BIOME MERGING ---
             # Note: hourly output retains full-year data even with --growing-season-only.
@@ -1558,13 +1576,25 @@ def merge_sap_env_data_site(
         _block = contract_block(
             clim, SWC_LAYERS, DEFAULT_MAX_RADIUS_CELLS, contract_cell_rows, _git_short_sha()
         )
-        _block.update(radiation_provenance(kt_by_site))
+        _block.update(radiation_provenance(kt_by_site, clock_errors_by_site))
         _kt = _block["kt_exceedance"]
         print(
             f"Env daily rule v{_block['env_daily_rule']['version']}: {_kt['total']} site-days with daily "
             f"sw_in above ext_rad at {len(_kt['by_site'])} of {_kt['n_sites_counted']} sites "
             f"(baseline {_kt['baseline_total']}); "
             + ("gate PASS" if not _kt["gate"] else "gate FAIL: " + "; ".join(_kt["gate"]))
+        )
+        _clock = _block["clock_provenance"]
+        print(
+            f"Clock provenance: {len(_clock['sites_corrected'])} of {_clock['n_sites_checked']} sites carry "
+            f"a Stage-3 clock stamp, "
+            + (
+                "each matching the registry this merge read"
+                if not _clock["mismatches"]
+                else "MISMATCH at "
+                + ", ".join(sorted(_clock["mismatches"]))
+                + " -- re-run Stage 3 for them; the daily gate will refuse this tree"
+            )
         )
         _sidecar, _cells_file = write_sidecar(output_base_dir, _block, contract_cell_rows)
         print(f"Feature contract: {len(contract_cell_rows)} site-layers -> {_sidecar.name}, {_cells_file.name}")

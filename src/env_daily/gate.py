@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from src.clock_offsets.provenance import provenance_errors
 from src.env_daily.invariants import KT_BASELINE_TOTAL, radiation_gate
 from src.env_daily.support import RULE_VERSION
 from src.feature_contract.definitions import PROVENANCE_FILE, PROVENANCE_KEY, SIDECAR_FILE
@@ -51,7 +52,11 @@ def tree_errors(block: Optional[dict]) -> List[str]:
             f"(version {RULE_VERSION}); rebuild it with the Stage-4 merge"
         )
     if not block.get("clock_registry_sha256"):
-        errors.append("no clock_registry_sha256: the registry its Stage-3 inputs were corrected with is unrecorded")
+        errors.append("no clock_registry_sha256: the registry this tree's merge imported is unrecorded")
+    # The hash above names what the MERGE read. Only this compares it with what the Stage-3 inputs were
+    # actually moved by -- the merge runs every sweep and Stage 3 hardly ever, so the two drift apart in
+    # the ordinary way of working, and registry_sha256(()) is a perfectly valid hash of nothing.
+    errors += provenance_errors(block.get("clock_provenance"))
     if block.get("complete") is not True:
         errors.append("the block is not complete: the merge was interrupted, so its sites and kt counts are partial")
     kt = block.get("kt_exceedance")
@@ -78,10 +83,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if errors:
         return 1
     over = sum(int(days) for days in block["kt_exceedance"]["by_site"].values())
+    clock = block["clock_provenance"]
     print(
         f"  ENV DAILY GATE PASS: env daily rule version {block['env_daily_rule']['version']}, clock registry "
-        f"{str(block['clock_registry_sha256'])[:12]}, {over} site-days with daily sw_in above ext_rad "
-        f"(baseline {KT_BASELINE_TOTAL})"
+        f"{str(block['clock_registry_sha256'])[:12]}, {len(clock['sites_corrected'])} of "
+        f"{clock['n_sites_checked']} sites clock-corrected at Stage 3 and matching, {over} site-days with "
+        f"daily sw_in above ext_rad (baseline {KT_BASELINE_TOTAL})"
     )
     return 0
 

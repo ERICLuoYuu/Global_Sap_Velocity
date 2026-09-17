@@ -23,6 +23,12 @@ def block(**overrides):
         "complete": True,
         "env_daily_rule": env_daily_rule(),
         "clock_registry_sha256": "0" * 64,
+        "clock_provenance": {
+            "registry_sha256": "0" * 64,
+            "n_sites_checked": 212,
+            "sites_corrected": ["FIN_PET"],
+            "mismatches": {},
+        },
         "kt_exceedance": {
             "baseline_total": KT_BASELINE_TOTAL,
             "total": KT_BASELINE_TOTAL,
@@ -58,6 +64,15 @@ class TestTreeErrors:
     @pytest.mark.parametrize("sha", [None, ""])
     def test_a_missing_registry_hash_fails(self, sha):
         assert any("clock_registry_sha256" in error for error in tree_errors(block(clock_registry_sha256=sha)))
+
+    @pytest.mark.parametrize("provenance", [None, {}, {"n_sites_checked": 0, "mismatches": {}}])
+    def test_a_tree_that_never_checked_its_stage_3_inputs_fails(self, provenance):
+        # Review finding 2: the hash alone records what the merge imported, not what its inputs received.
+        assert any("clock" in error for error in tree_errors(block(clock_provenance=provenance)))
+
+    def test_a_tree_whose_stage_3_input_was_never_re_run_fails(self):
+        stale = dict(block()["clock_provenance"], mismatches={"FIN_PET": ["FIN_PET/env: no clock stamp"]})
+        assert any("FIN_PET" in error for error in tree_errors(block(clock_provenance=stale)))
 
     def test_an_interrupted_merge_fails(self):
         assert any("complete" in error for error in tree_errors(block(complete=False)))

@@ -231,8 +231,11 @@ class TestSiteLoopWiring:
         assert len(support.body) == 1 and isinstance(support.body[0], ast.Raise) and support.body[0].exc is None
 
     def test_both_contract_badges_carry_the_radiation_provenance(self):
+        # The provisional badge, written before the loop, has counted nothing and must pass nothing: its
+        # kt count and its clock check are both None, and the gate refuses it. The final one passes both
+        # of what the loop gathered -- the kt days per site and the clock stamp check per site.
         calls = _calls(_merge_function(), "radiation_provenance")
-        assert sorted(len(call.args) for _line, call in calls) == [0, 1]
+        assert sorted(len(call.args) for _line, call in calls) == [0, 2]
 
     def test_the_merge_never_applies_a_clock_offset(self):
         # F1: offsets are applied once, at the Stage-3 load; the merge reads the corrected output.

@@ -23,6 +23,7 @@ if parent_dir not in sys.path:
 
 from path_config import PathConfig  # noqa: E402
 from src.clock_offsets.apply import correct_loaded_frames  # noqa: E402
+from src.clock_offsets.provenance import write_stamp  # noqa: E402
 from src.clock_offsets.registry import REGISTRY as CLOCK_REGISTRY  # noqa: E402
 from src.clock_offsets.registry import require_valid_registry  # noqa: E402
 from src.qc_flags import (  # noqa: E402
@@ -620,6 +621,10 @@ class EnvironmentalAnalyzer:
             outliers_removed_path = outliers_removed_dir / f"{location}_{plant_type}_outliers_removed.csv"
             # save outliers removed df
             df.to_csv(outliers_removed_path)
+            # Beside the file, the offsets that moved it. The merge imports the registry afresh every
+            # sweep and Stage 3 is re-run once in a season, so a registry hash written at merge time
+            # records only what the MERGE read; this records what this run actually did.
+            write_stamp(outliers_removed_path, "env", self.clock_registry)
             # print(f"Finished outlier processing for {location}_{plant_type}")
 
         except Exception as e:

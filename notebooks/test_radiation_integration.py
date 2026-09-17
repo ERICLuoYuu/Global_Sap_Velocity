@@ -58,9 +58,17 @@ def joined_daily():
     return frame
 
 
-def block(complete=True, kt_by_site=None):
+def block(complete=True, kt_by_site=None, clock_errors=None):
+    """The contract block of a merge that ran to the end: it counted its kt days AND checked its inputs.
+
+    A merge that compared no Stage-3 input against the registry writes ``clock_provenance: None`` and the
+    gate refuses it, which is the whole point of that field -- so a helper describing a FINISHED merge has
+    to supply the comparison it made. ``clock_errors`` is what the merge saw per site: an empty list where
+    the input's clock stamp matched the registry it holds.
+    """
     counted = {NIGHT_NA: 0, LATE: 0, CLEAN: 0} if kt_by_site is None else kt_by_site
-    return {"name": "servable", "complete": complete, **radiation_provenance(counted)}
+    checked = {site: [] for site in counted} if clock_errors is None else clock_errors
+    return {"name": "servable", "complete": complete, **radiation_provenance(counted, checked)}
 
 
 class TestTheThreeShapes:
@@ -125,3 +133,17 @@ class TestTheGateOverWhatTheMergeWrote:
         assert carried["env_daily_rule"]["version"] >= 1
         assert len(carried["clock_registry_sha256"]) == 64
         assert carried["kt_exceedance"]["n_sites_counted"] == 3
+
+    def test_a_merge_that_never_checked_its_stage_3_inputs_is_refused(self, tmp_path):
+        # Review finding 2: the registry hash records what THIS merge imported. Stage 3 is re-run once in
+        # a season and the merge every sweep, so the hash alone would let a tree claim corrections its
+        # inputs never received -- and registry_sha256(()) is a perfectly valid hash of an empty registry.
+        unchecked = {"name": "servable", "complete": True, **radiation_provenance({CLEAN: 0})}
+        (tmp_path / PROVENANCE_FILE).write_text(json.dumps({PROVENANCE_KEY: unchecked}))
+        assert env_daily_gate([str(tmp_path)]) == 1
+
+    def test_a_tree_whose_input_was_never_re_run_is_refused(self, tmp_path, capsys):
+        stale = block(clock_errors={LATE: ["{0}/env: no clock stamp".format(LATE)], CLEAN: []})
+        (tmp_path / PROVENANCE_FILE).write_text(json.dumps({PROVENANCE_KEY: stale}))
+        assert env_daily_gate([str(tmp_path)]) == 1
+        assert LATE in capsys.readouterr().out

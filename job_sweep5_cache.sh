@@ -51,6 +51,19 @@ echo "=== GATE 1b: the tree was built under FEATURE_CONTRACT=$FEATURE_CONTRACT =
 sweep5_assert_contract "$DATA_DIR" "$FEATURE_CONTRACT" || exit 1
 
 echo
+echo "=== GATE 1c: the daily env columns were built under the env daily rule ==="
+# A tree merged before 2026-09-16 carries a daylight-only mean sw_in against a 24 h
+# ext_rad mean, and a shipped ext_rad displaced by hours at 15 sites. Nothing
+# downstream can tell that tree from a fixed one (plan WP-B4, failure mode F21).
+if ! python -m src.env_daily.gate "$DATA_DIR"; then
+    if [ "${ALLOW_OLD_ENV_DAILY:-0}" != 1 ]; then
+        echo "    Re-merge the tree, or set ALLOW_OLD_ENV_DAILY=1 to use an old tree deliberately."
+        exit 1
+    fi
+    echo "  GATE 1c: old tree accepted (ALLOW_OLD_ENV_DAILY=1)"
+fi
+
+echo
 echo "=== GATE 2: data_dir is the PARENT, and /daily is populated ==="
 # Both loaders append the time scale themselves. Passing .../daily silently
 # resolves to .../daily/daily; the failure surfaces only after the job queues.

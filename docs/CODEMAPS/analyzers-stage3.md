@@ -230,6 +230,28 @@ python src/Analyzers/explore_relationship_observations.py --max-points 20000
 
 ---
 
+### 6. `src/clock_offsets/` — the reviewed clock registry (NEW, 2026-09-17)
+
+Both analyzers call `correct_loaded_frames(file, component, df, flags, registry)` immediately after a file is
+read — env before anything reads time, sap after the removal log (whose periods were reviewed against the
+labels as shipped) and before `TIMESTAMP_LOCAL`. This is the **only** place in the pipeline that moves a
+timestamp: the merge, feature engineering and serving know nothing about offsets, and a test asserts the merge
+never imports the corrector.
+
+| file | role |
+|---|---|
+| `registry.py` | `REGISTRY`, the reviewed entries; `validate_registry` / `require_valid_registry`, run once per batch before the first file is read; `registry_sha256`, recorded in the merged tree's provenance |
+| `apply.py` | `correct_clock` moves `TIMESTAMP` and `solar_TIMESTAMP` by −offset; refuses any entry that is not `applied`; half-open `[start, end)` periods judged on the ORIGINAL label |
+| `detect.py` | The estimators: clear-day correlation, daylight-edge shift, sap-vs-radiation pair lag, ERA5 reference lag. Each returns a value or the reason it cannot measure |
+| `gate.py` | `python -m src.clock_offsets.gate --env-dir … --sap-dir … --md-dir … [--out report.json]` over a Stage-3 tree. Exit 1 on any ERROR |
+
+**Conventions that make the numbers mean something.** A positive offset means the label is LATE, so true time
+is `label − offset`. Every estimate is calibrated on the median of the CONTROL sites (own radiation lag under
+0.75 h), which cancels ERA5's accumulation stamp, interval-end labels and the physiological delay of sap behind
+radiation. Two estimators must agree before the gate calls anything an ERROR, because each is fooled on its
+own: afternoon storms bias an all-day correlation, a polar day erases the edges, and a dead pyranometer
+(clearness < 0.05) fakes both.
+
 ## Data Dependencies
 
 ### Input Files

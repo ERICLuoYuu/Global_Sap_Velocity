@@ -22,6 +22,9 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from path_config import PathConfig  # noqa: E402
+from src.clock_offsets.apply import correct_loaded_frames  # noqa: E402
+from src.clock_offsets.registry import REGISTRY as CLOCK_REGISTRY  # noqa: E402
+from src.clock_offsets.registry import require_valid_registry  # noqa: E402
 from src.qc_flags import (  # noqa: E402
     Mechanism,
     QcFlagConfig,
@@ -47,8 +50,11 @@ class EnvironmentalAnalyzer:
         paths: PathConfig = None,
         scale: str = "sapwood",
         qc_config: QcFlagConfig = None,
+        clock_registry=None,
     ):
         self.paths = paths if paths is not None else PathConfig(scale=scale)
+        # Reviewed clock offsets, applied at load (src/clock_offsets); a test can pass its own registry.
+        self.clock_registry = tuple(CLOCK_REGISTRY if clock_registry is None else clock_registry)
         self.data_dir = self.paths.sap_data_dir
         self.data_outlier_removed_dir = self.paths.sap_outliers_removed_dir
         self.env_raw_data = {}
@@ -149,6 +155,8 @@ class EnvironmentalAnalyzer:
     def _load_environmental_data(self, files_to_load: list[Path]):
         """Load all German environmental data files and their corresponding metadata"""
         print(f"Loading {len(files_to_load)} env files for this batch...")
+        # A registry that cannot be applied stops the batch before a single file is read.
+        require_valid_registry(self.clock_registry)
         column_mapping = {
             "TIMESTAMP_solar": "solar_TIMESTAMP",  # Map alternate name to standard name
         }
@@ -200,6 +208,11 @@ class EnvironmentalAnalyzer:
                 else:
                     print(f"Warning: No flag file found for {file.name}")
                     flags = None
+
+                # Clock offsets before anything reads time, the diurnal-split outlier strata included.
+                # The registry is keyed on the full site code, never on `location`, which is USA_ORN
+                # for both ORN twins.
+                df, flags = correct_loaded_frames(file, "env", df, flags, self.clock_registry)
 
                 # Process data
                 print(f"\nProcessing {file.name}")

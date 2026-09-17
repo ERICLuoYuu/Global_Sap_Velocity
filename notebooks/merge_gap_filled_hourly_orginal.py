@@ -28,6 +28,16 @@ from src.feature_contract.merge_contract import (
 )
 from src.site_info.pft_resolution import load_site_landcover_modes, resolve_pft, summarise
 from src.site_info.derive_igbp import derive_for_scale, derived_only
+from src.clock_offsets.registry import registry_sha256
+from src.env_daily.invariants import (
+    KT_BASELINE_TOTAL,
+    SupportInvariantError,
+    check_support,
+    env_daily_rule,
+    kt_exceedance_days,
+    radiation_gate,
+)
+from src.env_daily.support import env_daily_statistics, ext_rad_daily_statistics
 
 paths = get_default_paths()
 
@@ -619,6 +629,45 @@ def overwrite_daily_columns(df_daily, daily, day_col="TIMESTAMP"):
     return out
 
 
+def env_daily_overwrite(df_daily, env_hourly, lat, lon, keep_hours=None):
+    """Return a copy of ``df_daily`` carrying env's OWN-hours statistics and the geometry ``ext_rad``, by UTC day.
+
+    The aggregation above it runs over the hours in which sap AND env observed, under no completeness rule: a
+    night the archive ships as NA made ``sw_in`` a daylight mean against a 24-hour ``ext_rad``, and a gap on
+    either side made every statistic a partial day's (plan WP-B; Palma 46752793, 46757405). ``ta``, ``vpd``,
+    ``rh``, ``ws``, ``sw_in`` and ``ppfd_in`` are taken again from ``env_hourly`` under the support rule of
+    :mod:`src.env_daily.support`, which also writes the ``_hours`` and ``_toa_coverage`` columns that show
+    their support, and ``ext_rad`` becomes the served geometry rather than the shipped column, which is
+    displaced by 2-11 h at 15 sites. ``netrad`` keeps the statistics above: nothing reads it (user,
+    2026-09-16). ``keep_hours`` is ``--daytime-only``'s scope, as for ERA5 and the gauge.
+    """
+    out = overwrite_daily_columns(df_daily, env_daily_statistics(env_hourly, lat, lon, keep_hours))
+    return overwrite_daily_columns(out, ext_rad_daily_statistics(out["TIMESTAMP"], lat, lon, keep_hours))
+
+
+def radiation_provenance(kt_by_site=None):
+    """The env daily rule, the clock registry and the kt > 1 count, for the feature-contract block (WP-B4).
+
+    ``kt_by_site`` maps every written site to its days with daily ``sw_in`` above a positive daily ``ext_rad``,
+    which a correct daily mean cannot do. The badge written before the loop has counted nothing and passes
+    None; ``python -m src.env_daily.gate`` refuses a tree whose block carries no count, so an old tree cannot
+    be trained as a fixed one.
+    """
+    block = {"env_daily_rule": env_daily_rule(), "clock_registry_sha256": registry_sha256(), "kt_exceedance": None}
+    if kt_by_site is None:
+        return block
+    over = {site: int(days) for site, days in sorted(kt_by_site.items()) if int(days) > 0}
+    block["kt_exceedance"] = {
+        "definition": "UTC days on which daily sw_in exceeds a positive daily ext_rad",
+        "baseline_total": KT_BASELINE_TOTAL,
+        "total": sum(over.values()),
+        "n_sites_counted": len(kt_by_site),
+        "by_site": over,
+        "gate": radiation_gate(over),
+    }
+    return block
+
+
 def _preflight_sites(sap_input_dir, raw_csv_dir, suffix_words=4):
     """(site, lat, lon) for every sap file whose site metadata carries a coordinate.
 
@@ -755,6 +804,8 @@ def merge_sap_env_data_site(
     contract = validate_contract(feature_contract)
     clim = load_cube(swvl_cube) if contract == SERVABLE_CONTRACT else None
     contract_cell_rows = []
+    # Days on which daily sw_in exceeded ext_rad, per written site: the contract block records them.
+    kt_by_site = {}
 
     # Collections for final merge
     biome_merged_hourly = {}
@@ -881,7 +932,12 @@ def merge_sap_env_data_site(
         _provisional = [row for _s, _la, _lo in _placed for row in cell_rows(_s, _la, _lo, cells_by_site[_s])]
         write_sidecar(
             output_base_dir,
-            contract_block(clim, SWC_LAYERS, DEFAULT_MAX_RADIUS_CELLS, _provisional, _git_short_sha(), complete=False),
+            {
+                **contract_block(
+                    clim, SWC_LAYERS, DEFAULT_MAX_RADIUS_CELLS, _provisional, _git_short_sha(), complete=False
+                ),
+                **radiation_provenance(),
+            },
             _provisional,
         )
 
@@ -1406,6 +1462,11 @@ def merge_sap_env_data_site(
             if contract == SERVABLE_CONTRACT:
                 df_daily = apply_servable_precip(df_daily)
 
+            # --- ENV SENSOR STATISTICS FROM ENV'S OWN HOURS, EXT_RAD FROM GEOMETRY ---
+            # The same argument as ERA5 and the gauge, carried to the env sensors themselves, with a
+            # support rule the aggregation above never had: see env_daily_overwrite.
+            df_daily = env_daily_overwrite(df_daily, env_hourly, lat, lon, keep_hours)
+
             # --- DAYTIME-SAP-ONLY: rescope the target, leave env at 24 h ---
             # Placed BEFORE the growing-season filter so that filter reads the
             # same sap series the model will train on.
@@ -1457,7 +1518,11 @@ def merge_sap_env_data_site(
                     )
 
             # --- SAVE DAILY ---
+            # A daily env value without the support its rule requires is a defect in this merge, never
+            # a messy site, so it raises here rather than reaching the tree.
+            check_support(df_daily)
             df_daily.to_csv(daily_out_dir / f"{location_type}_daily.csv", index=False)
+            kt_by_site[location_type] = kt_exceedance_days(df_daily)
 
             # --- COLLECT FOR BIOME MERGING ---
             # Note: hourly output retains full-year data even with --growing-season-only.
@@ -1480,6 +1545,9 @@ def merge_sap_env_data_site(
             # Not a messy site: a contract failure ends the run rather than the site, so the tree is
             # never quietly short of what it claims to contain.
             raise
+        except SupportInvariantError:
+            # The same: a daily env value written without its support is this merge's defect.
+            raise
         except Exception as e:
             print(f"Error processing {sap_data_file}: {str(e)}")
             continue
@@ -1489,6 +1557,14 @@ def merge_sap_env_data_site(
     if contract == SERVABLE_CONTRACT:
         _block = contract_block(
             clim, SWC_LAYERS, DEFAULT_MAX_RADIUS_CELLS, contract_cell_rows, _git_short_sha()
+        )
+        _block.update(radiation_provenance(kt_by_site))
+        _kt = _block["kt_exceedance"]
+        print(
+            f"Env daily rule v{_block['env_daily_rule']['version']}: {_kt['total']} site-days with daily "
+            f"sw_in above ext_rad at {len(_kt['by_site'])} of {_kt['n_sites_counted']} sites "
+            f"(baseline {_kt['baseline_total']}); "
+            + ("gate PASS" if not _kt["gate"] else "gate FAIL: " + "; ".join(_kt["gate"]))
         )
         _sidecar, _cells_file = write_sidecar(output_base_dir, _block, contract_cell_rows)
         print(f"Feature contract: {len(contract_cell_rows)} site-layers -> {_sidecar.name}, {_cells_file.name}")

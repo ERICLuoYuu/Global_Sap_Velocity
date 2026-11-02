@@ -1,0 +1,88 @@
+"""Lesiv 2022 forest management, 2015: the share of each class among the 100 m pixels of a cell, and the dominant class."""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pandas as pd
+import rasterio
+from src.static_features.fetch import fetch, sha256_of, zenodo_downloads
+from src.static_features.grid import cell_bounds
+from src.static_features.rasters import centred_span
+from src.static_features.results import NO_DATA, OK, ExtractionFailure, ProductResult, RunContext
+
+RECORD_ID = 5879022
+FILE_NAME = "FML_v3-2_with-colorbar.tif"
+DIRECTORY = "lesiv_2022"
+CLASSES = (11, 20, 31, 32, 40, 53)
+NOT_FOREST = (0, 128)
+DOMINANT = "fm_dominant"
+
+
+def cell_shares(block: np.ndarray, nodata: float | None) -> tuple[dict[int, float], int | None]:
+    """(share per class, dominant class). The denominator is every pixel; a tie goes to the lowest code."""
+    if block.size == 0:
+        raise ValueError("an empty block has no shares")
+    allowed = list(CLASSES) + list(NOT_FOREST) + ([] if nodata is None else [nodata])
+    unknown = np.unique(block[~np.isin(block, allowed)]).tolist()
+    if unknown:
+        raise ValueError(f"values {unknown} are not in the legend")
+    shares = {code: float((block == code).sum() / block.size) for code in CLASSES}
+    largest = max(shares.values())
+    if largest == 0.0:
+        return shares, None
+    return shares, min(code for code in CLASSES if shares[code] == largest)
+
+
+def _read_cell(src, site) -> np.ndarray:
+    west, south, east, north = cell_bounds(site.row, site.col)
+    transform = src.transform
+    row_start, row_stop = centred_span(south, north, transform.f, transform.e, src.height)
+    col_start, col_stop = centred_span(west, east, transform.c, transform.a, src.width)
+    if row_start == row_stop or col_start == col_stop:
+        raise ExtractionFailure(f"lesiv: {site.site_name}: no pixel of the map is centred in the cell")
+    return src.read(1, window=((row_start, row_stop), (col_start, col_stop)))
+
+
+def extract(context: RunContext) -> ProductResult:
+    path = context.raw_root / DIRECTORY / FILE_NAME
+    columns = [f"fm_share_{code}" for code in CLASSES] + [DOMINANT]
+    values, status, forest_share = [], [], []
+    with rasterio.open(path) as src:
+        for site in context.sites.itertuples(index=False):
+            try:
+                shares, dominant = cell_shares(_read_cell(src, site), src.nodata)
+            except ValueError as problem:
+                raise ExtractionFailure(f"lesiv: {site.site_name}: {problem}") from problem
+            values.append([shares[code] for code in CLASSES] + [math.nan if dominant is None else dominant])
+            status.append([OK] * len(CLASSES) + [NO_DATA if dominant is None else OK])
+            forest_share.append(sum(shares.values()))
+
+    index = pd.Index(context.sites["site_name"], name="site_name")
+    return ProductResult(
+        product="lesiv",
+        values=pd.DataFrame(values, index=index, columns=columns),
+        status=pd.DataFrame(status, index=index, columns=columns),
+        coverage=pd.DataFrame({DOMINANT: forest_share}, index=index),
+        by_year=None,
+        extras={},
+        provenance={
+            "source": f"https://zenodo.org/records/{RECORD_ID}, {FILE_NAME}",
+            "version": "Lesiv et al. 2022, FML v3.2, 2015",
+            "checksum": {FILE_NAME: sha256_of(path)},
+            "time_window": "2015",
+            "method": (
+                "Share of every pixel centred in the cell, so a cell without forest is ok at 0; the dominant class "
+                "takes the lowest code on a tie and is no_data without forest. Coverage is the forest share of the cell."
+            ),
+        },
+    )
+
+
+def fetch_inputs(context: RunContext) -> None:
+    directory = context.raw_root / DIRECTORY
+    wanted = [item for item in zenodo_downloads(RECORD_ID, directory) if item.name == FILE_NAME]
+    if not wanted:
+        raise ExtractionFailure(f"lesiv: Zenodo record {RECORD_ID} no longer lists {FILE_NAME}")
+    fetch(wanted[0], directory)

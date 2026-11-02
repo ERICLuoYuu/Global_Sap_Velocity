@@ -20,7 +20,7 @@ def _all_properties(**raw_by_property):
 
 
 def test_soil_applies_each_conversion():
-    result = soil_result(_all_properties(bdod=140.0, sand=400.0, nitrogen=250.0, soc=300.0, phh2o=65.0, cfvo=120.0))
+    result = soil_result(_all_properties(bdod=140.0, sand=400.0, nitrogen=2500.0, soc=300.0, phh2o=65.0, cfvo=120.0))
     values = result.values.loc["A"]
 
     assert values["bdod_0_5"] == pytest.approx(1.4)

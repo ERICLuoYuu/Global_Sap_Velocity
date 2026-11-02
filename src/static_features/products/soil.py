@@ -11,7 +11,7 @@ ASSET = "projects/soilgrids-isric/{prop}_mean"
 PROPERTIES = ("clay", "sand", "silt", "bdod", "cfvo", "soc", "phh2o", "nitrogen")
 DEPTHS = ("0-5cm", "5-15cm", "15-30cm", "30-60cm", "60-100cm", "100-200cm")
 FACTOR = 0.1
-FACTOR_BY_PROPERTY = {"bdod": 0.01, "nitrogen": 0.01}
+FACTOR_BY_PROPERTY = {"bdod": 0.01, "nitrogen": 0.001}
 PROVENANCE = {
     "source": "projects/soilgrids-isric/<property>_mean",
     "version": "SoilGrids250m 2.0, Earth Engine copy",
@@ -20,7 +20,8 @@ PROVENANCE = {
     "method": (
         "Unweighted mean over valid pixels centred in the 30 arc-second cell, each property in its own projection "
         "because bdod and soc have another origin. The old REST ring search is dropped: the cell covers that footprint. "
-        "Conversion 0.1, except bdod and nitrogen 0.01."
+        "Conversion 0.1, except bdod 0.01 and nitrogen 0.001: this copy holds nitrogen ten times finer than the "
+        "cg/kg of the REST service, so 0.01 would read ten times too high."
     ),
 }
 

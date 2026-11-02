@@ -39,7 +39,7 @@ The owner wants one clean module, ten new datasets, and one consistent spatial s
 
 ## Anti-goals
 
-- Silently changing what the merge reads. The merge's default behaviour must not change.
+- A merge that writes NaN columns because a static file or site is absent. It stops and names what is missing.
 - A NaN that could mean either "no forest here" or "Earth Engine timed out".
 - Unpacking large archives onto scratch. File quota is 466,556 of 1,000,000.
 
@@ -179,7 +179,8 @@ Columns: `phen_{greenup,midgreenup,maturity,peak,senescence,midgreendown,dormanc
 **Lusk traits (owner's decision).** All 31 traits are extracted, and the model decides later which are useful. Columns
 are `lusk_<TRY id>` with a readable name in `provenance.json` **(my call)**, for example `lusk_3117` for SLA, except
 `root_depth_lusk` (6) and `wood_density_lusk` (4), which the agreement test names. Each trait also writes its coefficient
-of variation and area-of-applicability bands, so 93 columns in all. The authors' cross-validated r runs from 0.22 (wood
+of variation and area-of-applicability bands, so 93 columns in all; those 62 band columns go to `lusk_quality.csv` and stay
+out of the merge **(owner's decision, 2026-11-02)**. The authors' cross-validated r runs from 0.22 (wood
 ray density) to 0.63 (SLA, leaf N per area), and 15 of the 31 are flagged experimental, below their r = 0.5 threshold.
 `provenance.json` records each trait's r and flag so feature selection can see them. The maps cover all vegetation, not
 trees only. The bands are stored as int16 with a per-band scale and offset (rooting depth: 0.01132 and 370.9), so a read
@@ -251,11 +252,13 @@ Separate root under `data/raw/extracted_data/`, for example `static_1km/<scale>/
   `stand_age_TC`, so a status column beside the values would break it.
 - `static_features_by_year.csv`: the long table (site, year, column, value, status).
 - `evi_composites.csv`: site, composite date, QA class, mean EVI, pixel count.
+- `lusk_quality.csv`: each Lusk trait's coefficient of variation and area of applicability, one row per site.
 - `phenology_pixels.csv`: site, year, land flag, and every MCD12Q2 band per pixel.
 - `provenance.json`: source URL, version, checksum, time window, code commit.
 
-The merge gets one switch to read this root and to carry the new columns as static. It defaults to off **(my call)**. With
-the switch on, a missing file stops the merge instead of becoming NaN columns.
+The merge always reads this root and carries the new columns as static. There is no switch **(owner's decision,
+2026-11-02, replacing an opt-in switch that defaulted to off)**. A missing file or site stops the merge instead of
+becoming NaN columns, so a scale must be built with this package before it can be merged.
 
 ## Data on disk
 
@@ -324,4 +327,4 @@ from Palma, then build the module on a new branch `feat/static-features` in its 
 ## Left to the builder
 
 Internal layout of the package, the product registry's shape, job script structure, download and retry mechanics, and the
-merge switch's mechanism.
+way the merge reads the root.

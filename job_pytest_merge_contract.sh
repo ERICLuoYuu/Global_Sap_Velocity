@@ -14,7 +14,7 @@ source /scratch/tmp/yluo2/gsv/.venv/bin/activate || exit 1
 export PYTHONPATH="$ROOT"
 export ANALYSIS_SCALE=sapwood_combined
 
-NEW="src/feature_contract/tests notebooks/test_merge_feature_contract.py src/clock_offsets/tests src/env_daily/tests src/Analyzers/tests notebooks/test_env_daily_merge.py notebooks/test_radiation_integration.py"
+NEW="src/feature_contract/tests notebooks/test_merge_feature_contract.py notebooks/test_merge_static_features.py src/clock_offsets/tests src/env_daily/tests src/Analyzers/tests notebooks/test_env_daily_merge.py notebooks/test_radiation_integration.py"
 REG="notebooks/test_daily_own_hours.py notebooks/test_env_hourly_gaps.py notebooks/test_normalise_timestamps_streams.py notebooks/test_daytime_scope.py src/feature_contract/tests src/hyperparameter_optimization/tests src/forward_selection/tests src/serving/tests"
 
 # Nothing is deselected. test_dl_parity was, while it failed: its two FFS selections name soil-moisture

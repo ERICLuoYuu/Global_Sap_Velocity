@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `src/static_features/`, which extracts every static feature for the 226 `sapwood_combined` sites on one 1 km rule, adds ten new datasets, gives every value a reason code, and reaches the merge only through an opt-in switch.
+**Goal:** Build `src/static_features/`, which extracts every static feature for the 226 `sapwood_combined` sites on one 1 km rule, adds ten new datasets, gives every value a reason code, and feeds the merge, which always reads the full set.
 
 **Architecture:** Each product is one module with `extract(context) -> ProductResult`, run as its own job and saved atomically as a part. `assemble` joins the parts into the output files and refuses stale ones. The arithmetic lives in pure functions tested with hand-computed answers; thin readers around them (Earth Engine, curl, rasterio, h5py, netCDF4) are checked by live tests and by acceptance numbers measured while opening the data.
 
@@ -37,7 +37,7 @@
 2. **A job dies mid-product** (walltime, out of memory, or a request failing at site 200 of 226). Expected: no part appears, an earlier good part stays intact, and a rerun starts clean. Tests in Task 2.
 3. **The site list changes after some parts were made.** Expected: `assemble` refuses and names the stale parts, rather than joining old values to new sites. Test in Task 12.
 4. **Two sites share a cell, or one name appears twice** (`GBR_DEV_CON` and `GBR_DEV_DRO` share a cell). Expected: each site gets its own row with identical values, while a duplicated name stops at load. Tests in Tasks 2 and 4.
-5. **The merge's switch points at an incomplete root** (a file absent, a site absent from a file). Expected: the merge stops naming the file or site, rather than writing NaN columns. Tests in Task 14.
+5. **The merge's static root is incomplete** (a file absent, a site absent from a file). Expected: the merge stops naming the file or site, rather than writing NaN columns. Tests in Task 14.
 
 ---
 
@@ -702,35 +702,39 @@ def test_shares_summing_above_one_are_reported(): ...
 
 ---
 
-### Task 14: The merge switch
+### Task 14: The merge reads the full set
+
+The owner replaced the planned opt-in `--static-root` switch on 2026-11-02: the merge always reads the full 1 km set, with no flag. The baseline merge had already run by then, from the switch's off side, so Step 5 needs only the one new run. The owner also took Lusk's 62 quality-band columns out of the merge the same day, leaving 75 new columns; they sit in `lusk_quality.csv`.
 
 **Files:**
 - Modify: `notebooks/merge_gap_filled_hourly_orginal.py`: `merge_sap_env_data_site` (713), static loads (830-854), `load_stand_age_map`, per-site lookups (~997-1012), `add_static_vars` (~1220), `static_prefixes`/`static_exact` (~1382), MANIFEST `flags` (~1681), argparse (~1713)
 - Modify: `job_pytest_merge_contract.sh`: add the new test to its `NEW` list
-- Create: `checks/merge_parity.py`, `jobs/job_merge_static.sh` (modelled on `/scratch/tmp/yluo2/gsv/job_merge_sweep5.sh`, which is untracked, with `$W` paths and `STATIC_ROOT` as an optional variable)
-- Test: `notebooks/test_merge_static_switch.py` (style of `notebooks/test_merge_feature_contract.py`), `tests/test_merge_parity.py`
+- Create: `checks/merge_parity.py`, `jobs/job_merge_static.sh` (modelled on `/scratch/tmp/yluo2/gsv/job_merge_sweep5.sh`, which is untracked, with `$W` paths)
+- Test: `notebooks/test_merge_static_features.py` (style of `notebooks/test_merge_feature_contract.py`), `tests/test_merge_parity.py`
 
 **Interfaces:**
 - Consumes: the output files of Task 12.
 - Produces:
-  - `static_input_paths(static_root: Optional[Path]) -> Dict[str, Path]` with keys `env`, `soil`, `stand_age`, `fan`, plus `new` when on. Off returns today's four paths exactly. On raises `FileNotFoundError` naming every absent file.
-  - `load_stand_age_map(base_path, age_file_path=None)`: unchanged when `age_file_path` is `None`.
+  - `static_features_root() -> Path`: `paths.extracted_data_dir / "static_1km" / paths.scale`, where the package assembles.
+  - `static_input_paths(static_root: Path) -> Dict[str, Path]` with keys `env`, `soil`, `stand_age`, `fan`, `new`. Raises `FileNotFoundError` naming every absent file.
+  - `load_stand_age_map(age_file_path: Path)`: raises `ValueError` naming a file with no age columns.
   - `load_new_static(path: Path, expected_sites) -> Tuple[pd.DataFrame, List[str]]`: frame indexed by `site_name` and the value columns.
-  - `merge_sap_env_data_site(..., static_root=None)`; CLI `--static-root`. Value columns reach `add_static_vars` and `static_exact` only when on. MANIFEST `flags` records `static_root`.
+  - `merge_sap_env_data_site` takes no static argument and the CLI no flag. Value columns always reach `add_static_vars` and `static_exact`. MANIFEST records `static_root` beside `flags`, because nothing chooses it.
   - `merge_parity.compare(old: DataFrame, new: DataFrame, static_columns) -> Dict[str, Any]`, with `same_keys`, `dynamic_columns_differing`, `added_columns`, `removed_columns`.
 
 - [ ] **Step 1: Write the failing tests.**
 
 ```python
-def test_off_returns_todays_paths(): ...                  # exactly the current four
-def test_off_stand_age_loader_is_unchanged(tmp_path): ...
+def test_root_is_where_the_package_assembles(): ...
+def test_there_is_no_way_to_turn_the_features_off(): ...
 
 # Review Focus 5
-def test_on_missing_file_raises_naming_it(tmp_path): ...
+def test_missing_file_raises_naming_it(tmp_path): ...
+def test_merge_stops_when_the_features_are_absent(tmp_path): ...
 def test_new_static_missing_a_site_raises_naming_it(tmp_path): ...
 
-def test_new_columns_are_static_only_when_on(): ...       # present in static_exact on, absent off
-def test_stand_age_map_reads_the_given_file(tmp_path): ...
+def test_new_columns_join_the_static_columns(): ...
+def test_stand_age_map_averages_the_given_file(tmp_path): ...
 
 def test_parity_passes_when_only_static_columns_change(): ...
 def test_parity_reports_a_changed_dynamic_column(): ...
@@ -739,15 +743,15 @@ def test_parity_reports_a_lost_row(): ...
 
 - [ ] **Step 2: Run them.** `GSV_ROOT=$W WITH_REGRESSION=0 sbatch --wait job_pytest_merge_contract.sh`, and `T test_merge_parity.py`. Expected: `RESULT: FAIL` and a failing pytest exit, names missing.
 
-- [ ] **Step 3: Write the patch.** Author a unified diff and apply it with `git apply --check`, then `git apply`, in `$W`, because the merge file is large and the local linter hook must not touch it. Print `git diff notebooks/merge_gap_filled_hourly_orginal.py` and read every hunk: each must be inert when `static_root` is `None`.
+- [ ] **Step 3: Write the patch.** Author it as an exact-string patch applied to the file at HEAD, in `$W`, because the merge file is large and the local linter hook must not touch it. Read every hunk of `git diff notebooks/merge_gap_filled_hourly_orginal.py`: no static read may remain that bypasses `static_input_paths`.
 
 - [ ] **Step 4: Run them, with the regression suite.** `GSV_ROOT=$W sbatch --wait job_pytest_merge_contract.sh`, and `T test_merge_parity.py`. Expected: `RESULT: PASS (new + regression)` and `### pytest exit: 0`.
 
-- [ ] **Step 5: Run the merge twice from this branch**, with the arm 5 flags `--daytime-sap-only --growing-season-only --apply-treatment-filter`, through `job_merge_static.sh` (64 G, 6 h each), to two new `--output-dir` directories: once without the switch, once with `--static-root data/raw/extracted_data/static_1km/sapwood_combined`. Same code on both sides, because the newest arm 5 output on disk predates the merge's last commit. Expected: both exit 0, and the second `MANIFEST.json` records the static root.
+- [ ] **Step 5: Run the merge from this branch**, with the arm 5 flags `--daytime-sap-only --growing-season-only --apply-treatment-filter`, through `job_merge_static.sh` (64 G, 6 h), to a new `--output-dir`. Compare it with the baseline tree from the same code on the earlier static files, `static_parity_20261102/off`, because the newest arm 5 output on disk predates the merge's last commit. Expected: exit 0, and `MANIFEST.json` records the static root.
 
-- [ ] **Step 6: Run the parity check** on the two outputs, `M src.static_features.checks.merge_parity --off <dir> --on <dir>`. Expected: same site-day keys, no column removed, the new columns added. Columns computed from soil properties in the merge may differ and are named in the report. Any other dynamic column that differs goes to the owner with its name.
+- [ ] **Step 6: Run the parity check** on the two outputs, `M src.static_features.checks.merge_parity --before <dir> --after <dir>`. Expected: same site-day keys, no column removed, the new columns added. Columns computed from soil properties in the merge may differ and are named in the report. Any other dynamic column that differs goes to the owner with its name.
 
-- [ ] **Step 7: Commit.** `feat(merge): opt-in --static-root reads the 1 km features`.
+- [ ] **Step 7: Commit.** `feat(merge): always read the full 1 km static set`.
 
 ---
 
@@ -762,7 +766,7 @@ def test_parity_reports_a_lost_row(): ...
 
 - [ ] **Step 3: Whole-branch review** by a fresh reviewer on the most capable model (`superpowers:requesting-code-review`). Fix critical and high findings, then rerun Step 1.
 
-- [ ] **Step 4: Update the records.** `CLAUDE.md`: a module row, the Stage 2 note, and the `--static-root` switch. Memory: `static_features_rebuild.md` and its index line.
+- [ ] **Step 4: Update the records.** `CLAUDE.md`: a module row, the Stage 2 note, and that the merge now needs `static_1km/<scale>` built first. Memory: `static_features_rebuild.md` and its index line.
 
 - [ ] **Step 5: Commit and push from Palma.** `docs: record the static feature module`, then `git push -u origin feat/static-features`. No merge into another branch and no old script deleted without the owner's agreement.
 

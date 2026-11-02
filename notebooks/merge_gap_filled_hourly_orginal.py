@@ -246,27 +246,17 @@ def calculate_daytime_mask(timestamps, lat, lon, elevation=0, elevation_threshol
     return solar_position["elevation"] > elevation_threshold
 
 
-def load_stand_age_map(base_path):
+def load_stand_age_map(age_file_path):
     """
     Load the global stand age CSV and create a dictionary mapping site_name -> mean_age.
     """
-    age_file_path = base_path / "extracted_data" / "terrain_site_data" / paths.scale / "stand_age_data.csv"
-
-    if not age_file_path.exists():
-        age_file_path = (
-            paths.base_data_dir / "raw" / "extracted_data" / "terrain_site_data" / paths.scale / "stand_age_data.csv"
-        )
-
-    if age_file_path.exists():
-        print(f"Loading Stand Age data from: {age_file_path}")
-        df = pd.read_csv(age_file_path)
-        tc_cols = [c for c in df.columns if "stand_age_TC" in c]
-        if tc_cols:
-            df["mean_age"] = df[tc_cols].mean(axis=1)
-            return df.set_index("site_name")["mean_age"].to_dict()
-
-    print(f"WARNING: Stand Age file not found at {age_file_path}")
-    return {}
+    print(f"Loading Stand Age data from: {age_file_path}")
+    df = pd.read_csv(age_file_path)
+    tc_cols = [c for c in df.columns if "stand_age_TC" in c]
+    if not tc_cols:
+        raise ValueError(f"{age_file_path} holds no stand_age_TC columns")
+    df["mean_age"] = df[tc_cols].mean(axis=1)
+    return df.set_index("site_name")["mean_age"].to_dict()
 
 
 #: Written into ``biome`` when a site ships no ``si_biome``. A NAMED placeholder,
@@ -710,6 +700,92 @@ def _preflight_sites(sap_input_dir, raw_csv_dir, suffix_words=4):
     return sites
 
 
+#: The 1 km static files (src/static_features) the merge reads, by key. ``new`` holds the columns added by the rebuild.
+STATIC_FILES = {
+    "env": "site_info_with_env_data.csv",
+    "soil": "soilgrids_data.csv",
+    "stand_age": "stand_age_data.csv",
+    "fan": "site_info_with_root_depth_fan2017.csv",
+    "new": "new_static_features.csv",
+}
+
+#: Static columns the daily aggregation keeps as ``first``, by exact name. The rest go by prefix.
+STATIC_EXACT = (
+    "latitude",
+    "longitude",
+    "elevation",
+    "slope",
+    "aspect_sin",
+    "aspect_cos",
+    "mean_annual_temp",
+    "mean_annual_precip",
+    "temp_seasonality",
+    "precip_seasonality",
+    "canopy_height",
+    "stand_age",
+    "root_depth",
+    "infiltration_depth",
+    "deep_drainage",
+    "drainage_frequency",
+    "regolith_flush_rate",
+    "gw_residence_time",
+)
+
+
+def static_exact_columns(new_static_columns):
+    """``STATIC_EXACT`` plus the 1 km features. A new list each call: ``plant_level`` appends to it."""
+    return [*STATIC_EXACT, *new_static_columns]
+
+
+def static_features_root():
+    """Where ``src.static_features.assemble`` writes this scale's files."""
+    return paths.extracted_data_dir / "static_1km" / paths.scale
+
+
+def static_input_paths(static_root):
+    """The five files under ``static_root``. Any absent file stops the merge, and all of them are named.
+
+    A soft fail to NaN columns would pass for sites that have no data.
+    """
+    found = {key: Path(static_root) / name for key, name in STATIC_FILES.items()}
+    absent = sorted(str(path) for path in found.values() if not path.exists())
+    if absent:
+        raise FileNotFoundError(
+            f"{static_root} lacks {absent}: build them with src.static_features.run and .assemble for {paths.scale}"
+        )
+    return found
+
+
+def load_new_static(path, expected_sites):
+    """The 1 km features with no earlier column: a frame indexed by ``site_name``, and its value columns."""
+    frame = pd.read_csv(path, float_precision="round_trip", keep_default_na=False, na_values=[""], low_memory=False)
+    repeated = sorted(frame.loc[frame["site_name"].duplicated(), "site_name"].unique())
+    if repeated:
+        raise ValueError(f"{path} repeats {repeated}")
+    missing = sorted(set(expected_sites) - set(frame["site_name"]))
+    if missing:
+        raise ValueError(f"{path} does not hold {missing}")
+    frame = frame.set_index("site_name")
+    return frame, list(frame.columns)
+
+
+def new_static_row(new_static, site):
+    """One site's 1 km features as ``{column: value}``."""
+    return new_static.loc[site].to_dict()
+
+
+def add_new_static(target_df, features):
+    """``target_df`` with the 1 km features as constant columns.
+
+    One concat, because a column at a time over this many fragments the frame. A clash ends the run: it is
+    no messy site, and the loop's ``except Exception`` would turn it into a missing one.
+    """
+    clashing = sorted(set(features) & set(target_df.columns))
+    if clashing:
+        raise FeatureContractError(f"the 1 km features repeat columns the merge already writes: {clashing}")
+    return pd.concat([target_df, pd.DataFrame(features, index=target_df.index)], axis=1)
+
+
 def merge_sap_env_data_site(
     output_base_dir,
     daytime_only=False,
@@ -827,22 +903,18 @@ def merge_sap_env_data_site(
     site_biome_mapping = {}
 
     # --- LOAD STATIC DATASETS ---
-    site_info = pd.read_csv(paths.env_extracted_data_path)
+    static_root = static_features_root()
+    static_inputs = static_input_paths(static_root)
+    site_info = pd.read_csv(static_inputs["env"])
 
-    soil_file_path = paths.terrain_attributes_data_path.parent / "soilgrids_data.csv"
-    if soil_file_path.exists():
-        soil_data = pd.read_csv(soil_file_path)
-        print("Loaded SoilGrids data.")
-    else:
-        print("WARNING: SoilGrids data not found.")
-        soil_data = pd.DataFrame()
+    soil_data = pd.read_csv(static_inputs["soil"])
+    print("Loaded SoilGrids data.")
 
-    stand_age_map = load_stand_age_map(paths.raw_csv_dir.parent)
+    stand_age_map = load_stand_age_map(static_inputs["stand_age"])
 
     # --- LOAD FAN 2017 ROOT DEPTH + HYDROLOGIC REGIME FEATURES ---
     # Left-joined into site_info so the per-site `.values[0]` lookup below
-    # returns them alongside canopy_height / bio1 / etc. Missing file → NaN
-    # columns (same soft-fail pattern as soil_data / stand_age).
+    # returns them alongside canopy_height / bio1 / etc.
     _FAN2017_FEATURE_COLS = (
         "root_depth",
         "infiltration_depth",
@@ -851,15 +923,14 @@ def merge_sap_env_data_site(
         "regolith_flush_rate",
         "gw_residence_time",
     )
-    if paths.root_depth_fan2017_data_path.exists():
-        print(f"Loading Fan 2017 root depth from: {paths.root_depth_fan2017_data_path}")
-        _rd_data = pd.read_csv(paths.root_depth_fan2017_data_path)
-        _rd_keep = ["site_name"] + [c for c in _FAN2017_FEATURE_COLS if c in _rd_data.columns]
-        site_info = site_info.merge(_rd_data[_rd_keep], on="site_name", how="left")
-    else:
-        print(f"WARNING: Fan 2017 root depth file not found at {paths.root_depth_fan2017_data_path}")
-        for _col in _FAN2017_FEATURE_COLS:
-            site_info[_col] = np.nan
+    print(f"Loading Fan 2017 root depth from: {static_inputs['fan']}")
+    _rd_data = pd.read_csv(static_inputs["fan"])
+    _rd_keep = ["site_name"] + [c for c in _FAN2017_FEATURE_COLS if c in _rd_data.columns]
+    site_info = site_info.merge(_rd_data[_rd_keep], on="site_name", how="left")
+
+    # --- LOAD THE 1 KM FEATURES THAT HAD NO COLUMN BEFORE THE REBUILD ---
+    new_static, new_static_columns = load_new_static(static_inputs["new"], site_info["site_name"])
+    print(f"Loaded {len(new_static_columns)} new static columns from: {static_inputs['new']}")
 
     era5_data = pd.read_csv(paths.era5_discrete_data_path)
     # Avoid division by zero
@@ -1007,6 +1078,7 @@ def merge_sap_env_data_site(
                     _col: (curr_site_info[_col].values[0] if _col in curr_site_info.columns else np.nan)
                     for _col in _FAN2017_FEATURE_COLS
                 }
+                new_static_features = new_static_row(new_static, location_type)
                 temp_seasonality = curr_site_info["bio4"].values[0]
                 precip_seasonality = curr_site_info["bio15"].values[0]
 
@@ -1248,7 +1320,7 @@ def merge_sap_env_data_site(
                 # Site-aggregated plant metadata
                 for pm_key, pm_val in site_plant_meta.items():
                     target_df[pm_key] = pm_val
-                return target_df
+                return add_new_static(target_df, new_static_features)
 
             df_hourly = add_static_vars(df_hourly)
             df_hourly = df_hourly.sort_values("TIMESTAMP")
@@ -1380,26 +1452,7 @@ def merge_sap_env_data_site(
 
             # Define Static columns that should NOT be summed/min/maxed (just take first)
             static_prefixes = ["soil_", "biome", "pft", "site_name", "site_", "solar_TIMESTAMP"]
-            static_exact = [
-                "latitude",
-                "longitude",
-                "elevation",
-                "slope",
-                "aspect_sin",
-                "aspect_cos",
-                "mean_annual_temp",
-                "mean_annual_precip",
-                "temp_seasonality",
-                "precip_seasonality",
-                "canopy_height",
-                "stand_age",
-                "root_depth",
-                "infiltration_depth",
-                "deep_drainage",
-                "drainage_frequency",
-                "regolith_flush_rate",
-                "gw_residence_time",
-            ]
+            static_exact = static_exact_columns(new_static_columns)
             if plant_level:
                 # Tree metadata columns are static per tree — aggregate as "first"
                 static_prefixes.append("pl_")
@@ -1689,6 +1742,7 @@ def merge_sap_env_data_site(
                     "plant_level": plant_level,
                     "growing_season_only": growing_season_only,
                 },
+                "static_root": str(static_root),
                 "calibration_multipliers": {
                     "HD": FLO2019_HD_MULTIPLIER,
                     "CHD": FLO2019_CHD_MULTIPLIER,

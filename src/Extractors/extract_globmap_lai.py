@@ -270,10 +270,10 @@ if __name__ == '__main__':
     # --- Pre-run checks ---
     if not os.path.exists(SITES_FILE):
         print(f"FATAL ERROR: The sites file '{SITES_FILE}' was not found.")
-        exit()
+        raise SystemExit(1)   # bare exit() returns 0: a missing input looked clean
     if not os.path.exists(DATA_DIRECTORY):
         print(f"FATAL ERROR: The data directory '{DATA_DIRECTORY}' was not found.")
-        exit()
+        raise SystemExit(1)
 
     # --- Run the extraction process ---
     lai_results_df = extract_lai_from_files(SITES_FILE, DATA_DIRECTORY)

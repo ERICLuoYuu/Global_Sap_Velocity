@@ -398,8 +398,22 @@ if __name__ == "__main__":
         input_csv = r".\data\raw\0.1.5\0.1.5\csv\sapwood\site_info.csv"
         output_csv = r".\data\processed\stand_age_data.csv"
     
-    # Path to your MPI-BGC forest age file
-    NC_PATH = r".\data\raw\grided\stand_age\2026113115224222_BGIForestAgeMPIBGC1.0.0.nc"
+    # Path to the MPI-BGC forest age NetCDF.  Resolved from the configured
+    # data root and matched by glob: the hardcoded Windows path this replaced
+    # could not resolve on Linux, and pinned one release's filename.
+    _stand_age_dir = (
+        Path(paths.raw_grided_root) / "stand_age"
+        if USE_PATH_CONFIG
+        else Path("./data/raw/grided/stand_age")
+    )
+    _nc_candidates = sorted(_stand_age_dir.glob("*BGIForestAge*.nc"))
+    if not _nc_candidates:
+        print(f"\nERROR: no *BGIForestAge*.nc found in {_stand_age_dir}")
+        sys.exit(1)
+    if len(_nc_candidates) > 1:
+        print(f"NOTE: {len(_nc_candidates)} forest-age files found; "
+              f"using {_nc_candidates[0].name}")
+    NC_PATH = str(_nc_candidates[0])
     
     # Tree cover threshold to use:
     # - TC000: No minimum tree cover (most inclusive)

@@ -26,6 +26,7 @@ import pandas as pd
 from sklearn.preprocessing import scale
 from tqdm import tqdm
 import rasterio
+from rasterio.windows import Window
 import logging
 import netCDF4
 from urllib.parse import urlparse, urljoin
@@ -121,26 +122,42 @@ BIO_DESCRIPTIONS = {
 }
 
 # Scale factors for bioclimatic variables
+# The download below is `wc2.1_{resolution}_bio_{n}.tif` -- WorldClim **v2.1**,
+# whose bioclimatic layers are float32 in NATIVE units: degC for the
+# temperature variables, mm for precipitation, percent for isothermality.  The
+# `degC * 10` integer encoding belonged to WorldClim **v1**, and applying its
+# 0.1 factors to v2.1 rasters made every temperature variable 10x too small.
+#
+# Measured over the 226-site corpus before the correction: bio1 spanned
+# -1.159 .. 2.837 (x10 -> -11.6 .. 28.4 degC, boreal to tropical), bio3
+# 1.58 .. 9.07 for a quantity defined on 0..100, bio5 1.32 .. 3.95 for the
+# maximum temperature of the warmest month.  bio1 reaches the model as
+# `mean_annual_temp`, which the global prediction pipeline supplies in native
+# degC -- so the mismatch was a 10x train/serve skew, not only a unit label.
+#
+# bio4 keeps factor 1: WorldClim publishes temperature seasonality as the
+# standard deviation x 100, and that is the conventional form.  Divide by 100
+# downstream if degC are wanted.
 BIO_SCALE_FACTORS = {
-    1: 0.1,   # Annual Mean Temperature (°C * 10)
-    2: 0.1,   # Mean Diurnal Range (°C * 10)
-    3: 0.1,   # Isothermality (unitless * 100)
-    4: 1,     # Temperature Seasonality (std dev * 100)
-    5: 0.1,   # Max Temperature of Warmest Month (°C * 10)
-    6: 0.1,   # Min Temperature of Coldest Month (°C * 10)
-    7: 0.1,   # Temperature Annual Range (°C * 10)
-    8: 0.1,   # Mean Temperature of Wettest Quarter (°C * 10)
-    9: 0.1,   # Mean Temperature of Driest Quarter (°C * 10)
-    10: 0.1,  # Mean Temperature of Warmest Quarter (°C * 10)
-    11: 0.1,  # Mean Temperature of Coldest Quarter (°C * 10)
-    12: 1,    # Annual Precipitation (mm)
-    13: 1,    # Precipitation of Wettest Month (mm)
-    14: 1,    # Precipitation of Driest Month (mm)
-    15: 1,    # Precipitation Seasonality (Coefficient of Variation)
-    16: 1,    # Precipitation of Wettest Quarter (mm)
-    17: 1,    # Precipitation of Driest Quarter (mm)
-    18: 1,    # Precipitation of Warmest Quarter (mm)
-    19: 1,    # Precipitation of Coldest Quarter (mm)
+    1: 1,   # Annual Mean Temperature (°C)
+    2: 1,   # Mean Diurnal Range (°C)
+    3: 1,   # Isothermality (percent, 0-100)
+    4: 1,   # Temperature Seasonality (std dev × 100, as published)
+    5: 1,   # Max Temperature of Warmest Month (°C)
+    6: 1,   # Min Temperature of Coldest Month (°C)
+    7: 1,   # Temperature Annual Range (°C)
+    8: 1,   # Mean Temperature of Wettest Quarter (°C)
+    9: 1,   # Mean Temperature of Driest Quarter (°C)
+    10: 1,  # Mean Temperature of Warmest Quarter (°C)
+    11: 1,  # Mean Temperature of Coldest Quarter (°C)
+    12: 1,  # Annual Precipitation (mm)
+    13: 1,  # Precipitation of Wettest Month (mm)
+    14: 1,  # Precipitation of Driest Month (mm)
+    15: 1,  # Precipitation Seasonality (Coefficient of Variation)
+    16: 1,  # Precipitation of Wettest Quarter (mm)
+    17: 1,  # Precipitation of Driest Quarter (mm)
+    18: 1,  # Precipitation of Warmest Quarter (mm)
+    19: 1,  # Precipitation of Coldest Quarter (mm)
 }
 
 def download_file(url, output_path, desc=None, session=None):
@@ -398,39 +415,63 @@ KOPPEN_SOURCES = [
 ]
 
 # Köppen climate classification codes and descriptions
+# Beck et al. (2018), Sci. Data 5:180214 -- the legend of
+# Beck_KG_V1_present_*.tif, which is what download_koppen_data fetches.  THIRTY
+# classes, 1..30, with 0 for ocean; the raster's distinct values are exactly
+# 0..30, which is the check that settles it.
+#
+# The previous version of this dict inserted a 31st class, "As - Tropical
+# savanna, dry summer", at code 4.  Beck's A group is Af/Am/Aw only, so every
+# label from 4 upward named the class BELOW the one the pixel actually held.
+# 216 of the 226 corpus sites were relabelled when this was corrected.  Four
+# cases show it plainly:
+#   code 11  CHN_YUN_YUN (23.9 N, coastal Fujian)  "Csc", a rare alpine
+#            class, for what is really Cwa -- subtropical, dry winter, hot summer
+#   code 15  GBR_DEV_*   (56.0 N, Scotland)        "Cfa", hot summer, for Cfb
+#   code 27  RUS_CHE_*   (68.7 N, annual mean -11.6 C)  "Dfb", WARM summer,
+#            for Dfc -- the cold-summer subarctic class
+#   code 29  ITA_MAT_S21 / ITA_RUN_N20 (46.7 N Alps, annual mean 0.5-0.9 C)
+#            and ARG_MAZ (51.6 S)  "Dfd", a Siberian-winter class, for ET,
+#            polar tundra -- which is what alpine treeline actually is
+#: Beck's rasters declare ``nodata=None`` and encode ocean as 0.  Because the
+#: validity test in ``extract_raster_value`` short-circuits on ``nodata is None``,
+#: a raster that declares nothing accepts everything -- so the sentinel has to be
+#: named here and passed in explicitly.  Three corpus sites sat on this value with
+#: land 0.93 km away, one pixel.
+KOPPEN_OCEAN_CODE = 0
+
 KOPPEN_CLASSES = {
     0: "Ocean",
     1: "Af - Tropical rainforest",
     2: "Am - Tropical monsoon",
-    3: "Aw - Tropical savanna, dry winter",
-    4: "As - Tropical savanna, dry summer",
-    5: "BWh - Arid, desert, hot",
-    6: "BWk - Arid, desert, cold",
-    7: "BSh - Arid, steppe, hot",
-    8: "BSk - Arid, steppe, cold",
-    9: "Csa - Temperate, dry and hot summer",
-    10: "Csb - Temperate, dry and warm summer",
-    11: "Csc - Temperate, dry and cold summer",
-    12: "Cwa - Temperate, dry winter and hot summer",
-    13: "Cwb - Temperate, dry winter and warm summer",
-    14: "Cwc - Temperate, dry winter and cold summer",
-    15: "Cfa - Temperate, no dry season and hot summer",
-    16: "Cfb - Temperate, no dry season and warm summer",
-    17: "Cfc - Temperate, no dry season and cold summer",
-    18: "Dsa - Cold, dry and hot summer",
-    19: "Dsb - Cold, dry and warm summer",
-    20: "Dsc - Cold, dry and cold summer",
-    21: "Dsd - Cold, dry and very cold winter",
-    22: "Dwa - Cold, dry winter and hot summer",
-    23: "Dwb - Cold, dry winter and warm summer",
-    24: "Dwc - Cold, dry winter and cold summer",
-    25: "Dwd - Cold, dry and very cold winter",
-    26: "Dfa - Cold, no dry season and hot summer",
-    27: "Dfb - Cold, no dry season and warm summer",
-    28: "Dfc - Cold, no dry season and cold summer",
-    29: "Dfd - Cold, no dry season and very cold winter",
-    30: "ET - Polar, tundra",
-    31: "EF - Polar, frost",
+    3: "Aw - Tropical savanna",
+    4: "BWh - Arid, desert, hot",
+    5: "BWk - Arid, desert, cold",
+    6: "BSh - Arid, steppe, hot",
+    7: "BSk - Arid, steppe, cold",
+    8: "Csa - Temperate, dry and hot summer",
+    9: "Csb - Temperate, dry and warm summer",
+    10: "Csc - Temperate, dry and cold summer",
+    11: "Cwa - Temperate, dry winter and hot summer",
+    12: "Cwb - Temperate, dry winter and warm summer",
+    13: "Cwc - Temperate, dry winter and cold summer",
+    14: "Cfa - Temperate, no dry season and hot summer",
+    15: "Cfb - Temperate, no dry season and warm summer",
+    16: "Cfc - Temperate, no dry season and cold summer",
+    17: "Dsa - Cold, dry and hot summer",
+    18: "Dsb - Cold, dry and warm summer",
+    19: "Dsc - Cold, dry and cold summer",
+    20: "Dsd - Cold, dry and very cold winter",
+    21: "Dwa - Cold, dry winter and hot summer",
+    22: "Dwb - Cold, dry winter and warm summer",
+    23: "Dwc - Cold, dry winter and cold summer",
+    24: "Dwd - Cold, dry winter and very cold winter",
+    25: "Dfa - Cold, no dry season and hot summer",
+    26: "Dfb - Cold, no dry season and warm summer",
+    27: "Dfc - Cold, no dry season and cold summer",
+    28: "Dfd - Cold, no dry season and very cold winter",
+    29: "ET - Polar, tundra",
+    30: "EF - Polar, frost",
 }
 
 
@@ -566,11 +607,16 @@ def get_tile_for_coordinates(lat, lon):
 # Common Extraction Functions
 #==============================
 
-def extract_raster_value(file_path, lat, lon, search_radius=3):
+#==============================
+# Main Processing Function
+#==============================
+
+def extract_raster_value(file_path, lat, lon, search_radius=3, sentinel_values=None):
     """
     Extract a value from a raster at the specified coordinates.
-    If the exact point has no data, search neighboring pixels.
-    
+    If the exact point has no data, return the NEAREST valid pixel within
+    search_radius.
+
     Parameters:
     -----------
     file_path : str
@@ -581,67 +627,94 @@ def extract_raster_value(file_path, lat, lon, search_radius=3):
         Longitude in decimal degrees
     search_radius : int
         Radius (in pixels) to search for valid data if the exact point is invalid
-    
+    sentinel_values : iterable, optional
+        Values that mean "no data" even though the raster does not DECLARE them
+        as nodata. Beck's Koppen rasters ship ``nodata=None`` and encode ocean as
+        0; the validity test below short-circuits on ``nodata is None``, so
+        without this a raster that declares nothing accepts everything and the
+        sea is returned as a climate class. Three corpus sites read the sea that
+        way, with land one pixel (0.93 km) off.
+
     Returns:
     --------
     float or int
-        Extracted value at the coordinates (or None if no valid data found)
+        Value at the coordinates, or the nearest valid neighbour, or None.
     """
     if not os.path.exists(file_path):
         logger.error(f"Raster file does not exist: {file_path}")
         return None
-    
+
     try:
-        # Open the raster file
         with rasterio.open(file_path) as src:
-            # Convert coordinates to pixel indices
             py, px = rasterio.transform.rowcol(src.transform, lon, lat)
-            
-            # Check if the pixel is within the raster bounds
-            if (0 <= py < src.height and 0 <= px < src.width):
-                # Read the value at the pixel
-                value = src.read(1)[py, px]
-                
-                # Check if the value is valid (not NoData)
-                if src.nodata is None or value != src.nodata:
-                    return value
-            
-            # If we reach here, either the point is outside the raster or the value is NoData
-            # Search for valid values in neighboring pixels
-            logger.debug(f"No valid data at ({lat}, {lon}) in {os.path.basename(file_path)}. Searching neighboring pixels...")
-            
-            # Expanding search in a spiral pattern
-            for r in range(1, search_radius + 1):
-                # Check all cells in a square with radius r around the target
-                for dy in range(-r, r + 1):
-                    for dx in range(-r, r + 1):
-                        # Skip cells that are not on the edge of the square
-                        if abs(dy) < r and abs(dx) < r:
-                            continue
-                        
-                        ny, nx = py + dy, px + dx
-                        
-                        # Check if neighbor is within raster bounds
-                        if (0 <= ny < src.height and 0 <= nx < src.width):
-                            # Read value at neighbor
-                            neighbor_value = src.read(1)[ny, nx]
-                            
-                            # Check if neighbor value is valid
-                            if src.nodata is None or neighbor_value != src.nodata:
-                                logger.debug(f"Found valid value at offset ({dy}, {dx}) from target pixel")
-                                return neighbor_value
-            
-            # If no valid value found after searching
-            logger.debug(f"No valid data found within {search_radius} pixel radius in {os.path.basename(file_path)}")
-            return None
-            
+
+            invalid = set()
+            if src.nodata is not None:
+                invalid.add(src.nodata)
+            if sentinel_values:
+                invalid.update(sentinel_values)
+
+            def is_valid(value):
+                # NaN never equals anything, a NaN nodata included, so it has to
+                # be rejected explicitly rather than by comparison.
+                if value != value:
+                    return False
+                return not any(value == bad for bad in invalid)
+
+            # ONE windowed read covering the centre pixel and its whole search
+            # neighbourhood. The previous implementation called src.read(1) --
+            # the ENTIRE band -- for the centre pixel and again for every
+            # neighbour probe: 933 MB and 0.687 s per lookup on the 0.0083 degree
+            # Koppen raster against 0.003 s windowed, repeated up to 48 times.
+            row_start = max(py - search_radius, 0)
+            row_stop = min(py + search_radius + 1, src.height)
+            col_start = max(px - search_radius, 0)
+            col_stop = min(px + search_radius + 1, src.width)
+            if row_stop <= row_start or col_stop <= col_start:
+                logger.debug(
+                    f"({lat}, {lon}) falls outside {os.path.basename(file_path)}"
+                )
+                return None
+
+            block = src.read(
+                1,
+                window=Window(col_start, row_start, col_stop - col_start, row_stop - row_start),
+            )
+
+            # Nearest by actual distance, with the centre pixel at distance 0 so
+            # it wins whenever it is valid. The previous loop scanned dy then dx
+            # from -r and returned the FIRST hit, which is the ring's CORNER
+            # (distance r*sqrt(2)) before its edge (distance r): at CHN_YUN_YUN
+            # it took the pixel at (-1,-1) while valid land sat at (0,-1).
+            best_distance = None
+            best_value = None
+            for ny in range(row_start, row_stop):
+                for nx in range(col_start, col_stop):
+                    value = block[ny - row_start, nx - col_start]
+                    if not is_valid(value):
+                        continue
+                    distance = math.hypot(ny - py, nx - px)
+                    if best_distance is None or distance < best_distance:
+                        best_distance = distance
+                        best_value = value
+
+            if best_value is None:
+                logger.debug(
+                    f"No valid data within {search_radius} pixels of ({lat}, {lon}) "
+                    f"in {os.path.basename(file_path)}"
+                )
+                return None
+            if best_distance > 0:
+                logger.debug(
+                    f"No valid data at ({lat}, {lon}) in {os.path.basename(file_path)}; "
+                    f"using the nearest valid pixel, {best_distance:.2f} px away"
+                )
+            return best_value
+
     except Exception as e:
         logger.error(f"Error extracting value from {os.path.basename(file_path)}: {e}")
         return None
 
-#==============================
-# Main Processing Function
-#==============================
 
 def extract_environmental_data(csv_path, output_dir="env_data", worldclim_data_dir="worldclim_data", koppen_data_dir="koppen_data"):
     """
@@ -737,20 +810,39 @@ def extract_environmental_data(csv_path, output_dir="env_data", worldclim_data_d
         
         # Extract values for each site
         logger.info(f"Extracting Köppen climate classification...")
+        unresolved = []
         for i, row in tqdm(df.iterrows(), total=len(df), desc="Köppen Classification"):
+            site = row.get('site_name', i)
             try:
                 lat, lon = row['lat'], row['lon']
-                value = extract_raster_value(koppen_file, lat, lon)
-                
-                if value is not None:
-                    # Store the class code
-                    df.at[i, 'koppen_class'] = int(value)
-                    
-                    # Store the class name
-                    class_name = KOPPEN_CLASSES.get(int(value), "Unknown")
-                    df.at[i, 'koppen_name'] = class_name
+                # The ocean sentinel must be named: the raster declares
+                # nodata=None, so without this it is accepted as a climate class.
+                value = extract_raster_value(
+                    koppen_file, lat, lon, sentinel_values=(KOPPEN_OCEAN_CODE,)
+                )
+
+                if value is None:
+                    unresolved.append((site, "no valid pixel within the search radius"))
+                    continue
+
+                code = int(value)
+                if code == KOPPEN_OCEAN_CODE or code not in KOPPEN_CLASSES:
+                    # A code outside the legend is a failure of this extractor's
+                    # vocabulary, not a property of the site. Writing "Unknown"
+                    # into the corpus buries it in a column nobody reads.
+                    unresolved.append((site, f"code {code} is not a land class"))
+                    continue
+
+                df.at[i, 'koppen_class'] = code
+                df.at[i, 'koppen_name'] = KOPPEN_CLASSES[code]
             except Exception as e:
-                logger.error(f"Error processing Köppen classification for site {i}: {e}")
+                unresolved.append((site, repr(e)))
+
+        if unresolved:
+            raise ValueError(
+                f"Köppen classification failed at {len(unresolved)} of {len(df)} sites: "
+                f"{unresolved[:10]}"
+            )
     
 
     

@@ -32,80 +32,54 @@ elevation = ee.Image("projects/sat-io/open-datasets/ASTER/GDEM")
 slope = ee.Terrain.slope(elevation)
 aspect = ee.Terrain.aspect(elevation)
 
+# Aspect is read from ONE pixel, not averaged over a buffer, and the logic for
+# that lives in src/Extractors/terrain_aspect.py so this extractor and the data
+# migration that backfilled the corpus cannot drift apart. See that module for
+# why a mean of aspect degrees is meaningless and why the scale matters.
+from src.Extractors.terrain_aspect import (  # noqa: E402
+    assert_dem_scale,
+    native_scale,
+    terrain_attributes_at_point,
+    terrain_bands,
+)
+
+# Slope and aspect as one image, so a single request describes a single pixel.
+terrain = terrain_bands(elevation)
+
+# The DEM's own scale, kept server-side. A rounded copy is a DIFFERENT grid, not
+# the same one: at FRA_FON, asking for 30.922081 m instead of the DEM's
+# 30.922080776 m returns slope 6.61 deg / aspect 192.16 deg where the exact value
+# gives 3.96 / 200.66. Earth Engine builds terrain products in the projection you
+# ask for, so the scale is not a pixel selector -- it is the grid.
+dem_scale = native_scale(elevation)
+
+# Alarm if the asset has been regridded under the documented constant.
+print(f"ASTER GDEM nominal scale: {assert_dem_scale(elevation):.9f} m")
+
 # Function to standardize aspect values
-def standardize_aspect(aspect_value, slope_value):
-    """
-    Standardize aspect values to handle the circular nature of aspect data.
-    Account for flat terrain (slope = 0) where aspect is undefined.
-    
-    Parameters:
-    -----------
-    aspect_value : float or None
-        Raw aspect value in degrees (0-360)
-    slope_value : float or None
-        Slope value in degrees
-        
-    Returns:
-    --------
-    dict
-        Dictionary containing standardized_aspect, aspect_category, sin_aspect, cos_aspect
-    """
-    # For flat terrain (slope = 0 or very close to 0), aspect is undefined
-    if slope_value is None or np.isnan(slope_value) or abs(slope_value) < 0.1:
-        return {
-            'aspect_standardized': None,
-            'aspect_category': None,
-            'aspect_sin': 0.0,
-            'aspect_cos': 0.0
-        }
-    
-    if aspect_value is None or np.isnan(aspect_value):
-        return {
-            'aspect_standardized': None,
-            'aspect_category': None,
-            'aspect_sin': None,
-            'aspect_cos': None
-        }
-    
-    # Ensure aspect is in 0-359.99 range (360 becomes 0)
-    standardized_aspect = aspect_value % 360
-    
-    # Calculate the sine and cosine components for circular analysis
-    sin_aspect = np.sin(np.radians(aspect_value))
-    cos_aspect = np.cos(np.radians(aspect_value))
-    
-    # Convert to compass direction categories
-    if standardized_aspect >= 337.5 or standardized_aspect < 22.5:
-        category = "N"
-    elif standardized_aspect >= 22.5 and standardized_aspect < 67.5:
-        category = "NE"
-    elif standardized_aspect >= 67.5 and standardized_aspect < 112.5:
-        category = "E"
-    elif standardized_aspect >= 112.5 and standardized_aspect < 157.5:
-        category = "SE"
-    elif standardized_aspect >= 157.5 and standardized_aspect < 202.5:
-        category = "S"
-    elif standardized_aspect >= 202.5 and standardized_aspect < 247.5:
-        category = "SW"
-    elif standardized_aspect >= 247.5 and standardized_aspect < 292.5:
-        category = "W"
-    elif standardized_aspect >= 292.5 and standardized_aspect < 337.5:
-        category = "NW"
-    else:
-        category = None
-    
-    return {
-        'aspect_standardized': standardized_aspect,
-        'aspect_category': category,
-        'aspect_sin': sin_aspect,
-        'aspect_cos': cos_aspect
-    }
-
-
 def extract_terrain_attributes(lon, lat, buffer_size=250):
     """
     Extract terrain attributes (elevation, slope, aspect) at a given location
-    
+
+    elevation and slope are 250 m buffered MEANS: neither is circular, so a mean
+    is a defensible summary of the stand around the site.
+
+    ASPECT is not. It is circular, so an arithmetic mean of degrees is meaningless
+    across the 0/360 seam -- pixels reading 355, 0 and 5 average to 120, and over
+    the 226-site corpus that artefact put 106 sites in the "S" sector and none in
+    "N". Averaging is also the wrong operation on its own terms: the median vector
+    strength over these 250 m windows is 0.277, so most windows have no coherent
+    direction to average. Aspect therefore comes from the single DEM pixel
+    containing the site, sampled at the DEM's native scale, and the flat-terrain
+    guard is judged on THAT pixel's slope -- reported as slope_deg_centre so the
+    decision is auditable. See src/Extractors/terrain_aspect.py.
+
+    Note that slope_deg and slope_deg_centre are not directly comparable:
+    slope_deg is the buffered mean at scale=30, kept unchanged for continuity with
+    the existing corpus, and 30 m is FINER than the DEM's 30.922081 m so that
+    request resamples. That is the same defect class the aspect fix removes, left
+    in place here because moving elevation_m and slope_deg is a separate change.
+
     Parameters:
     -----------
     lon : float
@@ -113,62 +87,57 @@ def extract_terrain_attributes(lon, lat, buffer_size=250):
     lat : float
         Latitude in decimal degrees
     buffer_size : float
-        Buffer size in meters for spatial averaging (default: 250m)
-    
+        Buffer size in meters for spatial averaging of elevation and slope
+        (default: 250m). Aspect ignores it.
+
     Returns:
     --------
     dict
         Dictionary containing all terrain attributes
     """
     try:
-        # Create a point geometry with buffer
-        point = ee.Geometry.Point([lon, lat]).buffer(buffer_size)
+        # Buffered region for the non-circular means
+        region = ee.Geometry.Point([lon, lat]).buffer(buffer_size)
 
         # Extract elevation
         elevation_result = elevation.reduceRegion(
             reducer=ee.Reducer.mean(),
-            geometry=point,
+            geometry=region,
             scale=30,  # ASTER GDEM is 30m resolution
             maxPixels=1e9
         )
         elev = elevation_result.get('b1').getInfo()
-        
+
         # Extract slope
         slope_result = slope.reduceRegion(
             reducer=ee.Reducer.mean(),
-            geometry=point,
+            geometry=region,
             scale=30,
             maxPixels=1e9
         )
         slope_value = slope_result.get('slope').getInfo()
-        
-        # Extract aspect
-        aspect_result = aspect.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=point,
-            scale=30,
-            maxPixels=1e9
-        )
-        aspect_value = aspect_result.get('aspect').getInfo()
-        
-        # Standardize aspect
-        aspect_info = standardize_aspect(aspect_value, slope_value)
-        
+
+        # Extract aspect from the site's own pixel, with its own slope for the
+        # flat-terrain guard, and standardize -- one shared code path.
+        aspect_info = terrain_attributes_at_point(terrain, 'site', lon, lat, dem_scale)
+
         return {
             'elevation_m': elev,
             'slope_deg': slope_value,
-            'aspect_deg': aspect_value,
+            'slope_deg_centre': aspect_info['slope_deg_centre'],
+            'aspect_deg': aspect_info['aspect_deg'],
             'aspect_standardized': aspect_info['aspect_standardized'],
             'aspect_category': aspect_info['aspect_category'],
             'aspect_sin': aspect_info['aspect_sin'],
             'aspect_cos': aspect_info['aspect_cos']
         }
-    
+
     except Exception as e:
         print(f"Error extracting terrain attributes for ({lon}, {lat}): {e}")
         return {
             'elevation_m': None,
             'slope_deg': None,
+            'slope_deg_centre': None,
             'aspect_deg': None,
             'aspect_standardized': None,
             'aspect_category': None,

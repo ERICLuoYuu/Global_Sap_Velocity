@@ -48,7 +48,7 @@ COLUMNS = {
     "fan": FAN_COLUMNS,
     "han": ["root_depth_han", "root_depth_han_type"],
     "yang": ["wood_density"],
-    "lusk": ["root_depth_lusk", "wood_density_lusk"],
+    "lusk": ["root_depth_lusk", "wood_density_lusk", "wood_density_lusk_cov", "wood_density_lusk_aoa"],
     "liang": ["tree_richness_per_ha"],
     "lesiv": ["fm_share_11", "fm_dominant"],
     "cci": ["agb_mg_ha"],
@@ -401,3 +401,18 @@ def test_main_returns_nonzero_on_a_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(assemble_module.RunContext, "for_scale", classmethod(lambda cls, scale, project: context))
 
     assert main(["--scale", "scale"]) == 1
+
+
+def test_lusk_quality_bands_stay_out_of_the_merge_in_their_own_file(built):
+    _, output = built
+
+    assert _header(output / "lusk_quality.csv").split(",") == [
+        "site_name",
+        "wood_density_lusk_cov",
+        "wood_density_lusk_aoa",
+    ]
+    assert not [
+        column
+        for column in _header(output / "new_static_features.csv").split(",")
+        if column.endswith(("_cov", "_aoa"))
+    ]

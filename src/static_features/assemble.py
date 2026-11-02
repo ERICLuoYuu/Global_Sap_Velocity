@@ -80,6 +80,7 @@ FAN_COLUMNS = [
 ]
 NEW_PRODUCTS = ("han", "yang", "lusk", "liang", "lesiv", "cci", "gami", "tree_cover", "evi", "phenology")
 NEW_FROM_OLD_PRODUCTS = ("canopy_height_p95_m", "land_share")
+LUSK_QUALITY_SUFFIXES = ("_cov", "_aoa")
 NOTES = {
     "slope_deg_centre": "Empty: a 1 km cell has no centre-pixel slope, so the column stays for the merge's header only.",
     "aspect_deg": "aspect_deg and aspect_standardized are the bearing of the mean aspect vector, empty where it is (0, 0).",
@@ -155,8 +156,20 @@ def _soil_table(sites: pd.DataFrame, values: pd.DataFrame) -> pd.DataFrame:
 
 
 def _new_table(parts: dict[str, ProductResult], values: pd.DataFrame) -> pd.DataFrame:
-    columns = [column for product in NEW_PRODUCTS if product in parts for column in parts[product].values.columns]
+    columns = [
+        column
+        for product in NEW_PRODUCTS
+        if product in parts
+        for column in parts[product].values.columns
+        if not (product == "lusk" and column.endswith(LUSK_QUALITY_SUFFIXES))
+    ]
     return _select(values, [*columns, *NEW_FROM_OLD_PRODUCTS], "new_static_features.csv").reset_index()
+
+
+def _lusk_quality_table(parts: dict[str, ProductResult], values: pd.DataFrame) -> pd.DataFrame:
+    """How far to trust each trait, kept out of the merge: it describes the Lusk maps, not the site."""
+    columns = [column for column in parts["lusk"].values.columns if column.endswith(LUSK_QUALITY_SUFFIXES)]
+    return _select(values, columns, "lusk_quality.csv").reset_index()
 
 
 def _quality_table(parts: dict[str, ProductResult], index: pd.Index) -> pd.DataFrame:
@@ -186,6 +199,8 @@ def _tables(sites: pd.DataFrame, parts: dict[str, ProductResult]) -> dict[str, p
         "static_quality": _quality_table(parts, index),
         "static_features_by_year": _long_table(parts),
     }
+    if "lusk" in parts:
+        tables["lusk_quality"] = _lusk_quality_table(parts, values)
     for part in parts.values():
         tables.update(part.extras)
     return tables

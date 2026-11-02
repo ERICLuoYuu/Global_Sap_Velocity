@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import textwrap
 
 import pandas as pd
@@ -198,3 +199,10 @@ def test_for_scale_reads_the_real_corpus():
     assert context.output_root.parts[-2:] == ("static_1km", "sapwood_combined")
     dev = context.sites.set_index("site_name").loc["GBR_DEV_CON"]
     assert (dev["row"], dev["col"]) == (4076, 21153)
+
+
+@pytest.mark.filterwarnings("ignore:numpy.ndarray size changed")
+def test_every_registered_product_imports_and_can_extract():
+    for name, module_path in run.PRODUCTS.items():
+        module = importlib.import_module(module_path)
+        assert callable(module.extract), name

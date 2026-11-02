@@ -204,7 +204,7 @@ def write_part(result: ProductResult, parts_root: Path, site_hash: str) -> Path:
     return final
 
 
-def _read_table(path: Path, **kwargs: Any) -> pd.DataFrame:
+def read_table(path: Path, **kwargs: Any) -> pd.DataFrame:
     # Only a blank is missing, so a literal "NA" stays a value; round_trip keeps floats exact.
     return pd.read_csv(
         path, float_precision="round_trip", keep_default_na=False, na_values=[""], low_memory=False, **kwargs
@@ -216,13 +216,13 @@ def read_part(parts_root: Path, product: str) -> tuple[ProductResult, str]:
     if not (directory / "site_hash.txt").exists():
         raise ExtractionFailure(f"{product}: no part at {directory}")
     by_year_path = directory / "by_year.csv"
-    extras = {path.stem: _read_table(path) for path in sorted(directory.glob("*.csv")) if path.stem not in PART_FILES}
+    extras = {path.stem: read_table(path) for path in sorted(directory.glob("*.csv")) if path.stem not in PART_FILES}
     result = ProductResult(
         product=product,
-        values=_read_table(directory / "values.csv", index_col="site_name"),
-        status=_read_table(directory / "status.csv", index_col="site_name"),
-        coverage=_read_table(directory / "coverage.csv", index_col="site_name"),
-        by_year=_read_table(by_year_path) if by_year_path.exists() else None,
+        values=read_table(directory / "values.csv", index_col="site_name"),
+        status=read_table(directory / "status.csv", index_col="site_name"),
+        coverage=read_table(directory / "coverage.csv", index_col="site_name"),
+        by_year=read_table(by_year_path) if by_year_path.exists() else None,
         extras=extras,
         provenance=json.loads((directory / "provenance.json").read_text(encoding="utf-8")),
     )

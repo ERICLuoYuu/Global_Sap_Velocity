@@ -7,11 +7,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
-from src.static_features.results import NEIGHBOUR, NO_DATA, OK
+from src.static_features.results import NEIGHBOUR, NO_DATA, OK, ExtractionFailure
 
 # Pixel coordinates carry rounding of about 1e-10 at 200,000 pixels, and a centre can sit exactly on a cell
 # edge (GAMI's 1125 pixels per degree does at every fourth edge), so near-integers count as integers.
 EDGE_TOLERANCE_PX = 1e-9
+# A float32 axis holds 89.995 to within 3e-6, so a hundredth of a 0.01 degree pixel tells rounding from a shift.
+AXIS_TOLERANCE_PX = 0.01
 
 ReadBlock = Callable[[int, int, int, int], np.ndarray]
 
@@ -107,3 +109,22 @@ def tiff_reader(src, band: int) -> ReadBlock:
         return src.read(band, window=((row_start, row_stop), (col_start, col_stop)))
 
     return read_block
+
+
+def pixel_index(coordinate: float, origin: float, step: float, size: int) -> int:
+    """Index of the pixel holding a coordinate. origin is the outer edge of pixel 0; the far edge clamps into the last pixel."""
+    position = (coordinate - origin) / step  # NaN fails the comparison below
+    if not 0 <= position <= size:
+        raise ValueError(f"coordinate {coordinate} is outside a grid of {size} pixels from {origin} by {step}")
+    return min(math.floor(position), size - 1)
+
+
+def require_global_axes(product: str, latitude: np.ndarray, longitude: np.ndarray) -> None:
+    """Stop unless the coordinates are the pixel centres of a global grid, north first and west first."""
+    for name, axis, start, end in (("latitude", latitude, 90.0, -90.0), ("longitude", longitude, -180.0, 180.0)):
+        step = (end - start) / axis.size
+        first, last = start + step / 2, end - step / 2
+        if max(abs(axis[0] - first), abs(axis[-1] - last)) > AXIS_TOLERANCE_PX * abs(step):
+            raise ExtractionFailure(
+                f"{product}: {name} runs from {axis[0]} to {axis[-1]}, expected {first} to {last}"
+            )

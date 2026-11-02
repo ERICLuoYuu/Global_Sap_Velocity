@@ -4,8 +4,15 @@ import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import from_origin
-from src.static_features.rasters import PixelHit, centred_span, pixel_with_reach, tiff_reader
-from src.static_features.results import NEIGHBOUR, NO_DATA, OK
+from src.static_features.rasters import (
+    PixelHit,
+    centred_span,
+    pixel_index,
+    pixel_with_reach,
+    require_global_axes,
+    tiff_reader,
+)
+from src.static_features.results import NEIGHBOUR, NO_DATA, OK, ExtractionFailure
 
 
 def _grid(points, shape=(7, 7)):
@@ -138,3 +145,37 @@ def test_tiff_reader_reads_the_requested_window_of_the_requested_band(tmp_path):
     with rasterio.open(path) as src:
         np.testing.assert_array_equal(tiff_reader(src, 1)(1, 3, 2, 4), [[6, 7], [10, 11]])
         np.testing.assert_array_equal(tiff_reader(src, 2)(0, 1, 0, 2), [[100, 101]])
+
+
+def test_pixel_index_hand_computed():
+    assert pixel_index(51.5, 90.0, -0.05, 3600) == 770
+    assert pixel_index(10.25, -180.0, 0.05, 7200) == 3805
+    assert pixel_index(-90.0, 90.0, -0.05, 3600) == 3599  # the far edge clamps into the last pixel
+    assert pixel_index(180.0, -180.0, 0.05, 7200) == 7199
+
+
+def test_pixel_index_refuses_a_coordinate_outside_the_grid():
+    with pytest.raises(ValueError):
+        pixel_index(91.0, 90.0, -0.05, 3600)
+    with pytest.raises(ValueError):
+        pixel_index(float("nan"), 90.0, -0.05, 3600)
+
+
+def test_require_global_axes_accepts_pixel_centres():
+    latitude = 90.0 - (np.arange(18) + 0.5) * 10.0
+    longitude = -180.0 + (np.arange(36) + 0.5) * 10.0
+    require_global_axes("p", latitude, longitude)
+
+
+def test_require_global_axes_refuses_south_first():
+    latitude = -90.0 + (np.arange(18) + 0.5) * 10.0
+    longitude = -180.0 + (np.arange(36) + 0.5) * 10.0
+    with pytest.raises(ExtractionFailure, match="p: latitude"):
+        require_global_axes("p", latitude, longitude)
+
+
+def test_require_global_axes_refuses_a_half_pixel_shift():
+    latitude = 90.0 - (np.arange(18) + 0.5) * 10.0
+    longitude = -180.0 + np.arange(36) * 10.0
+    with pytest.raises(ExtractionFailure, match="p: longitude"):
+        require_global_axes("p", latitude, longitude)

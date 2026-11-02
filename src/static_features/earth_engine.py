@@ -62,7 +62,7 @@ def with_retries(
     raise ExtractionFailure(f"{label}: failed after {attempts} attempts: {last_error}") from last_error
 
 
-def _feature_rows(reply: dict) -> list[dict]:
+def feature_rows(reply: dict) -> list[dict]:
     features = reply.get("features")
     if features is None:
         raise ShortReply("reply holds no features")
@@ -104,7 +104,7 @@ def cells_from_reply(
     if unpaired:
         raise ValueError(f"values cannot be checked without their counts: {unpaired}")
     by_site: dict[str, dict] = {}
-    for properties in _feature_rows(reply):
+    for properties in feature_rows(reply):
         name = str(properties.get("site_name"))
         if name in by_site:
             raise ShortReply(f"reply repeats site {name}")
@@ -116,7 +116,7 @@ def cells_from_reply(
 
 def pixels_from_reply(reply: dict, site_names: Sequence[str], columns: Sequence[str]) -> pd.DataFrame:
     """One row per pixel. No site may come back without pixels, and every band must hold a value."""
-    rows = _feature_rows(reply)
+    rows = feature_rows(reply)
     _check_sites({str(properties.get("site_name")) for properties in rows}, site_names)
     for properties in rows:
         empty = [column for column in columns if properties.get(column) is None]

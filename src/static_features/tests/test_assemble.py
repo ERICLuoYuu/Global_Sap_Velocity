@@ -416,3 +416,12 @@ def test_lusk_quality_bands_stay_out_of_the_merge_in_their_own_file(built):
         for column in _header(output / "new_static_features.csv").split(",")
         if column.endswith(("_cov", "_aoa"))
     ]
+
+
+def test_provenance_records_the_coordinate_corrections(built):
+    _context, output = built
+    provenance = json.loads((output / "provenance.json").read_text(encoding="utf-8"))
+    corrected = provenance["coordinate_corrections"]["GBR_DEV_CON"]
+
+    assert (corrected["published_lat"], corrected["lat"]) == (56.03333, 56.0792)
+    assert corrected["reason"]

@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from src.static_features.sites import load_sites, site_list_hash
+from src.static_features.grid import cell_of
+from src.static_features.sites import COORDINATE_CORRECTIONS, load_sites, site_list_hash
 
 HEADER = "start_date,end_date,lat,lon,site_name\n"
 ROW = "2009-11-19 03:00:00+00:00,2009-12-01 02:00:00+00:00,{lat},{lon},{name}\n"
@@ -53,9 +54,9 @@ def test_load_sites_refuses_duplicate_names(tmp_path):
 
 
 def test_sites_sharing_a_cell_keep_their_own_rows(tmp_path):
-    info = _write(tmp_path, [("GBR_DEV_CON", 56.03333, -3.716667), ("GBR_DEV_DRO", 56.03333, -3.716667)])
+    info = _write(tmp_path, [("AAA", 56.03333, -3.716667), ("BBB", 56.03333, -3.716667)])
     sites = load_sites(info, tmp_path)
-    assert list(sites["site_name"]) == ["GBR_DEV_CON", "GBR_DEV_DRO"]
+    assert list(sites["site_name"]) == ["AAA", "BBB"]
     assert list(sites["row"]) == [4076, 4076] and list(sites["col"]) == [21153, 21153]
 
 
@@ -102,3 +103,41 @@ def test_site_list_hash_ignores_row_order_and_notices_a_moved_site():
     assert site_list_hash(sites) != site_list_hash(moved)
     assert site_list_hash(sites) != site_list_hash(renamed)
     assert len(site_list_hash(sites)) == 64
+
+
+def test_a_corrected_site_is_placed_at_its_corrected_coordinates(tmp_path):
+    published = COORDINATE_CORRECTIONS["CHE_DAV_SEE"]
+    info = _write(tmp_path, [("CHE_DAV_SEE", published["published_lat"], published["published_lon"]), ("AAA", 51.5, 10.25)])
+    sites = load_sites(info, tmp_path).set_index("site_name")
+
+    assert (sites.loc["CHE_DAV_SEE", "lat"], sites.loc["CHE_DAV_SEE", "lon"]) == (46.81533, 9.85591)
+    assert (sites.loc["CHE_DAV_SEE", "row"], sites.loc["CHE_DAV_SEE", "col"]) == cell_of(46.81533, 9.85591)
+    assert (sites.loc["AAA", "lat"], sites.loc["AAA", "lon"]) == (51.5, 10.25)
+
+
+def test_both_devilla_plots_move_to_the_forest(tmp_path):
+    con, dro = COORDINATE_CORRECTIONS["GBR_DEV_CON"], COORDINATE_CORRECTIONS["GBR_DEV_DRO"]
+    info = _write(
+        tmp_path,
+        [("GBR_DEV_CON", con["published_lat"], con["published_lon"]), ("GBR_DEV_DRO", dro["published_lat"], dro["published_lon"])],
+    )
+    sites = load_sites(info, tmp_path)
+
+    assert list(sites["lat"]) == [56.0792, 56.0792] and list(sites["lon"]) == [-3.6625, -3.6625]
+    assert sites["row"].nunique() == 1 and sites["col"].nunique() == 1
+
+
+def test_a_correction_stops_when_the_list_no_longer_holds_the_published_point(tmp_path):
+    info = _write(tmp_path, [("GBR_DEV_CON", 56.5, -3.5)])
+    with pytest.raises(ValueError, match="GBR_DEV_CON"):
+        load_sites(info, tmp_path)
+
+
+def test_a_scale_without_the_corrected_sites_is_untouched(tmp_path):
+    info = _write(tmp_path, [("AAA", 51.5, 10.25)])
+    assert list(load_sites(info, tmp_path)["site_name"]) == ["AAA"]
+
+
+def test_every_correction_says_why():
+    assert set(COORDINATE_CORRECTIONS) == {"CHE_DAV_SEE", "GBR_DEV_CON", "GBR_DEV_DRO"}
+    assert all(correction["reason"] for correction in COORDINATE_CORRECTIONS.values())

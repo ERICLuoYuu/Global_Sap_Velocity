@@ -29,7 +29,7 @@ from src.static_features.results import (
     validate,
 )
 from src.static_features.run import DEFAULT_PROJECT, PRODUCTS
-from src.static_features.sites import site_list_hash
+from src.static_features.sites import COORDINATE_CORRECTIONS, site_list_hash
 
 LOGGER = logging.getLogger(__name__)
 
@@ -210,6 +210,7 @@ def _provenance(parts: dict[str, ProductResult], site_hash: str, git_commit: str
     return {
         "code_commit": git_commit,
         "site_list_hash": site_hash,
+        "coordinate_corrections": COORDINATE_CORRECTIONS,
         "products": {product: part.provenance for product, part in parts.items()},
         "notes": NOTES,
     }

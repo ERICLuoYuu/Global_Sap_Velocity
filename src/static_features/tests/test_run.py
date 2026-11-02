@@ -198,7 +198,8 @@ def test_for_scale_reads_the_real_corpus():
     assert context.raw_root.name == "grided" and context.raw_root.is_dir()
     assert context.output_root.parts[-2:] == ("static_1km", "sapwood_combined")
     dev = context.sites.set_index("site_name").loc["GBR_DEV_CON"]
-    assert (dev["row"], dev["col"]) == (4076, 21153)
+    # The corrected point: the published one, 4076 and 21153, is water in the Firth of Forth.
+    assert (dev["row"], dev["col"]) == (4070, 21160)
 
 
 @pytest.mark.filterwarnings("ignore:numpy.ndarray size changed")

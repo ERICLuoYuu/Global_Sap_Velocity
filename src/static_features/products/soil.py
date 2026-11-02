@@ -19,7 +19,7 @@ PROVENANCE = {
     "time_window": None,
     "method": (
         "Unweighted mean over valid pixels centred in the 30 arc-second cell, each property in its own projection "
-        "because bdod and soc have another origin. The old REST ring search is dropped: the cell covers that footprint. "
+        "because bdod and soc have another origin. The old REST ring search is dropped, so a cell with no pixel stays empty: the search could reach 750 m beyond the cell. "
         "Conversion 0.1, except bdod 0.01 and nitrogen 0.001: this copy holds nitrogen ten times finer than the "
         "cg/kg of the REST service, so 0.01 would read ten times too high."
     ),

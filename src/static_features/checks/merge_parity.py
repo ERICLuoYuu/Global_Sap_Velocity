@@ -1,7 +1,8 @@
 """A merge on the earlier static files against one on the 1 km features: same rows, same dynamic values, new columns.
 
 python -m src.static_features.checks.merge_parity --scale <scale> --before <tree> --after <tree>. Each tree holds
-daily/<site>_daily.csv. Writes checks/merge_parity.csv; exits 1 on anything but static columns moving.
+daily/<site>_daily.csv. Writes checks/merge_parity.csv; exits 1 on anything but static columns moving. A static value
+that becomes empty is not a move: it stops the check unless the site and column are named in EXPECTED_EMPTIED.
 """
 
 from __future__ import annotations
@@ -23,6 +24,19 @@ LOGGER = logging.getLogger(__name__)
 KEY = ["site_name", "TIMESTAMP"]
 #: The merge writes this beside the site files. It pools every site, so its keys repeat.
 AGGREGATE = "all_biomes_merged_daily.csv"
+#: Site -> the static columns that may become empty there, and why. Still reported on every run.
+EXPECTED_EMPTIED: dict[str, dict[str, Any]] = {
+    "CHN_YUN_YUN": {
+        "columns": (
+            *(f"soil_{prop}{depth}" for prop in ("soc", "bdod") for depth in ("", "_0_5", "_5_15", "_15_30", "_30_60", "_60_100")),
+            "soil_theta_wp",
+            "soil_theta_fc",
+            "soil_theta_sat",
+        ),
+        "reason": "The cell is mostly water. SoilGrids on Earth Engine holds no soc or bdod there, and the old REST ring "
+        "search reached beyond the cell for them.",
+    },
+}
 STATIC_EXACT = frozenset(
     {
         "elevation",
@@ -66,10 +80,15 @@ def compare(old: pd.DataFrame, new: pd.DataFrame, static_columns: Iterable[str])
     gained = len(new_keyed.index.difference(old_keyed.index))
     static = set(static_columns)
     differing: dict[bool, dict[str, int]] = {True: {}, False: {}}
+    emptied: dict[str, int] = {}
     for column in old_keyed.columns.intersection(new_keyed.columns, sort=False):
-        rows = _rows_differing(old_keyed[column].reindex(shared), new_keyed[column].reindex(shared))
+        before, after = old_keyed[column].reindex(shared), new_keyed[column].reindex(shared)
+        rows = _rows_differing(before, after)
         if rows:
             differing[column in static][column] = rows
+        became_empty = int((before.notna() & after.isna()).sum())
+        if became_empty and column in static:
+            emptied[column] = became_empty
     return {
         "same_keys": lost == 0 and gained == 0,
         "lost_keys": lost,
@@ -78,6 +97,7 @@ def compare(old: pd.DataFrame, new: pd.DataFrame, static_columns: Iterable[str])
         "removed_columns": [column for column in old_keyed.columns if column not in new_keyed.columns],
         "dynamic_columns_differing": differing[False],
         "static_columns_differing": differing[True],
+        "static_columns_emptied": emptied,
     }
 
 
@@ -99,7 +119,8 @@ def _compare_trees(before: dict[str, Path], after: dict[str, Path], expected: se
     one_side = sorted(set(before) ^ set(after))
     if one_side:
         problems.append(f"on one side only: {one_side}")
-    kinds = ("dynamic_differs", "removed", "missing", "unexpected", "static_differs", "added")
+    kinds = ("dynamic_differs", "removed", "missing", "unexpected", "static_differs", "added", "emptied")
+    emptied_unnamed: list[str] = []
     tallies: dict[str, Counter] = {kind: Counter() for kind in kinds}
     for name in sorted(set(before) & set(after)):
         old, new = read_table(before[name]), read_table(after[name])
@@ -108,6 +129,14 @@ def _compare_trees(before: dict[str, Path], after: dict[str, Path], expected: se
             problems.append(f"{name}: lost {report['lost_keys']} keys, gained {report['gained_keys']}")
         tallies["dynamic_differs"].update(report["dynamic_columns_differing"])
         tallies["static_differs"].update(report["static_columns_differing"])
+        tallies["emptied"].update(report["static_columns_emptied"])
+        site = name[: -len("_daily.csv")]
+        entry = EXPECTED_EMPTIED.get(site, {"columns": (), "reason": ""})
+        for column in report["static_columns_emptied"]:
+            if column in entry["columns"]:
+                LOGGER.warning("%s: %s became empty, named: %s", site, column, entry["reason"])
+            else:
+                emptied_unnamed.append(f"{site}: {column}")
         tallies["removed"].update(dict.fromkeys(report["removed_columns"], len(old)))
         added = set(report["added_columns"])
         tallies["added"].update(dict.fromkeys(added & expected, len(new)))
@@ -116,6 +145,8 @@ def _compare_trees(before: dict[str, Path], after: dict[str, Path], expected: se
     for kind in ("dynamic_differs", "removed", "missing", "unexpected"):
         if tallies[kind]:
             problems.append(f"{kind}: {sorted(tallies[kind])}")
+    if emptied_unnamed:
+        problems.append(f"static values became empty at {emptied_unnamed}")
     return _report_rows(tallies), problems
 
 

@@ -7,6 +7,7 @@ import importlib
 import logging
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from src.static_features.results import (
@@ -16,6 +17,7 @@ from src.static_features.results import (
     ExtractionFailure,
     ProductResult,
     RunContext,
+    code_state,
     validate,
     write_part,
 )
@@ -59,7 +61,8 @@ def run_product(name: str, context: RunContext, registry: dict[str, str] = PRODU
     module = importlib.import_module(registry[name])
     result = module.extract(context)
     validate(result, list(context.sites["site_name"]))
-    path = write_part(result, context.parts_root, site_list_hash(context.sites))
+    stamped = replace(result, provenance={**result.provenance, "code": code_state()})
+    path = write_part(stamped, context.parts_root, site_list_hash(context.sites))
     _log_status_counts(result)
     LOGGER.info("%s: wrote %s", name, path)
     return path

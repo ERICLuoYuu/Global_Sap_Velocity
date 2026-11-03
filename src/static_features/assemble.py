@@ -233,7 +233,9 @@ def assemble(context: RunContext, products: Sequence[str] = tuple(PRODUCTS), git
             table.to_csv(temp / f"{name}.csv", index=False)
         with open(temp / "provenance.json", "w", encoding="utf-8") as handle:
             json.dump(provenance, handle, indent=2, sort_keys=True)
-        for path in sorted(temp.iterdir()):
+        # Provenance goes first and comes back last, so the merge can never read a half-swapped root as a whole one.
+        (output / "provenance.json").unlink(missing_ok=True)
+        for path in sorted(temp.iterdir(), key=lambda item: item.name == "provenance.json"):
             os.replace(path, output / path.name)
     finally:
         shutil.rmtree(temp, ignore_errors=True)

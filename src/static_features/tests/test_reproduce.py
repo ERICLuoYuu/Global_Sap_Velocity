@@ -121,3 +121,41 @@ def test_reproduce_refuses_a_part_from_another_site_list(tree, tmp_path, monkeyp
     with caplog.at_level(logging.ERROR):
         assert reproduce.main(["--scale", SCALE]) != 0
     assert "site list" in caplog.text
+
+
+EXPECTED_AT_A = {"A": {"outcomes": (reproduce.DIFFERS,), "reason": "because"}}
+
+
+def test_a_named_difference_exits_zero_and_is_still_reported(tree, monkeypatch, caplog):
+    monkeypatch.setattr(reproduce, "EXPECTED_DIFFERENCES", EXPECTED_AT_A)
+    context = tree(stand_age_part=(7.0, 5.0), stand_age_current=(9.0, 5.0))
+
+    with caplog.at_level(logging.WARNING):
+        assert reproduce.main(["--scale", SCALE]) == 0
+    assert "stand_age_TC000" in caplog.text and "because" in caplog.text
+    report = pd.read_csv(context.output_root / "checks" / "reproduce.csv")
+    assert list(report["site_name"]) == ["A"]
+
+
+def test_another_outcome_at_a_named_site_still_stops(tree, monkeypatch, caplog):
+    monkeypatch.setattr(reproduce, "EXPECTED_DIFFERENCES", EXPECTED_AT_A)
+    tree(stand_age_part=(7.0, 5.0))
+
+    with caplog.at_level(logging.ERROR):
+        assert reproduce.main(["--scale", SCALE]) != 0
+    assert "empty_to_value" in caplog.text
+
+
+def test_a_difference_at_another_site_still_stops(tree, monkeypatch):
+    monkeypatch.setattr(reproduce, "EXPECTED_DIFFERENCES", {"B": EXPECTED_AT_A["A"]})
+    tree(stand_age_part=(7.0, 5.0), stand_age_current=(9.0, 5.0))
+
+    assert reproduce.main(["--scale", SCALE]) != 0
+
+
+def test_the_named_sites_each_give_a_reason():
+    assert set(reproduce.EXPECTED_DIFFERENCES) == {"CHE_DAV_SEE", "CHN_YUN_YUN", "GBR_DEV_CON", "GBR_DEV_DRO"}
+    assert all(entry["reason"] and entry["outcomes"] for entry in reproduce.EXPECTED_DIFFERENCES.values())
+    # Only the moved Devilla stands may gain a value: it replaces the merge's fallback to ground st_age.
+    gaining = {site for site, entry in reproduce.EXPECTED_DIFFERENCES.items() if reproduce.EMPTY_TO_VALUE in entry["outcomes"]}
+    assert gaining == {"GBR_DEV_CON", "GBR_DEV_DRO"}

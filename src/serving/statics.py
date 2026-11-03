@@ -193,20 +193,19 @@ def soil_band(prop: str, top: int, bottom: int) -> str:
 
 
 def weighted_soil_properties(raw: Mapping) -> dict:
-    """``get_weighted_soil_props`` over arrays: a depth counts where its sand is present, and any other
-    property missing at a counted depth contributes 0."""
+    """``get_weighted_soil_props`` over arrays: each property over the depths that hold it, empty if none does."""
     n = len(np.asarray(raw[soil_column("sand", *SOIL_DEPTHS_CM[0])]))
-    thickness_total = np.zeros(n)
+    thicknesses = {prop: np.zeros(n) for prop in SOIL_PROPERTIES}
     sums = {prop: np.zeros(n) for prop in SOIL_PROPERTIES}
     for top, bottom in SOIL_DEPTHS_CM:
         thickness = float(bottom - top)
-        present = np.isfinite(np.asarray(raw[soil_column("sand", top, bottom)], dtype=float))
-        thickness_total += np.where(present, thickness, 0.0)
         for prop in SOIL_PROPERTIES:
-            values = np.nan_to_num(np.asarray(raw.get(soil_column(prop, top, bottom), np.zeros(n)), dtype=float), nan=0.0)
+            values = np.asarray(raw.get(soil_column(prop, top, bottom), np.full(n, np.nan)), dtype=float)
+            present = np.isfinite(values)
             sums[prop] += np.where(present, values * thickness, 0.0)
+            thicknesses[prop] += np.where(present, thickness, 0.0)
     with np.errstate(invalid="ignore", divide="ignore"):
-        return {prop: np.where(thickness_total > 0, sums[prop] / thickness_total, np.nan) for prop in SOIL_PROPERTIES}
+        return {prop: np.where(thicknesses[prop] > 0, sums[prop] / thicknesses[prop], np.nan) for prop in SOIL_PROPERTIES}
 
 
 def soil_statics(weighted: Mapping) -> dict:

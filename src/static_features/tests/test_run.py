@@ -207,3 +207,11 @@ def test_every_registered_product_imports_and_can_extract():
     for name, module_path in run.PRODUCTS.items():
         module = importlib.import_module(module_path)
         assert callable(module.extract), name
+
+
+def test_a_part_records_the_code_it_was_built_from(context, registry, monkeypatch):
+    monkeypatch.setattr(run, "code_state", lambda: {"commit": "abc", "package_clean": True})
+    run.run_product("fake_good", context, registry=registry)
+    back, _ = read_part(context.parts_root, "fake_good")
+
+    assert back.provenance == {"source": "fake", "code": {"commit": "abc", "package_clean": True}}

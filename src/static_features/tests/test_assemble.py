@@ -425,3 +425,40 @@ def test_provenance_records_the_coordinate_corrections(built):
 
     assert (corrected["published_lat"], corrected["lat"]) == (56.03333, 56.0792)
     assert corrected["reason"]
+
+
+def test_a_job_killed_while_swapping_files_leaves_no_provenance(tmp_path, monkeypatch):
+    context = _context(tmp_path)
+    _all_parts(context)
+    output = assemble(context, git_commit="first")
+    real_replace = assemble_module.os.replace
+    swapped = []
+
+    def dies_on_the_third(source, target):
+        if len(swapped) == 2:
+            raise OSError("killed")
+        swapped.append(target)
+        real_replace(source, target)
+
+    monkeypatch.setattr(assemble_module.os, "replace", dies_on_the_third)
+    with pytest.raises(OSError, match="killed"):
+        assemble(context, git_commit="second")
+
+    assert not (output / "provenance.json").exists()
+
+
+def test_provenance_is_the_last_file_put_in_place(tmp_path, monkeypatch):
+    context = _context(tmp_path)
+    _all_parts(context)
+    real_replace = assemble_module.os.replace
+    order = []
+
+    def recording(source, target):
+        order.append(str(target).replace("\\", "/").rsplit("/", 1)[-1])
+        real_replace(source, target)
+
+    monkeypatch.setattr(assemble_module.os, "replace", recording)
+    assemble(context, git_commit="abc")
+
+    assert order[-1] == "provenance.json"
+    assert order.count("provenance.json") == 1

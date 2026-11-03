@@ -247,3 +247,33 @@ def test_provenance_file_is_plain_json(tmp_path):
 def test_validate_refuses_an_infinite_value():
     with pytest.raises(ExtractionFailure, match="infinite"):
         validate(_result(values=_frame({"x": [np.inf, np.nan]})), SITES)
+
+
+def test_code_state_names_the_commit_and_whether_the_package_differs_from_it():
+    state = results.code_state()
+
+    assert len(state["commit"]) == 40
+    assert isinstance(state["package_clean"], bool)
+
+
+def test_code_state_reads_a_package_change_as_not_clean(monkeypatch):
+    class Answer:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    answers = iter([Answer("abc\n"), Answer(" M src/static_features/grid.py\n")])
+    monkeypatch.setattr(results.subprocess, "run", lambda *_, **__: next(answers))
+
+    assert results.code_state() == {"commit": "abc", "package_clean": False}
+
+
+def test_code_state_outside_a_repository_claims_nothing(monkeypatch):
+    class Answer:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(results.subprocess, "run", lambda *_, **__: Answer())
+
+    assert results.code_state() == {"commit": None, "package_clean": None}

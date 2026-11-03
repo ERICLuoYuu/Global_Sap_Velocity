@@ -1,4 +1,5 @@
 import argparse
+import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from src.feature_contract.merge_contract import (
     write_sidecar,
 )
 from src.site_info.pft_resolution import load_site_landcover_modes, resolve_pft, summarise
+from src.static_features.sites import load_sites, site_list_hash
 from src.site_info.derive_igbp import derive_for_scale, derived_only
 from src.clock_offsets.provenance import stamp_errors, tree_provenance
 from src.clock_offsets.registry import registry_sha256
@@ -112,26 +114,19 @@ def get_weighted_soil_props(soil_row, depths=["0_5", "5_15", "15_30", "30_60", "
     thickness_map = {"0_5": 5, "5_15": 10, "15_30": 15, "30_60": 30, "60_100": 40}
     properties = ["sand", "clay", "soc", "bdod", "cfvo"]
     weighted_sums = {p: 0.0 for p in properties}
-    total_thickness = 0.0
+    thickness = {p: 0.0 for p in properties}
 
     for depth in depths:
         thick = thickness_map.get(depth, 0)
-        if f"sand_{depth}" not in soil_row.index:
-            continue
-        if pd.isna(soil_row.get(f"sand_{depth}")):
-            continue
-
-        total_thickness += thick
         for p in properties:
-            val = soil_row.get(f"{p}_{depth}", 0)
+            val = soil_row.get(f"{p}_{depth}", np.nan)
             if pd.isna(val):
-                val = 0
+                continue
             weighted_sums[p] += val * thick
+            thickness[p] += thick
 
-    if total_thickness == 0:
-        return {p: np.nan for p in properties}
-
-    return {p: weighted_sums[p] / total_thickness for p in properties}
+    # Each property over the depths that hold it: a depth with no value is unknown, not zero.
+    return {p: weighted_sums[p] / thickness[p] if thickness[p] else np.nan for p in properties}
 
 
 def filter_growing_season_by_sapflow(
@@ -701,12 +696,14 @@ def _preflight_sites(sap_input_dir, raw_csv_dir, suffix_words=4):
 
 
 #: The 1 km static files (src/static_features) the merge reads, by key. ``new`` holds the columns added by the rebuild.
+#: ``provenance`` is put in place last, so a root without it is one whose assembly did not finish.
 STATIC_FILES = {
     "env": "site_info_with_env_data.csv",
     "soil": "soilgrids_data.csv",
     "stand_age": "stand_age_data.csv",
     "fan": "site_info_with_root_depth_fan2017.csv",
     "new": "new_static_features.csv",
+    "provenance": "provenance.json",
 }
 
 #: Static columns the daily aggregation keeps as ``first``, by exact name. The rest go by prefix.
@@ -743,7 +740,7 @@ def static_features_root():
 
 
 def static_input_paths(static_root):
-    """The five files under ``static_root``. Any absent file stops the merge, and all of them are named.
+    """The files under ``static_root``. Any absent file stops the merge, and all of them are named.
 
     A soft fail to NaN columns would pass for sites that have no data.
     """
@@ -754,6 +751,49 @@ def static_input_paths(static_root):
             f"{static_root} lacks {absent}: build them with src.static_features.run and .assemble for {paths.scale}"
         )
     return found
+
+
+def sap_site_names(sap_input_dir, suffix_words=4):
+    """The site behind each sap file, named as the main loop names it."""
+    return ["_".join(path.stem.split("_")[:-suffix_words]) for path in sorted(sap_input_dir.glob("*.csv"))]
+
+
+def require_static_sites(static_inputs, expected_sites):
+    """Every site with a sap file, exactly once, in each file holding sites. All problems are named together.
+
+    Past this check the main loop can look any site up: a miss here would otherwise be NaN columns or a dropped
+    site at exit 0, which is what a root built for another site list looks like.
+    """
+    problems = []
+    for key, path in static_inputs.items():
+        if key == "provenance":
+            continue
+        names = pd.read_csv(path, usecols=["site_name"])["site_name"]
+        absent = sorted(set(expected_sites) - set(names))
+        repeated = sorted(names[names.duplicated()].unique())
+        if absent:
+            problems.append(f"{path} does not hold {absent}")
+        if repeated:
+            problems.append(f"{path} repeats {repeated}")
+    if problems:
+        raise FeatureContractError("; ".join(problems))
+
+
+def read_static_provenance(path, current_site_hash):
+    """What the root says about itself, for the MANIFEST, once it is known to come from today's site list."""
+    with open(path, encoding="utf-8") as handle:
+        provenance = json.load(handle)
+    recorded = provenance.get("site_list_hash")
+    if recorded != current_site_hash:
+        raise FeatureContractError(
+            f"{path} was built from site list {recorded}, not today's {current_site_hash}: "
+            f"rerun src.static_features for {paths.scale}"
+        )
+    return {
+        "site_list_hash": recorded,
+        "code_commit": provenance.get("code_commit"),
+        "product_code": {name: product.get("code") for name, product in provenance.get("products", {}).items()},
+    }
 
 
 def load_new_static(path, expected_sites):
@@ -925,7 +965,7 @@ def merge_sap_env_data_site(
     )
     print(f"Loading Fan 2017 root depth from: {static_inputs['fan']}")
     _rd_data = pd.read_csv(static_inputs["fan"])
-    _rd_keep = ["site_name"] + [c for c in _FAN2017_FEATURE_COLS if c in _rd_data.columns]
+    _rd_keep = ["site_name", *_FAN2017_FEATURE_COLS]
     site_info = site_info.merge(_rd_data[_rd_keep], on="site_name", how="left")
 
     # --- LOAD THE 1 KM FEATURES THAT HAD NO COLUMN BEFORE THE REBUILD ---
@@ -981,6 +1021,11 @@ def merge_sap_env_data_site(
     env_input_dir = paths.env_outliers_removed_dir
     print(f"Sap input: {sap_input_dir}")
     print(f"Env input: {env_input_dir}")
+
+    require_static_sites(static_inputs, sap_site_names(sap_input_dir))
+    static_provenance = read_static_provenance(
+        static_inputs["provenance"], site_list_hash(load_sites(paths.site_info_path, paths.metadata_dir))
+    )
 
     # RUN_PROVENANCE.json outranks the badge in assert_dataset_contract, and the merge does not own
     # it, so a block naming the other contract is refused here -- before any work -- rather than
@@ -1062,9 +1107,6 @@ def merge_sap_env_data_site(
                 lon = biome_info["si_long"][0]
 
                 curr_site_info = site_info[site_info["site_name"] == location_type]
-                if curr_site_info.empty:
-                    continue
-
                 ele = curr_site_info["elevation_m"].values[0]
                 slope = curr_site_info["slope_deg"].values[0]
                 aspect_sin = curr_site_info["aspect_sin"].values[0]
@@ -1073,11 +1115,7 @@ def merge_sap_env_data_site(
                 mean_annual_precip = curr_site_info["bio12"].values[0]
                 canopy_height = curr_site_info["canopy_height_m"].values[0]
                 # Fan 2017 static features (left-joined into site_info above).
-                # Missing sites → NaN, consistent with stand_age/soil fallback.
-                fan2017_features = {
-                    _col: (curr_site_info[_col].values[0] if _col in curr_site_info.columns else np.nan)
-                    for _col in _FAN2017_FEATURE_COLS
-                }
+                fan2017_features = {_col: curr_site_info[_col].values[0] for _col in _FAN2017_FEATURE_COLS}
                 new_static_features = new_static_row(new_static, location_type)
                 temp_seasonality = curr_site_info["bio4"].values[0]
                 precip_seasonality = curr_site_info["bio15"].values[0]
@@ -1103,30 +1141,29 @@ def merge_sap_env_data_site(
                 raw_soil_props = {}
                 theta_wp, theta_fc, theta_sat = np.nan, np.nan, np.nan
 
-                if not soil_data.empty and location_type in soil_data["site_name"].values:
-                    soil_row = soil_data[soil_data["site_name"] == location_type].iloc[0]
-                    try:
-                        avg_props = get_weighted_soil_props(soil_row)
+                soil_row = soil_data[soil_data["site_name"] == location_type].iloc[0]
+                try:
+                    avg_props = get_weighted_soil_props(soil_row)
 
-                        raw_props = ["sand", "clay", "soc", "bdod", "cfvo"]
-                        raw_depths = ["0_5", "5_15", "15_30", "30_60", "60_100"]
+                    raw_props = ["sand", "clay", "soc", "bdod", "cfvo"]
+                    raw_depths = ["0_5", "5_15", "15_30", "30_60", "60_100"]
 
-                        for p in raw_props:
-                            for d in raw_depths:
-                                col_key = f"{p}_{d}"
-                                val = soil_row.get(col_key, np.nan)
-                                raw_soil_props[f"soil_{col_key}"] = val
+                    for p in raw_props:
+                        for d in raw_depths:
+                            col_key = f"{p}_{d}"
+                            val = soil_row.get(col_key, np.nan)
+                            raw_soil_props[f"soil_{col_key}"] = val
 
-                        if not pd.isna(avg_props["sand"]) and not pd.isna(avg_props["clay"]):
-                            om_pct = (avg_props["soc"] / 10.0) * 1.72
-                            theta_wp, theta_fc, theta_sat = calculate_soil_hydraulics(
-                                sand=avg_props["sand"] / 100.0,
-                                clay=avg_props["clay"] / 100.0,
-                                organic_matter=om_pct,
-                                coarse_fragments_vol_percent=avg_props["cfvo"],
-                            )
-                    except Exception as soil_e:
-                        print(f"Error calculating soil hydraulics for {location_type}: {soil_e}")
+                    if not pd.isna(avg_props["sand"]) and not pd.isna(avg_props["clay"]):
+                        om_pct = (avg_props["soc"] / 10.0) * 1.72
+                        theta_wp, theta_fc, theta_sat = calculate_soil_hydraulics(
+                            sand=avg_props["sand"] / 100.0,
+                            clay=avg_props["clay"] / 100.0,
+                            organic_matter=om_pct,
+                            coarse_fragments_vol_percent=avg_props["cfvo"],
+                        )
+                except Exception as soil_e:
+                    print(f"Error calculating soil hydraulics for {location_type}: {soil_e}")
 
                 # --- 3. AGGREGATE PLANT METADATA TO SITE LEVEL ---
                 site_plant_meta = {}
@@ -1717,7 +1754,6 @@ def merge_sap_env_data_site(
         # Mirrors removal_log_report.csv convention. MANIFEST records the flags
         # and multipliers used so downstream training can detect drift.
         if apply_flo2019_correction_flag or apply_treatment_filter_flag:
-            import json
 
             audit_dir = output_base_dir / "_audit"
             audit_dir.mkdir(exist_ok=True)
@@ -1743,6 +1779,7 @@ def merge_sap_env_data_site(
                     "growing_season_only": growing_season_only,
                 },
                 "static_root": str(static_root),
+                "static_provenance": static_provenance,
                 "calibration_multipliers": {
                     "HD": FLO2019_HD_MULTIPLIER,
                     "CHD": FLO2019_CHD_MULTIPLIER,

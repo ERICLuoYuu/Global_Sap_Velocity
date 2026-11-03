@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -147,6 +148,20 @@ def validate(result: ProductResult, site_names: Iterable[str]) -> None:
     reserved = sorted(PART_FILES & set(result.extras))
     if reserved:
         raise ExtractionFailure(f"{result.product}: extras named like a part file: {reserved}")
+
+
+def code_state() -> dict[str, Any]:
+    """The commit this package runs from, and whether its own files match it. Files elsewhere in the tree may differ."""
+
+    def git(*arguments: str) -> subprocess.CompletedProcess:
+        return subprocess.run(  # nosec B603 B607
+            ["git", *arguments], capture_output=True, text=True, check=False, cwd=Path(__file__).parent
+        )
+
+    commit, changes = git("rev-parse", "HEAD"), git("status", "--porcelain", "--", ".")
+    if commit.returncode != 0 or changes.returncode != 0:
+        return {"commit": None, "package_clean": None}
+    return {"commit": commit.stdout.strip(), "package_clean": not changes.stdout.strip()}
 
 
 def _json_default(value: Any) -> Any:

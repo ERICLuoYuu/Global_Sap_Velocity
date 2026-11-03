@@ -1,7 +1,8 @@
-"""Unchanged products must reproduce the current files at every site: python -m src.static_features.checks.reproduce.
+"""Unchanged products must reproduce the current files: python -m src.static_features.checks.reproduce.
 
 A site that was empty and now has a value is a swallowed failure in today's code, not a pass. It stops the check and
-goes to the owner, because it changes the merge's st_age fallback.
+goes to the owner, because it changes the merge's st_age fallback. A difference the owner has seen is named below, is
+still reported on every run, and does not stop the check; anything else does.
 """
 
 from __future__ import annotations
@@ -24,6 +25,23 @@ MATCH = "match"
 DIFFERS = "differs"
 EMPTY_TO_VALUE = "empty_to_value"
 VALUE_TO_EMPTY = "value_to_empty"
+
+_DEVILLA = {
+    "outcomes": (DIFFERS, EMPTY_TO_VALUE),
+    "reason": "Coordinate corrected, 4b9eaf8. The earlier point is water, with no BGI pixel, so the merge fell back on "
+    "ground st_age 41; the forest pixel gives 54-56 years. Reported to the owner on 2026-11-03.",
+}
+
+#: Sites allowed to differ from the current files, the outcomes allowed there, and why.
+EXPECTED_DIFFERENCES = {
+    "CHE_DAV_SEE": {"outcomes": (DIFFERS,), "reason": "Coordinate corrected, 4b9eaf8."},
+    "CHN_YUN_YUN": {
+        "outcomes": (DIFFERS,),
+        "reason": "WorldClim neighbour: the current file came from an earlier corner-first search (ledger, Task 6).",
+    },
+    "GBR_DEV_CON": _DEVILLA,
+    "GBR_DEV_DRO": _DEVILLA,
+}
 
 CURRENT_FILES = {
     "worldclim": ("env_site_data", "site_info_with_env_data.csv"),
@@ -104,9 +122,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if different.empty:
         LOGGER.info("every site matches in every column")
         return 0
+    unexpected = 0
     for row in different.itertuples(index=False):
-        LOGGER.error("%s %s %s: %s (%s -> %s)", row.outcome, row.column, row.site_name, row.product, row.old, row.new)
-    return 1
+        entry = EXPECTED_DIFFERENCES.get(row.site_name)
+        detail = f"{row.outcome} {row.column} {row.site_name}: {row.product} ({row.old} -> {row.new})"
+        if entry is not None and row.outcome in entry["outcomes"]:
+            LOGGER.warning("%s, named: %s", detail, entry["reason"])
+        else:
+            LOGGER.error("%s", detail)
+            unexpected += 1
+    return 1 if unexpected else 0
 
 
 if __name__ == "__main__":

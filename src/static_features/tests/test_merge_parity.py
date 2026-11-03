@@ -172,3 +172,49 @@ def test_the_aggregate_across_sites_is_not_a_site_file(tmp_path):
     (daily / "AAA_BBB_daily.csv").write_text("site_name,TIMESTAMP\n")
     (daily / "all_biomes_merged_daily.csv").write_text("site_name,TIMESTAMP\n")
     assert list(merge_parity._daily_files(str(tmp_path))) == ["AAA_BBB_daily.csv"]
+
+
+def test_parity_counts_a_static_value_that_became_empty():
+    report = compare(_daily(), _daily(elevation=np.nan), ["elevation"])
+
+    assert report["static_columns_emptied"] == {"elevation": 2}
+
+
+def test_a_static_value_that_only_moved_or_arrived_is_not_emptied():
+    moved = compare(_daily(), _daily(elevation=120.0), ["elevation"])
+    arrived = compare(_daily(elevation=np.nan), _daily(), ["elevation"])
+
+    assert moved["static_columns_emptied"] == {}
+    assert arrived["static_columns_emptied"] == {}
+
+
+def test_main_exits_nonzero_naming_site_and_column_when_a_static_value_empties(tmp_path, monkeypatch, caplog):
+    off = _tree(tmp_path, "off")
+    on = _tree(tmp_path, "on", elevation=np.nan, wood_density=0.5)
+    code, checks = _run(tmp_path, monkeypatch, off, on)
+
+    assert code == 1
+    assert "A: elevation" in caplog.text
+    table = pd.read_csv(checks / "merge_parity.csv")
+    assert set(table.loc[table["column"] == "elevation", "kind"]) == {"static_differs", "emptied"}
+
+
+def test_main_allows_a_named_site_to_empty_and_still_reports_it(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(merge_parity, "EXPECTED_EMPTIED", {"A": {"columns": ("elevation",), "reason": "because"}})
+    off = _tree(tmp_path, "off")
+    on = _tree(tmp_path, "on", elevation=np.nan, wood_density=0.5)
+    with caplog.at_level("WARNING"):
+        code, _ = _run(tmp_path, monkeypatch, off, on)
+
+    assert code == 0
+    assert "A: elevation" in caplog.text and "because" in caplog.text
+
+
+def test_main_stops_when_a_named_site_empties_another_column(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(merge_parity, "EXPECTED_EMPTIED", {"A": {"columns": ("slope",), "reason": "because"}})
+    off = _tree(tmp_path, "off")
+    on = _tree(tmp_path, "on", elevation=np.nan, wood_density=0.5)
+    code, _ = _run(tmp_path, monkeypatch, off, on)
+
+    assert code == 1
+    assert "A: elevation" in caplog.text

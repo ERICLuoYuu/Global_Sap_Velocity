@@ -58,10 +58,11 @@ def _log_status_counts(result: ProductResult) -> None:
 
 
 def run_product(name: str, context: RunContext, registry: dict[str, str] = PRODUCTS) -> Path:
+    code = code_state()  # before the import: a commit landing during a two-hour request must not claim this part
     module = importlib.import_module(registry[name])
     result = module.extract(context)
     validate(result, list(context.sites["site_name"]))
-    stamped = replace(result, provenance={**result.provenance, "code": code_state()})
+    stamped = replace(result, provenance={**result.provenance, "code": code})
     path = write_part(stamped, context.parts_root, site_list_hash(context.sites))
     _log_status_counts(result)
     LOGGER.info("%s: wrote %s", name, path)

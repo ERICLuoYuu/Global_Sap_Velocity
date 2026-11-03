@@ -945,6 +945,11 @@ def merge_sap_env_data_site(
     # --- LOAD STATIC DATASETS ---
     static_root = static_features_root()
     static_inputs = static_input_paths(static_root)
+    # Before anything is read from the root, so its tables are the ones the provenance vouches for.
+    require_static_sites(static_inputs, sap_site_names(paths.sap_outliers_removed_dir))
+    static_provenance = read_static_provenance(
+        static_inputs["provenance"], site_list_hash(load_sites(paths.site_info_path, paths.metadata_dir))
+    )
     site_info = pd.read_csv(static_inputs["env"])
 
     soil_data = pd.read_csv(static_inputs["soil"])
@@ -1021,11 +1026,6 @@ def merge_sap_env_data_site(
     env_input_dir = paths.env_outliers_removed_dir
     print(f"Sap input: {sap_input_dir}")
     print(f"Env input: {env_input_dir}")
-
-    require_static_sites(static_inputs, sap_site_names(sap_input_dir))
-    static_provenance = read_static_provenance(
-        static_inputs["provenance"], site_list_hash(load_sites(paths.site_info_path, paths.metadata_dir))
-    )
 
     # RUN_PROVENANCE.json outranks the badge in assert_dataset_contract, and the merge does not own
     # it, so a block naming the other contract is refused here -- before any work -- rather than

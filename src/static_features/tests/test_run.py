@@ -215,3 +215,13 @@ def test_a_part_records_the_code_it_was_built_from(context, registry, monkeypatc
     back, _ = read_part(context.parts_root, "fake_good")
 
     assert back.provenance == {"source": "fake", "code": {"commit": "abc", "package_clean": True}}
+
+
+def test_the_code_state_is_read_before_the_work_starts(context, registry, monkeypatch):
+    read = []
+    monkeypatch.setattr(run, "code_state", lambda: read.append(True) or {"commit": "abc", "package_clean": True})
+
+    with pytest.raises(ExtractionFailure):
+        run.run_product("fake_failing", context, registry=registry)
+
+    assert read == [True]

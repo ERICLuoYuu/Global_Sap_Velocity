@@ -296,3 +296,47 @@ def test_the_static_provenance_says_what_was_read(tmp_path):
 def test_a_root_from_another_site_list_stops_the_merge_naming_it(tmp_path):
     with pytest.raises(FeatureContractError, match="provenance.json"):
         read_static_provenance(_provenance(tmp_path, site_hash="earlier"), "today")
+
+
+class PastTheChecksError(Exception):
+    """Raised by the first load after the root's checks, so a run stops there without any real data."""
+
+
+@pytest.fixture
+def merge_on_a_root(monkeypatch, tmp_path):
+    """Run the merge against a root in ``tmp_path`` whose site list hashes to "today"; sap sites are A and B."""
+    sap_directories = []
+
+    def run(site_hash="today", **names_by_key):
+        _site_files(tmp_path, **names_by_key)
+        _provenance(tmp_path, site_hash=site_hash)
+        monkeypatch.setattr(merge, "static_features_root", lambda: tmp_path)
+        monkeypatch.setattr(merge, "load_cube", lambda _: None)
+        monkeypatch.setattr(merge, "load_sites", lambda *_: None)
+        monkeypatch.setattr(merge, "site_list_hash", lambda _: "today")
+        monkeypatch.setattr(merge, "sap_site_names", lambda directory: sap_directories.append(directory) or ["A", "B"])
+
+        def stop(*_):
+            raise PastTheChecksError
+
+        monkeypatch.setattr(merge, "load_stand_age_map", stop)
+        merge_sap_env_data_site(tmp_path / "out")
+
+    run.sap_directories = sap_directories
+    return run
+
+
+def test_the_merge_stops_on_a_site_absent_from_a_static_file(merge_on_a_root):
+    with pytest.raises(FeatureContractError, match="soilgrids_data.csv"):
+        merge_on_a_root(soil=["A"])
+
+
+def test_the_merge_stops_on_a_root_from_another_site_list(merge_on_a_root):
+    with pytest.raises(FeatureContractError, match="provenance.json"):
+        merge_on_a_root(site_hash="earlier")
+
+
+def test_the_merge_goes_on_from_a_good_root_and_checks_the_sites_it_will_loop_over(merge_on_a_root):
+    with pytest.raises(PastTheChecksError):
+        merge_on_a_root()
+    assert merge_on_a_root.sap_directories == [paths.sap_outliers_removed_dir]

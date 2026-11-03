@@ -158,7 +158,10 @@ def code_state() -> dict[str, Any]:
             ["git", *arguments], capture_output=True, text=True, check=False, cwd=Path(__file__).parent
         )
 
-    commit, changes = git("rev-parse", "HEAD"), git("status", "--porcelain", "--", ".")
+    try:
+        commit, changes = git("rev-parse", "HEAD"), git("status", "--porcelain", "--", ".")
+    except OSError:  # no git on this node: a finished extraction is worth more than this record
+        return {"commit": None, "package_clean": None}
     if commit.returncode != 0 or changes.returncode != 0:
         return {"commit": None, "package_clean": None}
     return {"commit": commit.stdout.strip(), "package_clean": not changes.stdout.strip()}

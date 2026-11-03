@@ -277,3 +277,12 @@ def test_code_state_outside_a_repository_claims_nothing(monkeypatch):
     monkeypatch.setattr(results.subprocess, "run", lambda *_, **__: Answer())
 
     assert results.code_state() == {"commit": None, "package_clean": None}
+
+
+def test_code_state_without_git_claims_nothing(monkeypatch):
+    def no_git(*_, **__):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(results.subprocess, "run", no_git)
+
+    assert results.code_state() == {"commit": None, "package_clean": None}

@@ -63,7 +63,14 @@ SOIL_COLUMNS = [
     "texture_class_0_5",
 ]
 SOIL_DATA_SOURCE = "earth_engine_1km"
-STAND_AGE_COLUMNS = [*SITE_COLUMNS, "stand_age_TC000", "stand_age_TC010", "stand_age_TC020", "stand_age_TC030"]
+STAND_AGE_COLUMNS = [
+    *SITE_COLUMNS,
+    "stand_age_TC000",
+    "stand_age_TC010",
+    "stand_age_TC020",
+    "stand_age_TC030",
+    "stand_age_neighbour",
+]
 FAN_COLUMNS = [
     "site_name",
     "root_depth",
@@ -78,12 +85,20 @@ FAN_COLUMNS = [
     "root_depth_lat_pixel",
     "root_depth_lon_pixel",
 ]
-NEW_PRODUCTS = ("han", "yang", "lusk", "liang", "lesiv", "cci", "gami", "tree_cover", "evi", "phenology")
+#: The products whose columns reach the merge. Owner, 2026-11-04: GAMI, Han, Liang and Yang stay out, too many sites
+#: lack them; their parts and quality columns are still built. Of MCD12Q2 only what is complete reaches the merge:
+#: its dates are missing wherever it detects no cycle, and the EVI harmonic stands in for them.
+NEW_PRODUCTS = ("lusk", "lesiv", "cci", "tree_cover", "evi", "phenology")
+MERGED_ONLY = {"phenology": ("phen_cycle_share", "phen_num_cycles")}
 NEW_FROM_OLD_PRODUCTS = ("canopy_height_p95_m", "land_share")
 LUSK_QUALITY_SUFFIXES = ("_cov", "_aoa")
 NOTES = {
     "slope_deg_centre": "Empty: a 1 km cell has no centre-pixel slope, so the column stays for the merge's header only.",
     "aspect_deg": "aspect_deg and aspect_standardized are the bearing of the mean aspect vector, empty where it is (0, 0).",
+    "stand_age_neighbour": "The mean BGI age at the nearest node within 25 km, only where the site's own node holds none. "
+    "The merge reads it after the ground st_age.",
+    "new_static_features": "GAMI, Han, Liang and Yang, and the MCD12Q2 dates, are left out of the merge (owner, "
+    "2026-11-04); their values stay in parts/ and their status in static_quality.csv.",
 }
 
 
@@ -155,13 +170,19 @@ def _soil_table(sites: pd.DataFrame, values: pd.DataFrame) -> pd.DataFrame:
     return _select(table, SOIL_COLUMNS, "soilgrids_data.csv")
 
 
+def _merged_columns(product: str, part: ProductResult) -> list[str]:
+    if product in MERGED_ONLY:
+        return list(MERGED_ONLY[product])  # named, so a part without them stops the assembly
+    return [
+        column
+        for column in part.values.columns
+        if not (product == "lusk" and column.endswith(LUSK_QUALITY_SUFFIXES))
+    ]
+
+
 def _new_table(parts: dict[str, ProductResult], values: pd.DataFrame) -> pd.DataFrame:
     columns = [
-        column
-        for product in NEW_PRODUCTS
-        if product in parts
-        for column in parts[product].values.columns
-        if not (product == "lusk" and column.endswith(LUSK_QUALITY_SUFFIXES))
+        column for product in NEW_PRODUCTS if product in parts for column in _merged_columns(product, parts[product])
     ]
     return _select(values, [*columns, *NEW_FROM_OLD_PRODUCTS], "new_static_features.csv").reset_index()
 

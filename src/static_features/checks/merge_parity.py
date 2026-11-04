@@ -24,19 +24,9 @@ LOGGER = logging.getLogger(__name__)
 KEY = ["site_name", "TIMESTAMP"]
 #: The merge writes this beside the site files. It pools every site, so its keys repeat.
 AGGREGATE = "all_biomes_merged_daily.csv"
-#: Site -> the static columns that may become empty there, and why. Still reported on every run.
-EXPECTED_EMPTIED: dict[str, dict[str, Any]] = {
-    "CHN_YUN_YUN": {
-        "columns": (
-            *(f"soil_{prop}{depth}" for prop in ("soc", "bdod") for depth in ("", "_0_5", "_5_15", "_15_30", "_30_60", "_60_100")),
-            "soil_theta_wp",
-            "soil_theta_fc",
-            "soil_theta_sat",
-        ),
-        "reason": "The cell is mostly water. SoilGrids on Earth Engine holds no soc or bdod there, and the old REST ring "
-        "search reached beyond the cell for them.",
-    },
-}
+#: Site -> the static columns that may become empty there, and why. Still reported on every run. Empty since the soil
+#: fill of 2026-11-04: CHN_YUN_YUN, the one site named before, now borrows soc and bdod from the nearest cell.
+EXPECTED_EMPTIED: dict[str, dict[str, Any]] = {}
 STATIC_EXACT = frozenset(
     {
         "elevation",

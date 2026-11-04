@@ -3,8 +3,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from src.static_features.products.soil import DEPTHS, PROPERTIES, soil_result, texture_class
-from src.static_features.results import NO_DATA, OK, validate
+from src.static_features.neighbours import BORROWED_COLUMNS, Borrowed, Node
+from src.static_features.products.soil import DEPTHS, PROPERTIES, cell_frame, empty_columns, soil_result, texture_class
+from src.static_features.results import NEIGHBOUR, NO_DATA, OK, validate
 
 
 def _property_cells(prop, raw, count=16.0, all_count=16.0, site="A"):
@@ -84,3 +85,57 @@ def test_soil_coverage_is_per_property_and_depth():
     result = soil_result(cells)
     assert result.coverage.loc["A", "sand_30_60"] == 0.75
     assert result.coverage.loc["A", "clay_30_60"] == 1.0
+
+
+NODE = Node(distance_km=0.18, row=7, col=9, lat=1.5, lon=2.5)
+
+
+def _empty_soc():
+    cells = _all_properties()
+    cells["soc"] = _property_cells("soc", np.nan, count=0.0)
+    return cells
+
+
+def test_empty_columns_are_the_value_columns_without_data():
+    empty = empty_columns(soil_result(_empty_soc()))
+
+    assert "texture_class_0_5" not in empty.columns
+    assert bool(empty.loc["A", "soc_0_5"]) and bool(empty.loc["A", "soc_100_200"])
+    assert not bool(empty.loc["A", "clay_0_5"])
+
+
+def test_a_borrowed_value_takes_its_place_with_status_neighbour():
+    result = soil_result(_empty_soc(), {"A": {"soc_0_5": Borrowed(12.5, NODE)}})
+
+    assert result.values.loc["A", "soc_0_5"] == 12.5
+    assert result.status.loc["A", "soc_0_5"] == NEIGHBOUR
+    assert result.coverage.loc["A", "soc_0_5"] == 0.0  # coverage stays the site's own cell's
+    assert np.isnan(result.values.loc["A", "soc_5_15"])
+    assert result.status.loc["A", "soc_5_15"] == NO_DATA
+    validate(result, ["A"])
+
+
+def test_the_borrowed_values_are_listed_with_their_distance():
+    table = soil_result(_empty_soc(), {"A": {"soc_0_5": Borrowed(12.5, NODE)}}).extras["soil_neighbours"]
+
+    assert list(table.columns) == BORROWED_COLUMNS
+    assert table.iloc[0].tolist() == ["A", "soc_0_5", 0.18, 1.5, 2.5]
+    assert soil_result(_all_properties()).extras["soil_neighbours"].empty
+
+
+def test_texture_from_a_borrowed_fraction_is_neighbour():
+    cells = _all_properties(clay=450.0, sand=200.0, silt=350.0)
+    cells["clay"] = _property_cells("clay", np.nan, count=0.0)
+    result = soil_result(cells, {"A": {"clay_0_5": Borrowed(45.0, NODE)}})
+
+    assert result.values.loc["A", "texture_class_0_5"] == "Clay"
+    assert result.status.loc["A", "texture_class_0_5"] == NEIGHBOUR
+    validate(result, ["A"])
+
+
+def test_cell_frame_names_each_cell_once_in_the_order_given():
+    nodes = [NODE, Node(distance_km=1.0, row=7, col=10, lat=1.5, lon=2.6)]
+    frame = cell_frame(nodes)
+
+    assert frame["row"].tolist() == [7, 7] and frame["col"].tolist() == [9, 10]
+    assert frame["site_name"].is_unique

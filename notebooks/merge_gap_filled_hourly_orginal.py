@@ -254,6 +254,46 @@ def load_stand_age_map(age_file_path):
     return df.set_index("site_name")["mean_age"].to_dict()
 
 
+#: The stand_age_data.csv column with a BGI age borrowed from the nearest node within 25 km, filled only where the
+#: site's own node holds no threshold. Its name holds no "stand_age_TC", so the mean above never takes it in.
+STAND_AGE_NEIGHBOUR = "stand_age_neighbour"
+
+
+def load_stand_age_neighbours(age_file_path):
+    """site_name -> the borrowed BGI age, NaN where the own node had one or no node within reach did."""
+    df = pd.read_csv(age_file_path)
+    if STAND_AGE_NEIGHBOUR not in df.columns:
+        raise ValueError(f"{age_file_path} holds no {STAND_AGE_NEIGHBOUR} column: rebuild it with src.static_features")
+    return df.set_index("site_name")[STAND_AGE_NEIGHBOUR].to_dict()
+
+
+def ground_stand_age(stand_md_file):
+    """st_age from a site's stand metadata, NaN without the file or the column."""
+    stand_age = np.nan
+    if stand_md_file.exists():
+        try:
+            s_md = pd.read_csv(stand_md_file)
+            if "st_age" in s_md.columns:
+                val = s_md["st_age"].iloc[0]
+                stand_age = pd.to_numeric(val, errors="coerce")
+        except Exception:
+            pass
+    return stand_age
+
+
+def site_stand_age(site, stand_age_map, stand_age_neighbours, stand_md_file):
+    """BGI at the site's own node, else the ground st_age, else the BGI age borrowed from the nearest node.
+
+    The borrowed age comes last, so a pixel kilometres away never displaces an age measured at the stand.
+    """
+    stand_age = stand_age_map.get(site, np.nan)
+    if pd.isna(stand_age):
+        stand_age = ground_stand_age(stand_md_file)
+    if pd.isna(stand_age):
+        stand_age = stand_age_neighbours.get(site, np.nan)
+    return stand_age
+
+
 #: Written into ``biome`` when a site ships no ``si_biome``. A NAMED placeholder,
 #: never NaN: the by-biome filename is built by ITERATING the label (NaN is not
 #: iterable), and NaN never compares equal to itself, so a NaN key gives every
@@ -956,6 +996,7 @@ def merge_sap_env_data_site(
     print("Loaded SoilGrids data.")
 
     stand_age_map = load_stand_age_map(static_inputs["stand_age"])
+    stand_age_neighbours = load_stand_age_neighbours(static_inputs["stand_age"])
 
     # --- LOAD FAN 2017 ROOT DEPTH + HYDROLOGIC REGIME FEATURES ---
     # Left-joined into site_info so the per-site `.values[0]` lookup below
@@ -1121,20 +1162,12 @@ def merge_sap_env_data_site(
                 precip_seasonality = curr_site_info["bio15"].values[0]
 
                 # --- 1. EXTRACT STAND AGE ---
-                stand_age = np.nan
-                if location_type in stand_age_map:
-                    stand_age = stand_age_map[location_type]
-
-                if pd.isna(stand_age):
-                    stand_md_file = paths.raw_csv_dir / f"{location_type}_stand_md.csv"
-                    if stand_md_file.exists():
-                        try:
-                            s_md = pd.read_csv(stand_md_file)
-                            if "st_age" in s_md.columns:
-                                val = s_md["st_age"].iloc[0]
-                                stand_age = pd.to_numeric(val, errors="coerce")
-                        except Exception:
-                            pass
+                stand_age = site_stand_age(
+                    location_type,
+                    stand_age_map,
+                    stand_age_neighbours,
+                    paths.raw_csv_dir / f"{location_type}_stand_md.csv",
+                )
 
                 # --- 2. EXTRACT SOIL PROPS ---
                 avg_props = {"sand": np.nan, "clay": np.nan, "soc": np.nan, "bdod": np.nan, "cfvo": np.nan}

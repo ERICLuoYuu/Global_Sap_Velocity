@@ -44,7 +44,7 @@ COLUMNS = {
     "canopy": ["canopy_height_m", "canopy_height_p95_m"],
     "soil": [*SOIL_COLUMNS, "texture_class_0_5"],
     "worldclim": [*BIO_COLUMNS, "koppen_class", "koppen_name"],
-    "stand_age": AGE_COLUMNS,
+    "stand_age": [*AGE_COLUMNS, "stand_age_neighbour"],
     "fan": FAN_COLUMNS,
     "han": ["root_depth_han", "root_depth_han_type"],
     "yang": ["wood_density"],
@@ -55,26 +55,24 @@ COLUMNS = {
     "gami": ["forest_age_gami"],
     "tree_cover": ["tree_cover_pct"],
     "evi": ["evi_mean"],
-    "phenology": ["phen_peak_sin"],
+    "phenology": ["phen_peak_sin", "phen_cycle_share", "phen_num_cycles"],
 }
 TEXT_COLUMNS = {"texture_class_0_5", "koppen_name", "root_depth_continent", "root_depth_han_type"}
 NEW_COLUMNS = [
-    "root_depth_han",
-    "root_depth_han_type",
-    "wood_density",
     "root_depth_lusk",
     "wood_density_lusk",
-    "tree_richness_per_ha",
     "fm_share_11",
     "fm_dominant",
     "agb_mg_ha",
-    "forest_age_gami",
     "tree_cover_pct",
     "evi_mean",
-    "phen_peak_sin",
+    "phen_cycle_share",
+    "phen_num_cycles",
     "canopy_height_p95_m",
     "land_share",
 ]
+#: Owner, 2026-11-04: too gappy for the merge. Their parts and quality columns stay.
+OUT_OF_MERGE = ["root_depth_han", "root_depth_han_type", "wood_density", "tree_richness_per_ha", "forest_age_gami"]
 ENV_HEADER = (
     "start_date,end_date,lat,lon,site_name,canopy_height_m,elevation_m,slope_deg,aspect_deg,aspect_standardized,"
     "aspect_category,aspect_sin,aspect_cos,bio1,bio2,bio3,bio4,bio5,bio6,bio7,bio8,bio9,bio10,bio11,bio12,bio13,bio14,"
@@ -88,7 +86,10 @@ SOIL_HEADER = (
     "soc_15_30,soc_30_60,soc_60_100,soc_100_200,phh2o_0_5,phh2o_5_15,phh2o_15_30,phh2o_30_60,phh2o_60_100,phh2o_100_200,"
     "nitrogen_0_5,nitrogen_5_15,nitrogen_15_30,nitrogen_30_60,nitrogen_60_100,nitrogen_100_200,texture_class_0_5"
 )
-AGE_HEADER = "start_date,end_date,lat,lon,site_name,stand_age_TC000,stand_age_TC010,stand_age_TC020,stand_age_TC030"
+AGE_HEADER = (
+    "start_date,end_date,lat,lon,site_name,stand_age_TC000,stand_age_TC010,stand_age_TC020,stand_age_TC030,"
+    "stand_age_neighbour"
+)
 FAN_HEADER = (
     "site_name,root_depth,infiltration_depth,deep_drainage,drainage_frequency,regolith_flush_rate,gw_residence_time,"
     "root_depth_mask_valid,root_depth_fallback_px,root_depth_continent,root_depth_lat_pixel,root_depth_lon_pixel"
@@ -167,9 +168,12 @@ def test_soil_file_has_the_exact_header(built):
     assert _header(output / "soilgrids_data.csv") == SOIL_HEADER
 
 
-def test_stand_age_file_holds_only_four_stand_age_columns(built):
-    _, output = built  # the merge averages any column whose name holds stand_age_TC, so nothing else may
-    assert _header(output / "stand_age_data.csv") == AGE_HEADER
+def test_stand_age_file_holds_four_thresholds_and_the_borrowed_age(built):
+    _, output = built  # the merge averages any column whose name holds stand_age_TC, so the borrowed age may not
+    header = _header(output / "stand_age_data.csv")
+
+    assert header == AGE_HEADER
+    assert len([column for column in header.split(",") if "stand_age_TC" in column]) == 4
 
 
 def test_fan_file_has_the_exact_header(built):
@@ -462,3 +466,28 @@ def test_provenance_is_the_last_file_put_in_place(tmp_path, monkeypatch):
 
     assert order[-1] == "provenance.json"
     assert order.count("provenance.json") == 1
+
+
+def test_the_gappy_products_stay_out_of_the_merge_and_keep_their_quality(built):
+    _, output = built
+    merged = _header(output / "new_static_features.csv").split(",")
+    quality = _header(output / "static_quality.csv").split(",")
+
+    assert not [column for column in OUT_OF_MERGE if column in merged]
+    assert not [column for column in OUT_OF_MERGE if f"{column}_status" not in quality]
+
+
+def test_of_phenology_only_the_cycle_share_and_count_reach_the_merge(built):
+    _, output = built
+    merged = _header(output / "new_static_features.csv").split(",")
+
+    assert [column for column in merged if column.startswith("phen_")] == ["phen_cycle_share", "phen_num_cycles"]
+    assert "phen_peak_sin_status" in _header(output / "static_quality.csv").split(",")
+
+
+def test_assemble_refuses_a_phenology_part_without_the_cycle_count(tmp_path):
+    context = _context(tmp_path)
+    _all_parts(context)
+    _write_part(context, "phenology", columns=["phen_peak_sin", "phen_cycle_share"])
+    with pytest.raises(ExtractionFailure, match="phen_num_cycles"):
+        assemble(context)

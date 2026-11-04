@@ -32,7 +32,15 @@ _DEVILLA = {
     "ground st_age 41; the forest pixel gives 54-56 years. Reported to the owner on 2026-11-03.",
 }
 
-#: Sites allowed to differ from the current files, the outcomes allowed there, and why.
+_GUIANA = {
+    "outcomes": (DIFFERS, EMPTY_TO_VALUE),
+    "products": ("fan",),
+    "reason": "Fan read the NAMERICA file, the first box holding the site, which has no land there; the reader now "
+    "goes on to the SAMERICA box, whose file holds the site's own pixel (owner, 2026-11-04).",
+}
+
+#: Sites allowed to differ from the current files, the outcomes allowed there, and why. An entry naming products
+#: allows the difference in those products only.
 EXPECTED_DIFFERENCES = {
     "CHE_DAV_SEE": {"outcomes": (DIFFERS,), "reason": "Coordinate corrected, 4b9eaf8."},
     "CHN_YUN_YUN": {
@@ -41,7 +49,13 @@ EXPECTED_DIFFERENCES = {
     },
     "GBR_DEV_CON": _DEVILLA,
     "GBR_DEV_DRO": _DEVILLA,
+    "GUF_GUY_GUY": _GUIANA,
+    "GUF_GUY_ST2": _GUIANA,
 }
+
+#: Columns a product gained after the current files were written: nothing to compare them with. Any other column the
+#: current file lacks stops the check, so a renamed column cannot pass unseen.
+NEW_COLUMNS = {"stand_age": ("stand_age_neighbour",)}
 
 CURRENT_FILES = {
     "worldclim": ("env_site_data", "site_info_with_env_data.csv"),
@@ -78,8 +92,15 @@ def _compare_product(product: str, context: RunContext, scale: str) -> pd.DataFr
     current = pd.read_csv(current_path, float_precision="round_trip", keep_default_na=False, na_values=[""])
     current = current.set_index("site_name").reindex(part.values.index)
 
+    absent = [column for column in part.values.columns if column not in current.columns]
+    unnamed = sorted(set(absent) - set(NEW_COLUMNS.get(product, ())))
+    if unnamed:
+        raise ExtractionFailure(f"{product}: {current_path} holds no {unnamed}, and they are not named as new")
+    for column in absent:
+        LOGGER.info("%s: %s is new since the current files, not compared", product, column)
+
     rows = []
-    for column in part.values.columns:
+    for column in [column for column in part.values.columns if column in current.columns]:
         outcome = classify(current[column], part.values[column])
         rows.append(
             pd.DataFrame(
@@ -126,7 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for row in different.itertuples(index=False):
         entry = EXPECTED_DIFFERENCES.get(row.site_name)
         detail = f"{row.outcome} {row.column} {row.site_name}: {row.product} ({row.old} -> {row.new})"
-        if entry is not None and row.outcome in entry["outcomes"]:
+        if entry is not None and row.outcome in entry["outcomes"] and row.product in entry.get("products", (row.product,)):
             LOGGER.warning("%s, named: %s", detail, entry["reason"])
         else:
             LOGGER.error("%s", detail)

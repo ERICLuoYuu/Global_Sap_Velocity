@@ -7,20 +7,23 @@ import rasterio
 from rasterio.transform import from_origin
 from src.static_features.fetch import Download
 from src.static_features.grid import cell_of
+from src.static_features.neighbours import BORROWED_COLUMNS, KM_PER_DEGREE
 from src.static_features.products import lesiv
 from src.static_features.products.lesiv import cell_shares, extract, fetch_inputs
-from src.static_features.results import NO_DATA, OK, ExtractionFailure, RunContext, validate
+from src.static_features.results import NEIGHBOUR, NO_DATA, OK, ExtractionFailure, RunContext, validate
 
 # 240 pixels per degree from (10.0, 50.1). The site at (50.0525, 10.0525) has cell bounds 10.05..10.0583 and
 # 50.05..50.0583, so the pixels centred in it are rows 10-11, cols 12-13.
 LAT, LON = 50.0525, 10.0525
 
 
-def _write(tmp_path, cell, background=0, nodata=None):
+def _write(tmp_path, cell, background=0, nodata=None, others=()):
     directory = tmp_path / "lesiv_2022"
     directory.mkdir()
     grid = np.full((24, 24), background, dtype="uint8")
     grid[10:12, 12:14] = cell
+    for rows, cols, value in others:  # other cells, as pixel slices
+        grid[rows, cols] = value
     profile = {
         "driver": "GTiff", "height": 24, "width": 24, "count": 1, "dtype": "uint8", "crs": "EPSG:4326",
         "transform": from_origin(10.0, 50.1, 1 / 240, 1 / 240), "nodata": nodata,
@@ -135,3 +138,36 @@ def test_fetch_inputs_stops_when_the_record_lacks_the_map(tmp_path, monkeypatch)
 def test_lesiv_cell_shares_of_an_empty_block_is_refused():
     with pytest.raises(ValueError):
         cell_shares(np.empty((0, 0), dtype="uint8"), None)
+
+
+def test_lesiv_cell_without_forest_borrows_the_class_of_the_nearest_forest_cell(tmp_path):
+    # The cell east of the site's is 0.7 km away and holds 31; two cells north, 2 km away, holds 11.
+    _write(tmp_path, 0, others=[(slice(10, 12), slice(14, 16), 31), (slice(6, 8), slice(12, 14), 11)])
+    result = extract(_context(tmp_path))
+
+    assert result.values.loc["A", "fm_dominant"] == 31
+    assert result.status.loc["A", "fm_dominant"] == NEIGHBOUR
+    assert result.values.loc["A", "fm_share_31"] == 0.0  # the shares describe the site's own cell
+    assert result.status.loc["A", "fm_share_31"] == OK
+    assert result.coverage.loc["A", "fm_dominant"] == 0.0
+    table = result.extras["lesiv_neighbours"]
+    assert list(table.columns) == BORROWED_COLUMNS
+    # The east cell is centred 0.01 deg east of the site and 1/600 deg north of it.
+    east_km = 0.01 * KM_PER_DEGREE * np.cos(np.radians(LAT))
+    assert table.iloc[0]["distance_km"] == pytest.approx(np.hypot(east_km, (50.0541667 - LAT) * KM_PER_DEGREE), abs=1e-3)
+    validate(result, ["A"])
+
+
+def test_lesiv_cell_with_forest_borrows_nothing(tmp_path):
+    _write(tmp_path, 11, others=[(slice(10, 12), slice(14, 16), 31)])
+    result = extract(_context(tmp_path))
+
+    assert result.values.loc["A", "fm_dominant"] == 11
+    assert result.status.loc["A", "fm_dominant"] == OK
+    assert result.extras["lesiv_neighbours"].empty
+
+
+def test_lesiv_unknown_value_in_a_neighbour_cell_stops(tmp_path):
+    _write(tmp_path, 0, others=[(slice(10, 12), slice(14, 16), 77)])
+    with pytest.raises(ExtractionFailure, match="77"):
+        extract(_context(tmp_path))

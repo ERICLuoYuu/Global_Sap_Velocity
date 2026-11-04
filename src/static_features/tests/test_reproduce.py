@@ -69,10 +69,11 @@ def tree(tmp_path, monkeypatch):
     monkeypatch.setattr(results.RunContext, "for_scale", staticmethod(lambda scale, project: context))
     site_hash = site_list_hash(SITES)
 
-    def build(stand_age_part=(np.nan, 5.0), stand_age_current=(np.nan, 5.0)):
+    def build(stand_age_part=(np.nan, 5.0), stand_age_current=(np.nan, 5.0), stand_age_extra=None):
         _part(context.parts_root, site_hash, "worldclim", {"bio1": [1.5, 2.5], "koppen_name": ["Cfb", "Dfc"]})
         _part(context.parts_root, site_hash, "fan", {"root_depth": [3.5, 4.5]})
-        _part(context.parts_root, site_hash, "stand_age", {"stand_age_TC000": list(stand_age_part)})
+        stand_age = {"stand_age_TC000": list(stand_age_part), **(stand_age_extra or {})}
+        _part(context.parts_root, site_hash, "stand_age", stand_age)
         _current(
             extracted,
             "env_site_data",
@@ -154,8 +155,44 @@ def test_a_difference_at_another_site_still_stops(tree, monkeypatch):
 
 
 def test_the_named_sites_each_give_a_reason():
-    assert set(reproduce.EXPECTED_DIFFERENCES) == {"CHE_DAV_SEE", "CHN_YUN_YUN", "GBR_DEV_CON", "GBR_DEV_DRO"}
+    expected = {"CHE_DAV_SEE", "CHN_YUN_YUN", "GBR_DEV_CON", "GBR_DEV_DRO", "GUF_GUY_GUY", "GUF_GUY_ST2"}
+    assert set(reproduce.EXPECTED_DIFFERENCES) == expected
     assert all(entry["reason"] and entry["outcomes"] for entry in reproduce.EXPECTED_DIFFERENCES.values())
-    # Only the moved Devilla stands may gain a value: it replaces the merge's fallback to ground st_age.
+    # The moved Devilla stands gain a BGI age, which replaces the merge's fallback to ground st_age; the French Guiana
+    # stands gain Fan values only, now read from the South America file.
     gaining = {site for site, entry in reproduce.EXPECTED_DIFFERENCES.items() if reproduce.EMPTY_TO_VALUE in entry["outcomes"]}
-    assert gaining == {"GBR_DEV_CON", "GBR_DEV_DRO"}
+    assert gaining == {"GBR_DEV_CON", "GBR_DEV_DRO", "GUF_GUY_GUY", "GUF_GUY_ST2"}
+    assert reproduce.EXPECTED_DIFFERENCES["GUF_GUY_GUY"]["products"] == ("fan",)
+    assert reproduce.EXPECTED_DIFFERENCES["GUF_GUY_ST2"]["products"] == ("fan",)
+
+
+def test_a_named_new_column_is_reported_and_not_compared(tree, caplog):
+    context = tree(stand_age_extra={"stand_age_neighbour": [40.0, np.nan]})
+    with caplog.at_level(logging.INFO):
+        assert reproduce.main(["--scale", SCALE]) == 0
+    assert "stand_age_neighbour" in caplog.text
+    summary = pd.read_csv(context.output_root / "checks" / "reproduce_summary.csv")
+    assert "stand_age_neighbour" not in set(summary["column"])
+
+
+def test_an_unnamed_column_the_current_file_lacks_stops(tree, caplog):
+    tree(stand_age_extra={"stand_age_other": [1.0, 2.0]})
+    with caplog.at_level(logging.ERROR):
+        assert reproduce.main(["--scale", SCALE]) != 0
+    assert "stand_age_other" in caplog.text
+
+
+def test_a_named_site_limited_to_one_product_still_stops_on_another(tree, monkeypatch):
+    named = {"A": {"outcomes": (reproduce.EMPTY_TO_VALUE,), "products": ("fan",), "reason": "because"}}
+    monkeypatch.setattr(reproduce, "EXPECTED_DIFFERENCES", named)
+    tree(stand_age_part=(7.0, 5.0))
+
+    assert reproduce.main(["--scale", SCALE]) != 0
+
+
+def test_a_named_site_limited_to_its_product_passes(tree, monkeypatch):
+    named = {"A": {"outcomes": (reproduce.EMPTY_TO_VALUE,), "products": ("stand_age",), "reason": "because"}}
+    monkeypatch.setattr(reproduce, "EXPECTED_DIFFERENCES", named)
+    tree(stand_age_part=(7.0, 5.0))
+
+    assert reproduce.main(["--scale", SCALE]) == 0

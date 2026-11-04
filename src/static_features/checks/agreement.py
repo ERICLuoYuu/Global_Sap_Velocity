@@ -17,8 +17,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
-from src.static_features.results import ExtractionFailure, RunContext, read_table
+from src.static_features.results import ExtractionFailure, RunContext, read_part
 from src.static_features.run import DEFAULT_PROJECT
+from src.static_features.sites import site_list_hash
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +30,13 @@ PAIRS = (
     ("wood_density_lusk", "wood_density"),
 )
 EXPECTED_UNITS = {"root_depth_lusk": "m", "wood_density_lusk": "g cm3"}  # the files' spelling of g cm-3
+#: Where each compared column is read. From the parts, because Han and Yang no longer reach the merge's files.
+SOURCES = {
+    "lusk": ("root_depth_lusk", "wood_density_lusk"),
+    "han": ("root_depth_han",),
+    "yang": ("wood_density",),
+    "fan": ("root_depth",),
+}
 STATISTICS = ("pearson", "spearman", "bias", "rmse")
 DRAWS = 2000
 ALL_SITES = "all"
@@ -108,6 +116,18 @@ def report(frame: pd.DataFrame, pairs: Sequence[tuple[str, str]], igbp: pd.Serie
     return pd.DataFrame(rows)
 
 
+def source_values(context: RunContext) -> pd.DataFrame:
+    """The compared columns, one row per site, from parts built for today's site list."""
+    expected = site_list_hash(context.sites)
+    frames = []
+    for product, columns in SOURCES.items():
+        part, found = read_part(context.parts_root, product)
+        if found != expected:
+            raise ExtractionFailure(f"{product}: the part was built from another site list; rerun the product")
+        frames.append(part.values[list(columns)])
+    return pd.concat(frames, axis=1)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
@@ -118,13 +138,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = context.output_root
     try:
         check_units(json.loads((output / "provenance.json").read_text(encoding="utf-8")))
-        new = read_table(output / "new_static_features.csv", index_col="site_name")
-        fan = read_table(output / "site_info_with_root_depth_fan2017.csv", index_col="site_name")
+        values = source_values(context)
     except (ExtractionFailure, OSError, KeyError) as failure:
         LOGGER.error("%s", failure)
         return 1
 
-    table = report(new.join(fan["root_depth"]), PAIRS, context.sites.set_index("site_name")["si_igbp"], draws=DRAWS)
+    table = report(values, PAIRS, context.sites.set_index("site_name")["si_igbp"], draws=DRAWS)
     checks = output / "checks"
     checks.mkdir(parents=True, exist_ok=True)
     table.to_csv(checks / "agreement.csv", index=False)

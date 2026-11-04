@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 from src.static_features.checks import agreement
 from src.static_features.checks.agreement import PAIRS, check_units, main, pair_stats, report
-from src.static_features.results import ExtractionFailure, RunContext
+from src.static_features.results import OK, ExtractionFailure, ProductResult, RunContext, write_part
+from src.static_features.sites import site_list_hash
 
 DRAWS = 200
 
@@ -131,25 +132,39 @@ def test_report_has_a_row_per_igbp_and_overall():
     assert set(table["a"]) == {"x"} and set(table["b"]) == {"y"}
 
 
+NAMES = ["A", "B", "C"]
+SOURCES = {
+    "lusk": {"root_depth_lusk": [1.0, 2.0, 3.0], "wood_density_lusk": [0.4, 0.5, 0.6]},
+    "han": {"root_depth_han": [1.0, 2.5, 3.5]},
+    "yang": {"wood_density": [0.5, 0.5, 0.7]},
+    "fan": {"root_depth": [2.0, 3.0, 4.0]},
+}
+
+
+def _write_source(context, product, columns, site_hash=None):
+    index = pd.Index(NAMES, name="site_name")
+    values = pd.DataFrame(columns, index=index)
+    result = ProductResult(
+        product=product,
+        values=values,
+        status=pd.DataFrame(OK, index=index, columns=values.columns),
+        coverage=pd.DataFrame(index=index),
+    )
+    write_part(result, context.parts_root, site_list_hash(context.sites) if site_hash is None else site_hash)
+
+
 def _files(tmp_path, provenance):
+    """The four sources as parts: Han and Yang are no longer in the merge's files, so the check reads parts."""
     output = tmp_path / "static_1km" / "scale"
     output.mkdir(parents=True)
-    names = ["A", "B", "C"]
-    pd.DataFrame(
-        {
-            "site_name": names,
-            "root_depth_lusk": [1.0, 2.0, 3.0],
-            "root_depth_han": [1.0, 2.5, 3.5],
-            "wood_density_lusk": [0.4, 0.5, 0.6],
-            "wood_density": [0.5, 0.5, 0.7],
-        }
-    ).to_csv(output / "new_static_features.csv", index=False)
-    pd.DataFrame({"site_name": names, "root_depth": [2.0, 3.0, 4.0]}).to_csv(
-        output / "site_info_with_root_depth_fan2017.csv", index=False
-    )
     (output / "provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
-    sites = pd.DataFrame({"site_name": names, "si_igbp": ["ENF", "ENF", "EBF"]})
-    return RunContext(sites=sites, raw_root=tmp_path, output_root=output, project="p")
+    sites = pd.DataFrame(
+        {"site_name": NAMES, "lat": [1.0, 2.0, 3.0], "lon": [4.0, 5.0, 6.0], "si_igbp": ["ENF", "ENF", "EBF"]}
+    )
+    context = RunContext(sites=sites, raw_root=tmp_path, output_root=output, project="p")
+    for product, columns in SOURCES.items():
+        _write_source(context, product, columns)
+    return context
 
 
 def _run(context, monkeypatch):
@@ -173,6 +188,20 @@ def test_main_returns_nonzero_on_a_wrong_unit_and_writes_nothing(tmp_path, monke
     provenance = _good_provenance()
     provenance["products"]["lusk"]["traits"]["4"]["unit"] = "kg m-3"
     context = _files(tmp_path, provenance)
+
+    assert _run(context, monkeypatch) == 1
+    assert not (context.output_root / "checks" / "agreement.csv").exists()
+
+
+def test_main_reads_the_sources_from_their_parts_not_the_merge_table(tmp_path, monkeypatch):
+    context = _files(tmp_path, _good_provenance())
+    assert not (context.output_root / "new_static_features.csv").exists()
+    assert _run(context, monkeypatch) == 0
+
+
+def test_main_refuses_a_part_from_another_site_list(tmp_path, monkeypatch):
+    context = _files(tmp_path, _good_provenance())
+    _write_source(context, "yang", SOURCES["yang"], site_hash="other")
 
     assert _run(context, monkeypatch) == 1
     assert not (context.output_root / "checks" / "agreement.csv").exists()

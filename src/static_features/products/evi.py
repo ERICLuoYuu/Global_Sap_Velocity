@@ -30,6 +30,8 @@ LAST_YEAR = 2020
 BATCH_SIZE = 60
 SCALE = 0.0001
 COUNTED_CLASSES = (0, 1)  # good and marginal; 2 is snow or ice and 3 is cloud
+SNOW_CLASS = 2
+DORMANT_PERCENTILE = 10
 MIN_COMPOSITES_PER_YEAR = 6
 COMPOSITE_COLUMNS = ["site_name", "date", "qa_class", "mean_evi", "pixel_count", "land_pixels", "all_pixels"]
 SUMMARIES = {"evi_mean": "year_mean", "evi_amplitude": "year_amplitude"}
@@ -49,7 +51,10 @@ PROVENANCE = {
         "squares to the same composites, c + a cos wt + b sin wt + a2 cos 2wt + b2 sin 2wt with w = 2 pi / 365.25 and t "
         "the composite's middle day of year: evi_season_amplitude is hypot(a, b), evi_season_r2 the share of variance "
         "both harmonics explain, and evi_peak_cos_w, evi_peak_sin_w are (a, b), the amplitude times the cosine and "
-        "sine of the annual peak, so they fade to (0, 0) with the season. They replace the MCD12Q2 dates in the merge "
+        "sine of the annual peak, so they fade to (0, 0) with the season. A composite of a counted year whose land is "
+        "at least half snow enters the harmonic only, at the site's dormant level, the 10th percentile of its counted "
+        "composites: a stand clear only in summer is otherwise extrapolated across winter (review, 2026-11-04). "
+        "They replace the MCD12Q2 dates in the merge "
         "(owner, 2026-11-04): MCD12Q2 dates no cycle below an EVI2 amplitude of 0.1, so its dates were missing "
         "exactly where a stand is least seasonal."
     ),
@@ -142,12 +147,31 @@ def seasonal_fit(day: np.ndarray, evi: np.ndarray) -> dict[str, float]:
     }
 
 
-def _harmonics(in_used: pd.DataFrame) -> pd.DataFrame:
-    """One row per site with a counted year, fitted over the composites of its counted years."""
+def _centre_days(dates: pd.Series) -> np.ndarray:
+    return pd.to_datetime(dates).dt.dayofyear.to_numpy(dtype=float) + COMPOSITE_CENTRE_DAYS
+
+
+def _snow_composites(composites: pd.DataFrame, valid: pd.DataFrame, used: pd.DataFrame) -> pd.DataFrame:
+    """Site and date of each composite of a counted year whose land is at least half snow and that is not valid."""
+    snow = composites[composites["qa_class"] == SNOW_CLASS]
+    snow = snow[snow["pixel_count"] * 2 >= snow["land_pixels"]]
+    snow = snow.assign(year=pd.to_datetime(snow["date"]).dt.year).merge(used[["site_name", "year"]], on=["site_name", "year"])
+    clear = valid[["site_name", "date"]].drop_duplicates()
+    sides = snow[["site_name", "date"]].merge(clear, on=["site_name", "date"], how="left", indicator=True)
+    return sides.loc[sides["_merge"] == "left_only", ["site_name", "date"]].drop_duplicates()
+
+
+def _harmonics(in_used: pd.DataFrame, snow: pd.DataFrame) -> pd.DataFrame:
+    """One row per site with a counted year: its counted composites, and its snow composites at the dormant level."""
+    winter = {site: _centre_days(group["date"]) for site, group in snow.groupby("site_name")}
     fits = {}
     for site, group in in_used.groupby("site_name"):
-        day = pd.to_datetime(group["date"]).dt.dayofyear.to_numpy(dtype=float) + COMPOSITE_CENTRE_DAYS
-        fits[site] = seasonal_fit(day, group["mean_evi"].to_numpy(dtype=float))
+        evi = group["mean_evi"].to_numpy(dtype=float)
+        snow_days = winter.get(site, np.empty(0))
+        dormant = np.full(snow_days.size, np.percentile(evi, DORMANT_PERCENTILE))
+        fits[site] = seasonal_fit(
+            np.concatenate([_centre_days(group["date"]), snow_days]), np.concatenate([evi, dormant])
+        )
     return pd.DataFrame(list(fits.values()), index=list(fits), columns=list(HARMONIC_COLUMNS))
 
 
@@ -172,7 +196,7 @@ def summarise(composites: pd.DataFrame, first_year: int = FIRST_YEAR, last_year:
     in_used = valid.merge(used[["site_name", "year"]], on=["site_name", "year"])
     share = (in_used["pixel_count"] / in_used["all_pixels"]).groupby(in_used["site_name"]).mean()
     coverage = share.reindex(index, fill_value=0.0)
-    harmonics = _harmonics(in_used).reindex(index)
+    harmonics = _harmonics(in_used, _snow_composites(composites, valid, used)).reindex(index)
     fitted = {column: harmonics[column] for column in HARMONIC_COLUMNS}
     return ProductResult(
         product="evi",

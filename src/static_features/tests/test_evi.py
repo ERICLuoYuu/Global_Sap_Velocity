@@ -262,3 +262,50 @@ def test_no_counted_year_leaves_the_harmonic_empty():
         assert np.isnan(result.values.loc["B", column])
         assert result.status.loc["B", column] == NO_DATA
     validate(result, ["A", "B"])
+
+
+def _snowy_rows(site, years, snow_evi=0.05, seed=1):
+    """Clear only from day 153 to 281, as at a boreal stand; snow covers every land pixel the rest of the year.
+
+    Greenness is a summer bump over a flat winter, not a cosine, and swings 0.05 inside the clear window. Fitted on
+    that window alone, five terms extrapolate across winter and the amplitude comes out several times too large.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    for year in years:
+        for date in pd.date_range(f"{year}-01-01", periods=23, freq="16D"):
+            centre, day = date.dayofyear + 8, date.strftime("%Y-%m-%d")
+            if 153 <= centre <= 281:
+                value = 0.30 + 0.05 * np.exp(-(((centre - 217) / 40.0) ** 2)) + rng.normal(scale=0.01)
+                rows.append((site, day, 0, value, LAND, LAND, ALL))
+            else:
+                rows.append((site, day, 2, snow_evi, LAND, LAND, ALL))
+    return rows
+
+
+def _peak_day(values):
+    return float(np.degrees(np.arctan2(values["evi_peak_sin_w"], values["evi_peak_cos_w"])) % 360 / 360 * 365.25)
+
+
+def test_snow_composites_hold_the_fit_to_the_season_seen():
+    values = summarise(_composites(_snowy_rows("A", range(2010, 2015)))).values.loc["A"]
+
+    assert 0.0 < values["evi_season_amplitude"] <= 0.05
+    assert 153 <= _peak_day(values) <= 281
+
+
+def test_snow_composites_enter_at_the_dormant_level_not_their_own_reading():
+    low = summarise(_composites(_snowy_rows("A", range(2010, 2015), snow_evi=0.05))).values.loc["A"]
+    high = summarise(_composites(_snowy_rows("A", range(2010, 2015), snow_evi=0.9))).values.loc["A"]
+
+    for column in HARMONIC_COLUMNS:
+        assert low[column] == pytest.approx(high[column])
+
+
+def test_snow_leaves_the_mean_and_amplitude_of_the_snow_free_season_alone():
+    rows = _snowy_rows("A", range(2010, 2015))
+    clear_only = [row for row in rows if row[2] == 0]
+    with_snow, without = summarise(_composites(rows)).values.loc["A"], summarise(_composites(clear_only)).values.loc["A"]
+
+    assert with_snow["evi_mean"] == pytest.approx(without["evi_mean"])
+    assert with_snow["evi_amplitude"] == pytest.approx(without["evi_amplitude"])

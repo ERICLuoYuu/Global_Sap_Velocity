@@ -221,5 +221,5 @@ def test_main_stops_when_a_named_site_empties_another_column(tmp_path, monkeypat
 
 
 def test_no_site_may_lose_a_static_value_now_that_soil_gaps_are_filled():
-    # CHN_YUN_YUN was named while its cell had no soc or bdod; it now borrows them from a cell 0.18 km away.
+    # CHN_YUN_YUN was named while its cell had no soc or bdod; it now borrows them from the cell 0.56 km away.
     assert merge_parity.EXPECTED_EMPTIED == {}

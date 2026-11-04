@@ -16,6 +16,11 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 from path_config import PathConfig  # noqa: E402
 from src.Analyzers.mannual_removal_processor import RemovalLogProcessor  # noqa: E402
+from src.Analyzers.sampling_cadence import (  # noqa: E402
+    column_step_minutes,
+    sample_weights,
+    valid_sample_weights,
+)
 from src.clock_offsets.apply import correct_loaded_frames  # noqa: E402
 from src.clock_offsets.provenance import write_stamp  # noqa: E402
 from src.clock_offsets.registry import REGISTRY as CLOCK_REGISTRY  # noqa: E402
@@ -1377,6 +1382,12 @@ class SapFlowAnalyzer:
         Remove entire days where more than a threshold of daytime data is missing.
         Checks each column INDEPENDENTLY - a day can be removed for one column but kept for another.
 
+        Each column is judged against the step it logs at, not the step of the file's grid. Both sides of the ratio
+        are counted in samples at that step (sampling_cadence): a daytime row counts as its share of one sample, and so
+        does a valid value, so a tree logging hourly on a 10-minute grid expects one sample an hour, and values logged
+        finer than the step share one. On a grid at the column's own step every row and value weighs 1, and the rule
+        is the old row count.
+
         Args:
             df: DataFrame with datetime index
             day_mask: Boolean Series (True = daytime)
@@ -1433,6 +1444,11 @@ class SapFlowAnalyzer:
 
             days_removed = 0
             points_removed = 0
+            step = column_step_minutes(df_result.index, df_result[col])
+            weights = sample_weights(df_result.index, step)
+            valid_weights = valid_sample_weights(df_result.index, df_result[col], step)
+            if (weights != 1.0).any():
+                print(f"  {col}: logs every {step:g} min, so a daytime row counts as its share of one sample")
 
             # Group by date for this column
             for date in dates.unique():
@@ -1453,6 +1469,9 @@ class SapFlowAnalyzer:
                             "valid_daytime_points": 0,
                             "completeness": np.nan,
                             "removed": False,
+                            "column_step_minutes": step,
+                            "expected_samples": 0.0,
+                            "valid_samples": 0.0,
                         }
                     )
                     continue
@@ -1461,8 +1480,15 @@ class SapFlowAnalyzer:
                 daytime_indices = day_daylight[day_daylight].index
                 valid_daytime_count = day_data.loc[daytime_indices, col].notna().sum()
 
-                # Calculate completeness for this column on this day
-                completeness = valid_daytime_count / expected_daytime_points
+                # Completeness against the samples the column's own step expects in this day's daylight
+                # Rounded to 9 decimals so sums of 1/6 or 1/3 do not land 1 ulp under an exact 50 %; on a regular
+                # grid both sums are whole numbers and the rounding changes nothing.
+                expected_samples = round(float(weights.loc[daytime_indices].sum()), 9)
+                valid_samples = round(float(valid_weights.loc[daytime_indices].sum()), 9)
+                if expected_samples > 0:
+                    completeness = min(1.0, valid_samples / expected_samples)
+                else:
+                    completeness = float(valid_samples > 0)
 
                 # Store stats
                 all_stats.append(
@@ -1473,6 +1499,9 @@ class SapFlowAnalyzer:
                         "valid_daytime_points": valid_daytime_count,
                         "completeness": completeness,
                         "removed": completeness < completeness_threshold,
+                        "column_step_minutes": step,
+                        "expected_samples": expected_samples,
+                        "valid_samples": valid_samples,
                     }
                 )
 

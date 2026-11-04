@@ -762,7 +762,7 @@ def test_parity_reports_a_lost_row(): ...
 
 - [ ] **Step 1: Run the whole test directory.** `T .` and `GSV_ROOT=$W sbatch --wait job_pytest_merge_contract.sh`. Expected: `### pytest exit: 0` and `RESULT: PASS (new + regression)`. If `pytest-cov` is in the venv, add `--cov=src/static_features` and report the number against the 80% target. Reader lines that run only live and in the real runs may hold it below that; say so if they do.
 
-- [ ] **Step 2: Reassemble and rerun every check** from the current commit. Expected: `reproduce` 226 of 226, `ranges` exit 0 or each exception listed, and provenance's `code_commit` equal to `HEAD`.
+- [ ] **Step 2: Reassemble and rerun every check** from the current commit. Expected: `reproduce` exit 0 with every difference named with a reason, `ranges` exit 0 or each exception listed, and provenance's `code_commit` equal to `HEAD`.
 
 - [ ] **Step 3: Whole-branch review** by a fresh reviewer on the most capable model (`superpowers:requesting-code-review`). Fix critical and high findings, then rerun Step 1.
 

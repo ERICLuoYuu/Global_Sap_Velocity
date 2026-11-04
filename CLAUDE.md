@@ -43,6 +43,38 @@ Output: `Sapflow_SAPFLUXNET_format_unitcon/sapwood/` + `env_icos/`
 
 ### Stage 2 — Feature Extraction (requires GEE auth)
 
+**Static site features come from `src/static_features`** (since 2026-11-03), not from the static
+extractors below. Each of 16 products is read on a 1 km grid, anything finer aggregated to 1 km first,
+and `assemble` joins them into `data/raw/extracted_data/static_1km/<scale>/`, the root the merge reads.
+It supersedes the static outputs of `extract_canopyheight.py`, `spatial_features_extractor.py`,
+`extract_soilgrid.py`, `extract_stand_age.py` and the Fan root-depth extractor, whose reader it reuses.
+On Palma, one SLURM job per product through `src/static_features/jobs/job_module.sh`, with the Earth
+Engine products (terrain, canopy, soil, tree_cover, phenology, evi) one at a time on `normal`; the
+others read files (worldclim, stand_age, fan, han, yang, lusk, liang, cci, gami, lesiv):
+
+```bash
+python -m src.static_features.run --product <name> --scale sapwood_combined   # --fetch-only: download and verify inputs, write no part
+python -m src.static_features.assemble --scale sapwood_combined                # refuses a missing or stale part
+python -m src.static_features.checks.reproduce --scale sapwood_combined        # exit 1 on a change from the old files not named in EXPECTED_DIFFERENCES
+python -m src.static_features.checks.ranges --scale sapwood_combined           # also checks.compare and checks.agreement
+python -m src.static_features.checks.merge_parity --scale sapwood_combined --before <tree> --after <tree>
+```
+
+`static_quality.csv` gives every site and column a status: `ok`, `neighbour` (taken from a nearby
+cell) or `no_data`. Three sites are extracted at corrected coordinates because their published point
+is water (`COORDINATE_CORRECTIONS` in `src/static_features/sites.py`: CHE_DAV_SEE, GBR_DEV_CON,
+GBR_DEV_DRO); the merge still places their daily climate at the published point.
+
+Gaps are filled from the nearest cell or pixel holding a value within 25 km (`neighbours.py`; status
+`neighbour`, each borrowed value listed with its distance in `<product>_neighbours.csv`): Lesiv's
+dominant class, SoilGrids columns, and BGI stand age, which goes in its own column `stand_age_neighbour`
+that the merge reads only after the ground `st_age`. GAMI, Han, Liang and Yang, and the MCD12Q2 dates,
+are extracted but kept out of `new_static_features.csv` (too many sites lack them); seasonality reaches
+the merge as the EVI harmonic (`evi_season_amplitude`, `evi_season_r2`, `evi_peak_cos_w`,
+`evi_peak_sin_w`) plus `phen_cycle_share` and `phen_num_cycles`.
+
+The remaining extractors still supply site info, ERA5, PFT and LAI:
+
 ```bash
 python src/Extractors/extract_siteinfo.py
 python src/Extractors/extract_climatedata_gee.py
@@ -78,6 +110,12 @@ python notebooks/merge_gap_filled_hourly_orginal.py --feature-contract site
 ```
 
 Output: `outputs/processed_data/sapwood/merged/merged_data.csv` + `hourly/` + `daily/`
+
+**The merge needs the static root built first.** It always reads `static_1km/<scale>/` (there is no
+flag) and, before reading any table, stops if a site of the sap set is missing from or repeated in one
+of the five static tables, or if `provenance.json` was built for a different site list. A scale other
+than `sapwood_combined` therefore cannot merge until Stage 2 has built its root. When the merge writes
+`MANIFEST.json`, it records the root's site-list hash and commit under `static_provenance`.
 
 #### Feature contract (`--feature-contract`, default `servable`)
 
@@ -169,6 +207,7 @@ python src/make_prediction/sap_velocity_by_climatezone_forest.py
 | `src/hyperparameter_optimization/hyper_tuner.py` | `BaseOptimizer`                              | Abstract base → `GridSearchOptimizer` / `RandomSearchOptimizer`                                                                                                                                             |
 | `src/clock_offsets/`                             | `REGISTRY` / `correct_clock` / `gate`        | Reviewed site clock offsets, applied once at the Stage-3 **load boundary** in both analyzers and nowhere else. `python -m src.clock_offsets.gate` re-measures every site from its own radiation against two independent estimators and fails on a correction that did not land                                            |
 | `src/env_daily/`                                 | `env_daily_statistics` / `check_support`     | Daily env statistics from env's **own** hours under a support rule (continuous columns ≥ 20 h; radiation dark-filled and clearness-scaled, valid at ≥ 0.8 TOA coverage), `ext_rad` from geometry. The merge calls it; `check_support` raises before every daily write; `python -m src.env_daily.gate` refuses an old tree |
+| `src/static_features/`                           | `run_product` / `assemble` / `checks`        | Static site features at 1 km for the merge: 16 products, one part each with a per-site status and the commit that built it; `assemble` writes `static_1km/<scale>/` and its `provenance.json`; `checks.reproduce` and `checks.merge_parity` exit 1 on any change not named with a reason |
 | `src/make_prediction/config.py`                  | `ModelConfig`                                | Prediction window, lat/lon bounds, Dask memory limit                                                                                                                                                        |
 | `path_config.py`                                 | —                                            | All data and output paths                                                                                                                                                                                   |
 | `src/cross_validation/`                          | `TimesSeriesSplit`, `GroupedTimeSeriesSplit` | Prevent temporal / site data leakage                                                                                                                                                                        |
@@ -212,7 +251,8 @@ WorldClim and Köppen are auto-downloaded at runtime by `spatial_features_extrac
 - **`ext_rad` is always recomputed from geometry** and never read from the archive column, which is displaced 2–11 h at 15 sites (`fill_ext_rad` never overwrote a shipped value). Training and serving therefore share one definition, `src/serving/era5_daily.ext_rad_daily`
 - **Site clocks are corrected at load**, from the reviewed registry in `src/clock_offsets/registry.py`: 7 `applied` entries (ISR_YAT_YAT in two periods, USA_HUY_LIN_NON, USA_ORN_ST2_AMB env and sap, FIN_PET env, SWE_SVA_MIX_NON sap) and 17 `acknowledged` ones that are measured and deliberately left alone. Positive offset = the label is LATE; true time = label − offset. Nothing downstream of Stage 3 knows about offsets
 - ERA5 VPD (derived from dewpoint) can differ from site-measured VPD — see `notebooks/VPD_mismatch_analysis.py`
-- `extract_canopyheight.py` must run before `spatial_features_extractor.py` (hard dependency)
+- `extract_canopyheight.py` must run before `spatial_features_extractor.py` (hard dependency; old extractors only, the merge no longer reads their static output)
+- **Static features differ between training and serving.** Training reads the 1 km values from `src/static_features`; `src/serving/statics.py` still serves its own elevation, canopy height and soil. Its `weighted_soil_properties` changed with the merge on 2026-11-03 (a soil property with no value at any depth is now empty, not 0), but no built serving store has been rebuilt since
 - `everything-claude-code/` is unrelated Claude Code plugin infrastructure — ignore for science pipeline work
 - ERA5 intermediate cache at `D:/Temp/era5land_extracted/` can be deleted after prediction
 - **`SapFlowAnalyzer.run_analysis_in_batches` does not discover files.** Its body replaces the glob with a hardcoded one-element list (`sites_with_negatives = ["ESP_MAJ_NOR_LM1"]`), so the Stage-3 sap command above processes **one site, not the corpus** — long-standing, since commit `4f09776`. `EnvironmentalAnalyzer`'s equivalent globs correctly. To process a real set, pass the files explicitly to `_load_sapflow_data(files_to_load=...)`

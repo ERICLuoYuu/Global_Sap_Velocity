@@ -269,8 +269,10 @@ Van Tiel species maps (13.5 GB, 849,276 files) are **not** downloaded. Liang rep
 
 ## Checks before the module counts as done
 
-1. **Unchanged products reproduce:** WorldClim, Koppen, BGI, and Fan match the current CSVs at 226 of 226 sites, where
-   a match is the same value or empty in both. BGI TC000/010/020/030 were empty at 15/33/36/37 sites in the August
+1. **Unchanged products reproduce:** WorldClim, Koppen, BGI, and Fan match the current CSVs at every site, where a
+   match is the same value or empty in both, except where `checks/reproduce.py` names the site, the outcome and the
+   reason (the three corrected coordinates, CHN_YUN_YUN's WorldClim neighbour, and since 2026-11-04 the two French
+   Guiana stands, for Fan only). BGI TC000/010/020/030 were empty at 15/33/36/37 sites in the August
    audit, and today's code cannot say why, because masked pixels and swallowed exceptions both return `None`. A site
    that was empty and now has a value is a swallowed failure, not a pass: it stops the check, is listed by name, and
    goes to the owner, because it changes the merge's `st_age` fallback.
@@ -290,6 +292,29 @@ Van Tiel species maps (13.5 GB, 849,276 files) are **not** downloaded. Liang rep
    sources are kept whatever it shows. Some disagreement is expected, because Lusk averages all vegetation while Yang and
    Han describe trees, most of all at SAV and WSA sites.
 
+## Owner decisions, 2026-11-04
+
+Taken after the module was built and reviewed, and implemented in `bbc3ff7`, `0d8cd75`, `4fe6a19` and `10e1220`:
+
+- **Phenology: seasonality, not MCD12Q2 dates.** MCD12Q2 keeps a cycle only when green-up and green-down each exceed
+  0.1 EVI2 and 35%, so its dates were empty at the 20 least seasonal stands, and the trainer drops every row with an
+  empty feature. The merge now takes, of MCD12Q2, only `phen_cycle_share` and `phen_num_cycles`, and gains the annual
+  harmonic of the EVI composites: `evi_season_amplitude`, `evi_season_r2`, and `evi_peak_cos_w`, `evi_peak_sin_w`,
+  the amplitude times the cosine and sine of the annual peak, which fade to (0, 0) with the season. Composites
+  under snow (class 2 on at least half the land pixels, in a counted year) enter the fit at the site's 10th-percentile
+  EVI, so a winter with no valid composite reads as dormant, not as an extrapolated peak (`10e1220`, my call). The
+  phenology part is still built in full.
+- **GAMI, Han, Liang and Yang stay out of the merge**, too many sites lack them. Their parts, their status in
+  `static_quality.csv`, and the agreement report (Lusk against Han and Yang) remain.
+- **The other gaps are filled by neighbour search**: the nearest node holding a value within 25 km
+  (`src/static_features/neighbours.py`), the farthest the hold-out tests measured. Each fill has status `neighbour` and
+  is listed with its distance in `<product>_neighbours.csv`. Lesiv borrows only `fm_dominant`, its shares staying the
+  cell's own; soil borrows column by column; BGI's borrowed age goes in its own column, `stand_age_neighbour`, which the
+  merge reads after the ground `st_age`, so a pixel kilometres away never displaces an age measured at the stand
+  (my call). This reverses the earlier "BGI with no search".
+- **Fan reads the continent file that holds the site.** The reader tries overlapping boxes in order and reads the first
+  whose file has a valid pixel within reach; the French Guiana stands now read SAMERICA, not the empty NAMERICA file.
+
 ## Known risks
 
 - **Han archive.** A real RAR file, with no unrar tool found on Palma. Windows `tar` reads it, and a `.tgz` copy with
@@ -305,13 +330,14 @@ Van Tiel species maps (13.5 GB, 849,276 files) are **not** downloaded. Liang rep
   this out; the extraction does not try to.
 - **Landscape versus stand.** Plots sit in denser forest than their surroundings, so 1 km values often read low.
 - **Gaps carry information.** Phenology, Han, Yang, and Liang are all empty most often at dry or evergreen stands, so a
-  model can learn from the gap itself rather than the value. This should be checked when reading feature importance.
-- **Wrong coordinates get plausible values.** `GBR_DEV_CON` and `GBR_DEV_DRO` plot in the Forth estuary. Land-only means
-  now give them values from the surrounding shore, which look normal but still rest on a wrong coordinate. The coverage
-  report lists every site whose land share is below 50%, so these stay visible: `GBR_DEV` at 37%, `CHE_DAV_SEE` at 30%.
-- **The fixed grid can split a stand from its surroundings.** `CHE_DAV_SEE` and `CHE_DAV` are the same forest, 150 m apart,
-  but fall in different cells: one 70% Lake Davos, the other 5%. Both of `CHE_DAV_SEE`'s 463 m pixels read as water, so it
-  has no phenology and `CHE_DAV` does.
+  model can learn from the gap itself rather than the value. Since 2026-11-04 none of them reaches the merge with
+  gaps; the borrowed values that fill other gaps are landscape values from up to 25 km away, marked `neighbour`.
+- **Wrong coordinates get plausible values.** `GBR_DEV_CON` and `GBR_DEV_DRO` plotted in the Forth estuary, and land-only
+  means gave them values from the shore. They are now extracted at corrected coordinates (`COORDINATE_CORRECTIONS`,
+  owner 2026-11-02), as is `CHE_DAV_SEE`; the coverage report still lists every site whose land share is below 50%.
+- **The fixed grid can split a stand from its surroundings.** `CHE_DAV_SEE` and `CHE_DAV`, the same forest 150 m apart,
+  fell in different cells, one 70% Lake Davos. `CHE_DAV_SEE` now takes `CHE_DAV`'s coordinates, so the two share every
+  static value, and they can land in different folds.
 - **Later serving cost.** Canopy height per cell is roughly 16x the pixels of the current 250 m disc. Fine for 226
   sites, but must be costed before running 565k grid cells.
 

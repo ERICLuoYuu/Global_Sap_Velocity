@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.static_features.earth_engine import ShortReply
-from src.static_features.products.evi import composites_from_reply, summarise
+from src.static_features.products.evi import HARMONIC_COLUMNS, composites_from_reply, seasonal_fit, summarise
 from src.static_features.results import NO_DATA, OK, validate
 
 COLUMNS = ["site_name", "date", "qa_class", "mean_evi", "pixel_count", "land_pixels", "all_pixels"]
@@ -189,3 +189,76 @@ def test_composites_reply_with_a_class_without_a_mean_is_short():
     reply = {"features": [_feature("A", "2010-01-01", [{"qa": 0, "count": 6}])]}
     with pytest.raises(ShortReply, match="mean"):
         composites_from_reply(reply, ["A"], ["2010-01-01"], _cell_pixels())
+
+
+W = 2 * np.pi / 365.25
+
+
+def _seasonal_rows(site, years, level, amplitude, peak_day):
+    """23 composites a year, dated by their first day as MOD13Q1 is, following one annual cosine."""
+    rows = []
+    for year in years:
+        for date in pd.date_range(f"{year}-01-01", periods=23, freq="16D"):
+            centre = date.dayofyear + 8
+            rows.append((site, date.strftime("%Y-%m-%d"), 0, level + amplitude * np.cos(W * (centre - peak_day)), 16, LAND, ALL))
+    return rows
+
+
+def test_the_harmonic_columns():
+    assert HARMONIC_COLUMNS == ("evi_season_amplitude", "evi_season_r2", "evi_peak_cos_w", "evi_peak_sin_w")
+
+
+def test_seasonal_fit_recovers_a_known_cycle():
+    result = summarise(_composites(_seasonal_rows("A", [2010, 2011, 2012], 0.4, 0.1, 200.0)))
+    values = result.values.loc["A"]
+
+    assert values["evi_season_amplitude"] == pytest.approx(0.1, abs=1e-9)
+    assert values["evi_season_r2"] == pytest.approx(1.0, abs=1e-9)
+    assert values["evi_peak_cos_w"] == pytest.approx(0.1 * np.cos(W * 200.0), abs=1e-9)
+    assert values["evi_peak_sin_w"] == pytest.approx(0.1 * np.sin(W * 200.0), abs=1e-9)
+    for column in HARMONIC_COLUMNS:
+        assert result.status.loc["A", column] == OK
+        assert result.coverage.loc["A", column] == result.coverage.loc["A", "evi_mean"]
+    validate(result, ["A"])
+
+
+def test_a_flat_series_has_no_season():
+    fit = seasonal_fit(np.arange(1.0, 365.0, 16.0), np.full(23, 0.3))
+
+    assert fit["evi_season_amplitude"] == pytest.approx(0.0, abs=1e-12)
+    assert fit["evi_season_r2"] == 0.0
+    assert fit["evi_peak_cos_w"] == pytest.approx(0.0, abs=1e-12)
+    assert fit["evi_peak_sin_w"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_the_peak_vector_shrinks_with_the_season():
+    rows = _seasonal_rows("A", [2010], 0.4, 0.2, 100.0) + _seasonal_rows("B", [2010], 0.4, 0.02, 100.0)
+    values = summarise(_composites(rows)).values
+
+    assert values.loc["A", "evi_peak_cos_w"] == pytest.approx(10 * values.loc["B", "evi_peak_cos_w"])
+    assert values.loc["A", "evi_peak_sin_w"] == pytest.approx(10 * values.loc["B", "evi_peak_sin_w"])
+
+
+def test_noise_lowers_r2_but_not_the_amplitude_much():
+    rows = _seasonal_rows("A", range(2001, 2021), 0.4, 0.1, 200.0)
+    noise = np.random.default_rng(42).normal(scale=0.05, size=len(rows))
+    rows = [(*row[:3], row[3] + noise[position], *row[4:]) for position, row in enumerate(rows)]
+    values = summarise(_composites(rows)).values.loc["A"]
+
+    assert values["evi_season_amplitude"] == pytest.approx(0.1, abs=0.01)
+    assert 0.5 < values["evi_season_r2"] < 0.8
+
+
+def test_only_the_composites_of_counted_years_enter_the_fit():
+    sparse = _rows("A", 2011, [5.0] * 5)  # five composites: the year does not count, and must not bend the fit
+    result = summarise(_composites(_seasonal_rows("A", [2010], 0.4, 0.1, 200.0) + sparse))
+    assert result.values.loc["A", "evi_season_amplitude"] == pytest.approx(0.1, abs=1e-9)
+
+
+def test_no_counted_year_leaves_the_harmonic_empty():
+    result = summarise(_composites(_seasonal_rows("A", [2010], 0.4, 0.1, 200.0) + _rows("B", 2010, [0.5] * 5)))
+
+    for column in HARMONIC_COLUMNS:
+        assert np.isnan(result.values.loc["B", column])
+        assert result.status.loc["B", column] == NO_DATA
+    validate(result, ["A", "B"])

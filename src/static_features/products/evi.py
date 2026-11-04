@@ -1,4 +1,5 @@
-"""MOD13Q1 EVI summaries over 2001-2020: mean and p90 - p10 of each year's clear composites, averaged across years."""
+"""MOD13Q1 EVI summaries over 2001-2020: mean and p90 - p10 of each year's clear composites, averaged across years,
+and the annual harmonic of the whole series, which says how seasonal the stand is and when it peaks."""
 
 from __future__ import annotations
 
@@ -32,6 +33,9 @@ COUNTED_CLASSES = (0, 1)  # good and marginal; 2 is snow or ice and 3 is cloud
 MIN_COMPOSITES_PER_YEAR = 6
 COMPOSITE_COLUMNS = ["site_name", "date", "qa_class", "mean_evi", "pixel_count", "land_pixels", "all_pixels"]
 SUMMARIES = {"evi_mean": "year_mean", "evi_amplitude": "year_amplitude"}
+HARMONIC_COLUMNS = ("evi_season_amplitude", "evi_season_r2", "evi_peak_cos_w", "evi_peak_sin_w")
+DAYS_PER_YEAR = 365.25
+COMPOSITE_CENTRE_DAYS = 8  # a 16-day composite is dated by its first day
 PROVENANCE = {
     "source": ASSET,
     "version": "MOD13Q1.061",
@@ -41,7 +45,13 @@ PROVENANCE = {
         "Unweighted land mean per composite and SummaryQA class on the product's own grid. A composite is valid with "
         "at least half its land pixels in classes 0 and 1, and its value is their pixel-weighted mean. A year counts "
         f"with at least {MIN_COMPOSITES_PER_YEAR} valid composites. Mean and p90 - p10 are taken within each year, "
-        "then averaged across years, so boreal values describe the snow-free season."
+        "then averaged across years, so boreal values describe the snow-free season. The harmonic is fitted by least "
+        "squares to the same composites, c + a cos wt + b sin wt + a2 cos 2wt + b2 sin 2wt with w = 2 pi / 365.25 and t "
+        "the composite's middle day of year: evi_season_amplitude is hypot(a, b), evi_season_r2 the share of variance "
+        "both harmonics explain, and evi_peak_cos_w, evi_peak_sin_w are (a, b), the amplitude times the cosine and "
+        "sine of the annual peak, so they fade to (0, 0) with the season. They replace the MCD12Q2 dates in the merge "
+        "(owner, 2026-11-04): MCD12Q2 dates no cycle below an EVI2 amplitude of 0.1, so its dates were missing "
+        "exactly where a stand is least seasonal."
     ),
 }
 
@@ -111,6 +121,36 @@ def _used_years(valid: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["site_name", "year", "year_mean", "year_amplitude"])
 
 
+def seasonal_fit(day: np.ndarray, evi: np.ndarray) -> dict[str, float]:
+    """The annual and semi-annual harmonics of one series by least squares; see PROVENANCE.
+
+    A flat series has R2 0. Its sums of squares are rounding noise, so it is told by max == min, not by them.
+    """
+    angle = 2 * np.pi * np.asarray(day, dtype=float) / DAYS_PER_YEAR
+    evi = np.asarray(evi, dtype=float)
+    design = np.column_stack(
+        [np.ones_like(angle), np.cos(angle), np.sin(angle), np.cos(2 * angle), np.sin(2 * angle)]
+    )
+    coefficients, *_ = np.linalg.lstsq(design, evi, rcond=None)
+    total = float(np.sum((evi - evi.mean()) ** 2))
+    residual = float(np.sum((evi - design @ coefficients) ** 2))
+    return {
+        "evi_season_amplitude": float(np.hypot(coefficients[1], coefficients[2])),
+        "evi_season_r2": 0.0 if np.ptp(evi) == 0.0 else min(max(1.0 - residual / total, 0.0), 1.0),
+        "evi_peak_cos_w": float(coefficients[1]),
+        "evi_peak_sin_w": float(coefficients[2]),
+    }
+
+
+def _harmonics(in_used: pd.DataFrame) -> pd.DataFrame:
+    """One row per site with a counted year, fitted over the composites of its counted years."""
+    fits = {}
+    for site, group in in_used.groupby("site_name"):
+        day = pd.to_datetime(group["date"]).dt.dayofyear.to_numpy(dtype=float) + COMPOSITE_CENTRE_DAYS
+        fits[site] = seasonal_fit(day, group["mean_evi"].to_numpy(dtype=float))
+    return pd.DataFrame(list(fits.values()), index=list(fits), columns=list(HARMONIC_COLUMNS))
+
+
 def _by_year(index: pd.Index, used: pd.DataFrame, first_year: int, last_year: int) -> pd.DataFrame:
     every_year = pd.MultiIndex.from_product([index, range(first_year, last_year + 1)], names=["site_name", "year"])
     per_year = used.set_index(["site_name", "year"]).reindex(every_year)
@@ -132,6 +172,8 @@ def summarise(composites: pd.DataFrame, first_year: int = FIRST_YEAR, last_year:
     in_used = valid.merge(used[["site_name", "year"]], on=["site_name", "year"])
     share = (in_used["pixel_count"] / in_used["all_pixels"]).groupby(in_used["site_name"]).mean()
     coverage = share.reindex(index, fill_value=0.0)
+    harmonics = _harmonics(in_used).reindex(index)
+    fitted = {column: harmonics[column] for column in HARMONIC_COLUMNS}
     return ProductResult(
         product="evi",
         values=pd.DataFrame(
@@ -139,6 +181,7 @@ def summarise(composites: pd.DataFrame, first_year: int = FIRST_YEAR, last_year:
                 "evi_mean": by_site["year_mean"].mean().reindex(index),
                 "evi_amplitude": by_site["year_amplitude"].mean().reindex(index),
                 "evi_years_used": years_used,
+                **fitted,
             }
         ),
         status=pd.DataFrame(
@@ -146,10 +189,13 @@ def summarise(composites: pd.DataFrame, first_year: int = FIRST_YEAR, last_year:
                 "evi_mean": np.where(has_year, OK, NO_DATA),
                 "evi_amplitude": np.where(has_year, OK, NO_DATA),
                 "evi_years_used": OK,
+                **{column: np.where(has_year, OK, NO_DATA) for column in HARMONIC_COLUMNS},
             },
             index=index,
         ),
-        coverage=pd.DataFrame({"evi_mean": coverage, "evi_amplitude": coverage}),
+        coverage=pd.DataFrame(
+            {"evi_mean": coverage, "evi_amplitude": coverage, **dict.fromkeys(HARMONIC_COLUMNS, coverage)}
+        ),
         by_year=_by_year(index, used, first_year, last_year),
         extras={"evi_composites": composites},
         provenance=PROVENANCE,

@@ -27,6 +27,7 @@ from src.Extractors.extract_root_depth_fan2017 import (
     VARIABLE_SCHEMA,
     RootDepthResult,
     _nearest_valid_pixel_indices,
+    candidate_continents,
     extract_root_depth_for_sites,
     fetch_all_variables_at_point,
     opendap_url,
@@ -623,3 +624,54 @@ def test_de_hai_live_opendap_fetch():
     assert 0.3 <= result.values["root_depth"] <= 20.0
     assert result.values["deep_drainage"] is not None
     assert result.values["gw_residence_time"] is not None
+
+
+# ============================================================================
+# Overlapping continent boxes
+# ============================================================================
+
+GUIANA = (5.28, -52.9)  # GUF_GUY_GUY: inside both the NAMERICA and the SAMERICA box
+
+
+def _opener_by_continent(masked):
+    """Files around French Guiana; those of the continents in ``masked`` hold no valid pixel there."""
+    every_pixel = tuple((i, j) for i in range(30) for j in range(30))
+    opened = []
+
+    def _opener(continent):
+        opened.append(continent)
+        holes = every_pixel if continent in masked else ()
+        return _synthetic_continent_datasets(mask_holes=holes, lat_bounds=(4.0, 7.0), lon_bounds=(-54.0, -51.0))
+
+    return _opener, opened
+
+
+@pytest.mark.unit
+class TestOverlappingBoxes:
+    def test_french_guiana_lies_in_two_boxes(self):
+        assert candidate_continents(*GUIANA) == ("NAMERICA", "SAMERICA")
+        assert pick_continent(*GUIANA) == "NAMERICA"
+
+    def test_the_next_box_is_read_when_the_first_has_no_valid_pixel(self):
+        opener, opened = _opener_by_continent({"NAMERICA"})
+        result = fetch_all_variables_at_point(*GUIANA, "GUF", opener=opener)
+
+        assert result.continent == "SAMERICA"
+        assert result.fallback_radius_px == 0
+        assert result.values["root_depth"] is not None
+        assert opened == ["NAMERICA", "SAMERICA"]
+
+    def test_a_first_box_with_a_valid_pixel_is_kept_and_the_next_never_opened(self):
+        opener, opened = _opener_by_continent(set())
+        result = fetch_all_variables_at_point(*GUIANA, "GUF", opener=opener)
+
+        assert result.continent == "NAMERICA"
+        assert opened == ["NAMERICA"]
+
+    def test_no_valid_pixel_in_any_box_reports_the_first_box_and_no_values(self):
+        opener, _ = _opener_by_continent({"NAMERICA", "SAMERICA"})
+        result = fetch_all_variables_at_point(*GUIANA, "GUF", opener=opener)
+
+        assert result.continent == "NAMERICA"
+        assert result.fallback_radius_px == -1
+        assert all(value is None for value in result.values.values())

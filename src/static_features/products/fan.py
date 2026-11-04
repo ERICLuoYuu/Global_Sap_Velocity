@@ -26,7 +26,11 @@ PROVENANCE = {
     "version": "Fan et al. 2017, PNAS, 30 arc-seconds by continent",
     "checksum": None,
     "time_window": None,
-    "method": "Native pixel with the reader's own mask-aware search over 3 pixels. Fallback 0 is ok, above 0 neighbour, -1 no_data.",
+    "method": (
+        "Native pixel with the reader's own mask-aware search over 3 pixels, in the first continent file whose box "
+        "holds the site and whose mask has a valid pixel within reach: boxes overlap, and French Guiana lies in "
+        "NAMERICA's, whose file is empty there. Fallback 0 is ok, above 0 neighbour, -1 no_data."
+    ),
 }
 
 

@@ -54,7 +54,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -167,16 +167,21 @@ class RootDepthResult:
 # ---------------------------------------------------------------------------
 
 
+def candidate_continents(lat: float, lon: float) -> tuple[Continent, ...]:
+    """Every continent file whose bounding box contains ``(lat, lon)``, in ``CONTINENT_BBOXES`` order."""
+    return tuple(bbox.name for bbox in CONTINENT_BBOXES if bbox.contains(lat, lon))
+
+
 def pick_continent(lat: float, lon: float) -> Continent | None:
-    """Return the continent file whose bounding box contains ``(lat, lon)``.
+    """Return the first continent file whose bounding box contains ``(lat, lon)``.
 
     Overlapping bounding boxes resolve to the earliest entry in
     ``CONTINENT_BBOXES``. Returns ``None`` for mid-ocean / out-of-domain sites.
+    ``fetch_all_variables_at_point`` goes on to the next box when this one's
+    file holds no valid pixel near the site.
     """
-    for bbox in CONTINENT_BBOXES:
-        if bbox.contains(lat, lon):
-            return bbox.name
-    return None
+    candidates = candidate_continents(lat, lon)
+    return candidates[0] if candidates else None
 
 
 def opendap_url(continent: Continent, file_kind: FileKind) -> str:
@@ -259,6 +264,45 @@ def _nearest_valid_pixel_indices(
 OpenerFn = Callable[[Continent], dict[FileKind, xr.Dataset]]
 
 
+class _Located(NamedTuple):
+    """One continent file's datasets, and the pixel its mask-aware search chose."""
+
+    datasets: dict
+    lat_arr: np.ndarray
+    lon_arr: np.ndarray
+    lat_idx: int
+    lon_idx: int
+    nearest_valid: bool
+    fallback_used: int
+
+
+def _locate(
+    continent: Continent,
+    lat: float,
+    lon: float,
+    max_radius_px: int,
+    dataset_cache: dict,
+    opener: OpenerFn,
+) -> _Located:
+    if continent not in dataset_cache:
+        logger.info("Opening Fan 2017 datasets for %s", continent)
+        dataset_cache[continent] = opener(continent)
+    datasets = dataset_cache[continent]
+
+    # All three files share the same lat/lon grid and mask. Use ETDEPTH as
+    # the reference for the nearest-valid-pixel search. Normalise the mask to
+    # int8 so `(mask == 1)` comparisons are robust against float-typed masks
+    # that some OPeNDAP servers or CF-decode paths deliver.
+    reference = datasets["ETDEPTH"]
+    mask_arr = (np.asarray(reference["mask"].values) != 0).astype(np.int8)
+    lat_arr = reference["lat"].values
+    lon_arr = reference["lon"].values
+    lat_idx, lon_idx, nearest_valid, fallback_used = _nearest_valid_pixel_indices(
+        mask_arr, lat_arr, lon_arr, lat, lon, max_radius_px
+    )
+    return _Located(datasets, lat_arr, lon_arr, lat_idx, lon_idx, nearest_valid, fallback_used)
+
+
 def fetch_all_variables_at_point(
     lat: float,
     lon: float,
@@ -279,8 +323,8 @@ def fetch_all_variables_at_point(
     the result carries ``continent = None``, ``fallback_radius_px = -1`` and
     all ``values`` set to ``None``.
     """
-    continent = pick_continent(lat, lon)
-    if continent is None:
+    candidates = candidate_continents(lat, lon)
+    if not candidates:
         logger.warning("Site %s at (%s, %s) outside all continent bboxes", site_name, lat, lon)
         return RootDepthResult(
             site_name=site_name,
@@ -296,24 +340,21 @@ def fetch_all_variables_at_point(
 
     if dataset_cache is None:
         dataset_cache = {}
-    if continent not in dataset_cache:
-        logger.info("Opening Fan 2017 datasets for %s", continent)
-        dataset_cache[continent] = opener(continent)
-    datasets = dataset_cache[continent]
-
-    # All three files share the same lat/lon grid and mask. Use ETDEPTH as
-    # the reference for the nearest-valid-pixel search. Normalise the mask to
-    # int8 so `(mask == 1)` comparisons are robust against float-typed masks
-    # that some OPeNDAP servers or CF-decode paths deliver.
-    reference = datasets["ETDEPTH"]
-    mask_raw = np.asarray(reference["mask"].values)
-    mask_arr = (mask_raw != 0).astype(np.int8)
-    lat_arr = reference["lat"].values
-    lon_arr = reference["lon"].values
-
-    lat_idx, lon_idx, nearest_valid, fallback_used = _nearest_valid_pixel_indices(
-        mask_arr, lat_arr, lon_arr, lat, lon, max_radius_px
-    )
+    # Boxes overlap, and a file holds no land beyond its own continent: French
+    # Guiana lies in the NAMERICA box, whose file is empty there. So the boxes
+    # are tried in order, and the first whose file has a valid pixel within
+    # max_radius_px is read; with none, the first box is reported, as before.
+    continent = candidates[0]
+    located = _locate(continent, lat, lon, max_radius_px, dataset_cache, opener)
+    for candidate in candidates[1:]:
+        if located.fallback_used != -1:
+            break
+        attempt = _locate(candidate, lat, lon, max_radius_px, dataset_cache, opener)
+        if attempt.fallback_used != -1:
+            continent, located = candidate, attempt
+    datasets, lat_arr, lon_arr = located.datasets, located.lat_arr, located.lon_arr
+    lat_idx, lon_idx = located.lat_idx, located.lon_idx
+    nearest_valid, fallback_used = located.nearest_valid, located.fallback_used
 
     values: dict[str, float | None] = {}
     if fallback_used == -1:

@@ -217,6 +217,22 @@ def filter_growing_season_by_sapflow(
     return filtered, stats
 
 
+def save_biome_collections(collection_dict: dict, output_dir: Path, file_suffix: str) -> None:
+    """One CSV per biome under ``output_dir/by_biome``, the biome's sites stacked in one file.
+
+    No all-biome aggregate (owner, 2026-11-04: not needed). The one this used to write next to the site files
+    appended each biome file under the first file's header, so values landed under the wrong column names, and every
+    reader already skipped it by name. One left in ``output_dir`` by an earlier run is deleted.
+    """
+    (output_dir / f"all_biomes_{file_suffix}.csv").unlink(missing_ok=True)
+    biome_dir = output_dir / "by_biome"
+    biome_dir.mkdir(exist_ok=True)
+    for biome, dfs in collection_dict.items():
+        if dfs:
+            safe_biome_name = "".join(c if c.isalnum() or c in [" ", "_", "-"] else "_" for c in biome).replace(" ", "_")
+            pd.concat(dfs).to_csv(biome_dir / f"{safe_biome_name}_{file_suffix}.csv", index=False)
+
+
 def calculate_daytime_mask(timestamps, lat, lon, elevation=0, elevation_threshold=0):
     """
     Calculate a boolean mask indicating daytime based on solar elevation.
@@ -1723,51 +1739,12 @@ def merge_sap_env_data_site(
         print(f"Feature contract: {len(contract_cell_rows)} site-layers -> {_sidecar.name}, {_cells_file.name}")
 
     # --- FINAL MERGING (HOURLY & DAILY) ---
-    def save_biome_collections(collection_dict, output_dir, file_suffix, skip_all_biomes_merge=False):
-        biome_dir = output_dir / "by_biome"
-        biome_dir.mkdir(exist_ok=True)
-
-        last_biome_df = None
-        for biome, dfs in collection_dict.items():
-            if dfs:
-                biome_df = pd.concat(dfs)
-                safe_biome_name = "".join(c if c.isalnum() or c in [" ", "_", "-"] else "_" for c in biome).replace(
-                    " ", "_"
-                )
-                biome_df.to_csv(biome_dir / f"{safe_biome_name}_{file_suffix}.csv", index=False)
-                last_biome_df = biome_df
-                # Free memory after saving each biome
-                del biome_df
-
-        # For hourly data, skip all_biomes merge to avoid memory issues
-        if skip_all_biomes_merge:
-            print(f"  Skipping all_biomes merge for {file_suffix} to save memory")
-            return last_biome_df
-
-        # For daily data, merge all biomes (smaller files)
-        all_biomes_path = output_dir / f"all_biomes_{file_suffix}.csv"
-        print(f"  Merging all biomes into {all_biomes_path.name}...")
-
-        # Write header from first file, then append others
-        biome_files = list(biome_dir.glob(f"*_{file_suffix}.csv"))
-        if biome_files:
-            first_file = True
-            for bf in biome_files:
-                chunk_iter = pd.read_csv(bf, chunksize=50000)
-                for chunk in chunk_iter:
-                    chunk.to_csv(all_biomes_path, mode="a" if not first_file else "w", header=first_file, index=False)
-                    first_file = False
-            return pd.read_csv(all_biomes_path, nrows=1)  # Return just header for reference
-        return None
-
     if biome_merged_hourly:
         print("Saving merged hourly data...")
-        save_biome_collections(biome_merged_hourly, hourly_out_dir, "merged_hourly", skip_all_biomes_merge=True)
+        save_biome_collections(biome_merged_hourly, hourly_out_dir, "merged_hourly")
 
         print("Saving merged daily data...")
-        daily_all = save_biome_collections(
-            biome_merged_daily, daily_out_dir, "merged_daily", skip_all_biomes_merge=False
-        )
+        save_biome_collections(biome_merged_daily, daily_out_dir, "merged_daily")
 
         # Save mapping
         pd.DataFrame({"site": list(site_biome_mapping.keys()), "biome": list(site_biome_mapping.values())}).to_csv(
@@ -1828,7 +1805,7 @@ def merge_sap_env_data_site(
             print(f"Manifest saved: {manifest_path}")
 
         print(f"Processing complete. Data saved to {output_base_dir}")
-        return daily_all
+        return output_base_dir
 
     raise ValueError("No data was successfully processed")
 
